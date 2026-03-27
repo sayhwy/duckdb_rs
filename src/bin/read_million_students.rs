@@ -6,7 +6,7 @@ use duckdb_rs::common::types::{DataChunk, LogicalType};
 use duckdb_rs::db::DB;
 
 /// 数据库文件路径
-const DB_PATH: &str = "million_students.db";
+const DB_PATH: &str = "million_students_txn.db";
 
 /// 从 DataChunk 的指定列读取 i32 值列表
 fn read_i32_column(chunk: &DataChunk, col: usize) -> Vec<i32> {
