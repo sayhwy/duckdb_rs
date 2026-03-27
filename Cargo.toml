@@ -1,0 +1,26 @@
+[package]
+name = "duckdb_rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+parking_lot     = "0.12"
+crossbeam-queue = "0.3"
+
+
+
+[[bin]]
+name = "test_duckdb_interop"
+path = "src/bin/test_duckdb_interop.rs"
+
+
+
+[[bin]]
+name = "million_student_test"
+path = "src/bin/million_student_test.rs"
+
+
+[[bin]]
+name = "read_million_students"
+path = "src/bin/read_million_students.rs"
+
