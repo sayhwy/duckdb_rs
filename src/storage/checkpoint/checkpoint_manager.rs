@@ -217,26 +217,11 @@ impl CheckpointManager {
             crate::storage::table::column_data::ColumnKindData::Validity => None,
         };
 
-        if let Some(validity_col) = validity_column {
-            let validity_pointers = self.write_column_segments(validity_col);
-
-            serializer.write_field_id(101);
-            // Write validity as nested PersistentColumnData
-            // Use simplified DataPointer format for validity (no complex statistics)
-            serializer.begin_list(100, validity_pointers.len());
-            for data_pointer in &validity_pointers {
-                serializer.list_write_object(|s| {
-                    write_data_pointer_simple(
-                        s,
-                        data_pointer.tuple_count,
-                        data_pointer.block_id,
-                        data_pointer.offset,
-                    );
-                });
-            }
-            serializer.end_list();
-            // Write terminator for validity PersistentColumnData
-            serializer.write_terminator();
+        if validity_column.is_some() {
+            // The in-memory validity-column implementation is not checkpoint-compatible yet.
+            // Persist it as DuckDB's COMPRESSION_EMPTY validity segment instead, which means
+            // "all rows valid" to the official reader.
+            write_empty_validity_column(&mut serializer, column.count());
         }
 
         // OnObjectEnd for parent PersistentColumnData
@@ -318,25 +303,36 @@ impl CheckpointManager {
     }
 }
 
-// Simplified DataPointer serialization for validity columns
-fn write_data_pointer_simple(
+fn write_empty_validity_column(serializer: &mut BinarySerializer<'_>, tuple_count: Idx) {
+    serializer.begin_object(101);
+    serializer.begin_list(100, 1);
+    serializer.list_write_object(|s| {
+        // DuckDB internal enum value: CompressionType::COMPRESSION_EMPTY = 14.
+        write_data_pointer_with_compression(s, tuple_count, -1, 0, 14, true, false);
+    });
+    serializer.end_list();
+    serializer.end_object();
+}
+
+fn write_data_pointer_with_compression(
     serializer: &mut BinarySerializer<'_>,
     tuple_count: Idx,
     block_id: i64,
     offset: u32,
+    compression_tag: u8,
+    has_no_null: bool,
+    has_null: bool,
 ) {
     serializer.write_varint(101, tuple_count);
     serializer.begin_object(102);
     serializer.write_signed_varint(100, block_id);
     serializer.write_varint(101, offset as u64);
     serializer.end_object();
-    serializer.write_u8(103, compression_tag(CompressionType::Uncompressed));
-    // Simplified statistics for validity - write minimal BaseStatistics without DistinctStatistics
+    serializer.write_u8(103, compression_tag);
     serializer.begin_object(104);
-    serializer.write_bool(100, false); // has_null
-    serializer.write_bool(101, true); // has_no_null (validity columns typically have no nulls)
-    serializer.write_varint(102, 0); // null_count
-    // Field 103: DistinctStatistics - write empty/default
+    serializer.write_bool(100, has_null);
+    serializer.write_bool(101, has_no_null);
+    serializer.write_varint(102, if has_null { tuple_count } else { 0 });
     serializer.begin_object(103);
     serializer.end_object();
     serializer.end_object();
