@@ -567,7 +567,6 @@ impl LocalTableStorage {
             let column_ids: Vec<u64> = (0..collection.types.len() as u64).collect();
             let mut scan_state = CollectionScanState::new();
             scan_state.set_column_ids(column_ids.clone());
-            eprintln!("[DEBUG append_to_indexes] local collection total_rows={}", collection.total_rows());
             collection.initialize_scan(&mut scan_state, &column_ids);
 
             let mut chunk = DataChunk::new();
@@ -595,10 +594,8 @@ impl LocalTableStorage {
                 base_row_groups.append(&mut chunk, append_state);
             }
 
-            eprintln!("[DEBUG append_to_indexes] scanned {} chunks, {} rows; appended total_append_count={}", chunks_scanned, rows_scanned, append_state.total_append_count);
             // C++: table.FinalizeAppend(transaction, append_state);
             base_row_groups.finalize_append(transaction, append_state);
-            eprintln!("[DEBUG append_to_indexes] after finalize: base total_rows={}", base_row_groups.total_rows());
         } else {
             // C++: error = AppendToIndexes(transaction, collection, index_list, table.GetTypes(), start_row);
             let mut start_row = append_state.current_row;
@@ -1169,13 +1166,11 @@ impl LocalStorage {
         //          entry.second.reset();
         //      }
         let table_storage = self.table_manager.move_entries();
-        eprintln!("[DEBUG commit] table_storage entries: {}", table_storage.len());
         for (table_id, storage_arc) in table_storage {
             let mut storage = storage_arc.lock();
             if let Some(table) = tables.get(&table_id) {
                 self.flush_one(&mut storage, table)?;
             } else {
-                eprintln!("[DEBUG commit] table_id={} not found in tables (len={})", table_id, tables.len());
                 // 找不到基表（可能已被 DROP）：回滚本地存储
                 storage.rollback();
             }
@@ -1446,12 +1441,9 @@ impl LocalStorage {
 
         let total_rows = storage.get_collection().total_rows();
 
-        eprintln!("[DEBUG flush_one] total_rows={}, deleted_rows={}", total_rows, storage.deleted_rows);
-
         // C++: if (storage.GetCollection().GetTotalRows() <= storage.deleted_rows)
         //      { storage.Rollback(); return; }
         if total_rows <= storage.deleted_rows {
-            eprintln!("[DEBUG flush_one] early return: total_rows <= deleted_rows");
             storage.rollback();
             return Ok(());
         }
@@ -1483,11 +1475,9 @@ impl LocalStorage {
         //     } else {
         //     // 逐行路径
         //     }
-        eprintln!("[DEBUG flush_one] row_start={}, total_rows={}, row_group_size={}, deleted={}", row_start, total_rows, row_group_size, storage.deleted_rows);
 
         if (row_start == 0 || total_rows >= row_group_size) && storage.deleted_rows == 0 {
             // ── 批量路径 ─────────────────────────────────────────────────────
-            eprintln!("[DEBUG flush_one] BULK PATH");
             // C++: storage.FlushBlocks();
             storage.flush_blocks();
 
@@ -1508,7 +1498,6 @@ impl LocalStorage {
             table.row_groups.merge_storage(local_collection)?;
         } else {
             // ── 逐行路径 ─────────────────────────────────────────────────────
-            eprintln!("[DEBUG flush_one] ROW-BY-ROW PATH");
             // C++: storage.Rollback();
             storage.rollback();
 

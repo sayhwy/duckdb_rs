@@ -648,8 +648,8 @@ impl DuckTransaction {
     /// ```
     pub fn write_to_wal(
         &mut self,
-        storage_manager: &dyn crate::storage::storage_manager::StorageManager,
-        tables: &std::collections::HashMap<u64, std::sync::Arc<crate::storage::data_table::DataTable>>,
+        storage_manager: &dyn StorageManager,
+        tables: &HashMap<u64, Arc<crate::storage::data_table::DataTable>>,
     ) -> Result<Box<dyn crate::storage::storage_manager::StorageCommitState>, String> {
         // C++: D_ASSERT(ShouldWriteToWAL(db));
         // 调用方应在调用前检查 should_write_to_wal()

@@ -893,15 +893,6 @@ impl DuckTransactionManager {
                 if let Some(ref mut state) = commit_state {
                     if let Err(e) = state.flush_commit() {
                         commit_error = Some(ErrorData::new(format!("FlushCommit failed: {:?}", e)));
-                    } else {
-                        // 更新 StorageManager 的 WAL 大小
-                        // C++: WriteAheadLog::Flush() 内部调用 storage_manager.SetWALSize(writer->GetFileSize())
-                        if let Some(wal_size) = state.get_wal_size() {
-                            let old_size = db.storage_manager.wal_size();
-                            db.storage_manager.set_wal_size(wal_size);
-                            println!("📊 [WAL SIZE] 事务 {} 提交后更新 WAL 大小: {} -> {} bytes",
-                                txn_id, old_size, wal_size);
-                        }
                     }
                 }
             }
@@ -974,10 +965,6 @@ impl DuckTransactionManager {
         if checkpoint_decision.can_checkpoint {
             debug_assert!(checkpoint_lock_key.is_some());
 
-            println!("🟢 [AUTO CHECKPOINT] 自动 checkpoint 被触发");
-            println!("   - 事务 ID: {}", txn_id);
-            println!("   - Checkpoint 类型: {:?}", checkpoint_decision.checkpoint_type);
-
             // 触发自动 checkpoint
             if let Some(storage_mgr) = db_ctx.storage_manager.as_ref() {
                 let checkpoint_options = crate::storage::storage_manager::CheckpointOptions {
@@ -996,12 +983,7 @@ impl DuckTransactionManager {
             }
 
             // checkpoint_lock_key 会在此处 drop，自动释放锁
-        } else {
-            println!("🔴 [AUTO CHECKPOINT] 不满足自动 checkpoint 条件");
-            println!("   - 事务 ID: {}", txn_id);
-            println!("   - 原因: {}", checkpoint_decision.reason);
         }
-
         commit_error.map(|e| e)
     }
 

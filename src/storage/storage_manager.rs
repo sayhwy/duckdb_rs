@@ -31,18 +31,117 @@
 //! | `bool load_complete` | `AtomicBool` |
 //! | `optional_idx storage_version` | `Option<u64>` |
 
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use parking_lot::Mutex;
 
 use super::StandardBufferManager;
-use super::write_ahead_log::{WriteAheadLog, WalInitState};
+use super::write_ahead_log::{WriteAheadLog, WalInitState, WalWriter};
 use super::metadata::MetaBlockPointer;
 use super::buffer::{BlockAllocator, BlockManager, BufferPool};
 use super::single_file_block_manager::SingleFileBlockManager;
 use super::standard_file_system::LocalFileSystem;
-use super::storage_info::StorageManagerOptions;
+use super::storage_info::{FileHandle, FileOpenFlags, FileSystem, StorageManagerOptions};
 use super::storage_info::{StorageError, StorageResult};
+
+// ─── FileWalWriter ─────────────────────────────────────────────────────────────
+
+/// WAL 文件写入器（C++: `BufferedFileWriter` 的 `WalWriter` 适配）。
+///
+/// 内部使用 4 KiB 缓冲区，`sync()` 时将缓冲刷入文件并 fsync。
+/// `total_written` 初始化为打开时的文件大小，后续追踪已刷盘字节数；
+/// 这与 C++ `BufferedFileWriter::total_written = handle->GetFileSize()` 一致。
+struct FileWalWriter {
+    handle: Box<dyn FileHandle>,
+    buffer: Vec<u8>,
+    /// 尚未刷入磁盘的缓冲字节数。
+    offset: usize,
+    /// 已刷入磁盘的累计字节数（从文件初始大小起算）。
+    total_written: u64,
+}
+
+const FILE_WAL_BUFFER_SIZE: usize = 4096;
+
+impl FileWalWriter {
+    /// 打开 WAL 文件，初始化写入器。
+    ///
+    /// `total_written` 初始化为文件当前大小，确保后续写入追加到文件末尾。
+    fn new(handle: Box<dyn FileHandle>) -> io::Result<Self> {
+        let initial_size = handle
+            .file_size()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        Ok(Self {
+            handle,
+            buffer: vec![0u8; FILE_WAL_BUFFER_SIZE],
+            offset: 0,
+            total_written: initial_size,
+        })
+    }
+
+    /// 将缓冲区内容刷入磁盘（不 fsync）。
+    fn flush_buffer(&mut self) -> io::Result<()> {
+        if self.offset == 0 {
+            return Ok(());
+        }
+        let write_at = self.total_written;
+        let pending = self.offset;
+        self.handle
+            .write_at(&self.buffer[..pending], write_at)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        self.total_written += pending as u64;
+        self.offset = 0;
+        Ok(())
+    }
+}
+
+impl WalWriter for FileWalWriter {
+    fn write_data(&mut self, data: &[u8]) -> io::Result<()> {
+        let mut pos = 0;
+        while pos < data.len() {
+            let available = FILE_WAL_BUFFER_SIZE - self.offset;
+            let to_copy = (data.len() - pos).min(available);
+            self.buffer[self.offset..self.offset + to_copy]
+                .copy_from_slice(&data[pos..pos + to_copy]);
+            self.offset += to_copy;
+            pos += to_copy;
+            if self.offset == FILE_WAL_BUFFER_SIZE {
+                self.flush_buffer()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn sync(&mut self) -> io::Result<()> {
+        self.flush_buffer()?;
+        self.handle
+            .sync()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    }
+
+    fn truncate(&mut self, size: u64) -> io::Result<()> {
+        // C++: if (persistent <= size) { offset = size - persistent; }
+        //      else { handle->Truncate(size); offset = 0; total_written = size; }
+        if size >= self.total_written {
+            self.offset = (size - self.total_written) as usize;
+        } else {
+            self.offset = 0;
+            self.total_written = size;
+            self.handle
+                .truncate(size)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn file_size(&self) -> u64 {
+        self.total_written + self.offset as u64
+    }
+
+    fn total_written(&self) -> u64 {
+        self.total_written + self.offset as u64
+    }
+}
 
 // ─── StorageOptions ────────────────────────────────────────────────────────────
 
@@ -240,12 +339,6 @@ pub trait StorageCommitState: Send {
         false
     }
 
-    /// 获取当前 WAL 大小（用于更新 StorageManager 的 wal_size）。
-    ///
-    /// 返回 WAL 的当前大小（字节数），如果 WAL 不可用则返回 `None`。
-    fn get_wal_size(&self) -> Option<u64> {
-        None
-    }
 }
 
 // ─── WAL 提交阶段状态 ─────────────────────────────────────────────────────────
@@ -333,15 +426,12 @@ pub struct SingleFileStorageCommitState {
     /// C++: `reference_map_t<DataTable, unordered_map<idx_t, OptimisticallyWrittenRowGroupData>>`
     optimistically_written: std::collections::HashMap<u64, std::collections::HashMap<u64, OptimisticallyWrittenEntry>>,
 
-    /// StorageManager 的 wal_size_atomic 引用，用于在 flush 后更新 WAL 大小
-    storage_wal_size: Arc<AtomicU64>,
 }
 
 /// WAL 操作的简化包装，避免持有 WriteAheadLog 的直接引用。
 struct WalRef {
     /// 对 WriteAheadLog 的共享引用（C++ 中是引用成员）。
     wal: Option<Arc<WriteAheadLog>>,
-    storage_manager_id: u64,
 }
 
 impl SingleFileStorageCommitState {
@@ -350,19 +440,15 @@ impl SingleFileStorageCommitState {
         initial_wal_size: u64,
         initial_written: u64,
         wal: Arc<WriteAheadLog>,
-        storage_wal_size: Arc<AtomicU64>,
     ) -> Self {
-        let storage_manager_id = wal.storage_manager_id;
         Self {
             initial_wal_size,
             initial_written,
             wal: Arc::new(Mutex::new(WalRef {
                 wal: Some(wal),
-                storage_manager_id,
             })),
             state: WalCommitState::InProgress,
             optimistically_written: Default::default(),
-            storage_wal_size,
         }
     }
 }
@@ -422,12 +508,6 @@ impl StorageCommitState for SingleFileStorageCommitState {
         if let Some(wal) = &wal_ref.wal {
             // C++: wal.Flush()
             wal.flush().map_err(StorageError::Io)?;
-
-            // 更新 StorageManager 的 WAL 大小
-            // 在 DuckDB 中，WAL 的 Flush() 内部会调用 storage_manager.SetWALSize(writer->GetFileSize())
-            // 这里我们在 flush 后手动更新
-            let new_wal_size = wal.file_size();
-            self.storage_wal_size.store(new_wal_size, Ordering::Relaxed);
         }
         self.state = WalCommitState::Flushed;
         Ok(())
@@ -514,15 +594,6 @@ impl StorageCommitState for SingleFileStorageCommitState {
     /// 是否有任何乐观写入的 RowGroup 数据（C++: `HasRowGroupData()`）。
     fn has_row_group_data(&self) -> bool {
         !self.optimistically_written.is_empty()
-    }
-
-    fn get_wal_size(&self) -> Option<u64> {
-        let wal_ref = self.wal.lock();
-        wal_ref.wal.as_ref().map(|wal| {
-            // 返回 WAL 的实际文件大小，而不是 total_written
-            // total_written 在 WAL 未初始化时为 0，导致无法累计 WAL 大小
-            wal.file_size()
-        })
     }
 }
 
@@ -1095,16 +1166,38 @@ impl StorageManager for SingleFileStorageManager {
     }
 
     fn gen_storage_commit_state(&self) -> Option<Box<dyn StorageCommitState>> {
-        // C++: make_uniq<SingleFileStorageCommitState>(*this, wal)
-        let wal_state = self.wal_state.lock();
-        let wal = wal_state.wal.clone()?;
+        // C++: auto wal = storage_manager.GetWAL();
+        //      commit_state = storage_manager.GenStorageCommitState(*wal);
+        //
+        // 先在锁内取出 WAL（Arc），再释放锁后懒初始化写入器，
+        // 避免 wal_state 锁与 WriteAheadLog.writer 锁交叉持有。
+        let wal = {
+            let wal_state = self.wal_state.lock();
+            wal_state.wal.clone()?
+        };
+
+        // C++: WriteAheadLog::LazyInit() → Initialize() — 创建底层 BufferedFileWriter
+        // Rust 中通过 initialize() + 工厂闭包延迟创建 FileWalWriter。
+        let init_result = wal.initialize(|wal_path, _wal_size| {
+            let fs = LocalFileSystem;
+            let flags = FileOpenFlags::WRITE | FileOpenFlags::CREATE;
+            let handle = fs
+                .open_file(wal_path, flags)
+                .map_err(|e: StorageError| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            FileWalWriter::new(handle).map(|w| Box::new(w) as Box<dyn WalWriter>)
+        });
+
+        if let Err(e) = init_result {
+            eprintln!("[WAL] initialize failed: {e}");
+            return None;
+        }
+
         let initial_wal_size = self.wal_size_atomic.load(Ordering::Relaxed);
         let initial_written = wal.total_written();
         Some(Box::new(SingleFileStorageCommitState::new(
             initial_wal_size,
             initial_written,
             wal,
-            Arc::clone(&self.wal_size_atomic),
         )))
     }
 

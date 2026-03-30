@@ -334,15 +334,6 @@ fn write_field_bytes(w: &mut impl Write, field_id: u8, data: &[u8]) -> io::Resul
 
 // ─── WAL 内部可变状态（Mutex 保护）────────────────────────────────────────────
 
-struct WalInner {
-    /// 底层文件写入器（C++: `unique_ptr<BufferedFileWriter> writer`）。
-    writer: Option<Box<dyn WalWriter>>,
-    /// 是否已写过文件头（C++: `WriteHeader()` 幂等保护）。
-    header_written: bool,
-    /// WAL 文件总大小（字节），供 StorageManager 记录（C++: `SetWALSize()`）。
-    wal_size: u64,
-}
-
 // ─── WriteAheadLog ────────────────────────────────────────────────────────────
 
 /// Write-Ahead Log 写入端（C++: `class WriteAheadLog`）。
@@ -351,6 +342,8 @@ struct WalInner {
 /// 所有写方法均先通过 `ensure_initialized()` 懒初始化文件 writer，
 /// 再调用内部 `WalSerializer` 序列化条目。
 pub struct WriteAheadLog {
+    storage_manager: &'static dyn StorageManager,
+
     /// WAL 文件路径（C++: `string wal_path`）。
     pub wal_path: String,
 
@@ -360,11 +353,8 @@ pub struct WriteAheadLog {
     /// checkpoint 迭代号（C++: `optional_idx checkpoint_iteration`）。
     pub checkpoint_iteration: Option<u64>,
 
-    /// Mutex 保护的可变内部状态（C++: `mutex wal_lock` + `writer` 等）。
-    inner: Mutex<WalInner>,
-
-    /// 所属 StorageManager ID（C++: `StorageManager &storage_manager`）。
-    pub storage_manager_id: u64,
+    /// 底层文件写入器（C++: `unique_ptr<BufferedFileWriter> writer`）。
+    writer: Mutex<Option<Box<dyn WalWriter>>>,
 }
 
 impl WriteAheadLog {
@@ -387,15 +377,14 @@ impl WriteAheadLog {
     ) -> Self {
         // C++: storage_manager.SetWALSize(wal_size)
         storage_manager.set_wal_size(wal_size);
-        // 用 StorageManager trait 对象的数据指针作为稳定 ID
-        let storage_manager_id =
-            storage_manager as *const dyn StorageManager as *const () as u64;
         Self {
+            storage_manager: unsafe {
+                std::mem::transmute::<&dyn StorageManager, &'static dyn StorageManager>(storage_manager)
+            },
             wal_path,
             init_state: AtomicU8::new(init_state as u8),
             checkpoint_iteration,
-            inner: Mutex::new(WalInner { writer: None, header_written: false, wal_size }),
-            storage_manager_id,
+            writer: Mutex::new(None),
         }
     }
 
@@ -413,8 +402,8 @@ impl WriteAheadLog {
 
     /// 自启动以来写入的总字节数（C++: `GetTotalWritten()`）。
     pub fn total_written(&self) -> u64 {
-        let inner = self.inner.lock();
-        inner.writer.as_ref().map(|w| w.total_written()).unwrap_or(0)
+        let writer = self.writer.lock();
+        writer.as_ref().map(|w| w.total_written()).unwrap_or(0)
     }
 
     /// 获取 WAL 文件大小（字节）。
@@ -422,8 +411,11 @@ impl WriteAheadLog {
     /// 返回 WAL 文件的实际大小，在 flush() 后会更新。
     /// 这个值用于 StorageManager 跟踪 WAL 大小以触发自动 checkpoint。
     pub fn file_size(&self) -> u64 {
-        let inner = self.inner.lock();
-        inner.wal_size
+        let writer = self.writer.lock();
+        writer
+            .as_ref()
+            .map(|w| w.file_size())
+            .unwrap_or_else(|| self.storage_manager().wal_size())
     }
 
     // ── 初始化 ────────────────────────────────────────────────────────────────
@@ -439,22 +431,22 @@ impl WriteAheadLog {
         if self.is_initialized() {
             return Ok(());
         }
-        let mut inner = self.inner.lock();
-        if inner.writer.is_none() {
+        let mut writer_guard = self.writer.lock();
+        if writer_guard.is_none() {
             let state = WalInitState::try_from(self.init_state.load(Ordering::Relaxed))
                 .unwrap_or(WalInitState::Uninitialized);
             let truncate_to = if state == WalInitState::UninitializedRequiresTruncate {
-                Some(inner.wal_size)
+                Some(self.storage_manager().wal_size())
             } else {
                 None
             };
-            let mut writer = writer_factory(&self.wal_path, inner.wal_size)?;
+            let mut writer = writer_factory(&self.wal_path, self.storage_manager().wal_size())?;
             if let Some(size) = truncate_to {
                 writer.truncate(size)?;
             } else {
-                inner.wal_size = writer.file_size();
+                self.storage_manager().set_wal_size(writer.file_size());
             }
-            inner.writer = Some(writer);
+            *writer_guard = Some(writer);
             self.init_state.store(WalInitState::Initialized as u8, Ordering::Release);
         }
         Ok(())
@@ -467,11 +459,11 @@ impl WriteAheadLog {
     /// 头部不附加校验和，直接序列化到文件。
     /// 内容：WAL_VERSION + 版本号 + DB 标识符 + checkpoint_iteration。
     pub fn write_header(&self, version: u64, db_identifier: &[u8], checkpoint_iteration: u64) {
-        let mut inner = self.inner.lock();
-        if inner.header_written {
-            return;
-        }
-        if let Some(writer) = inner.writer.as_mut() {
+        let mut writer_guard = self.writer.lock();
+        if let Some(writer) = writer_guard.as_mut() {
+            if writer.file_size() > 0 {
+                return;
+            }
             // 直接写（无校验和）：wal_type=WAL_VERSION；用 Vec<u8> 中转再写入
             let mut buf = Vec::new();
             let _ = write_field_u8(&mut buf, 100, WalType::WalVersion as u8);
@@ -481,7 +473,6 @@ impl WriteAheadLog {
                 let _ = write_field_u64(&mut buf, 103, checkpoint_iteration);
             }
             let _ = writer.write_data(&buf);
-            inner.header_written = true;
         }
     }
 
@@ -681,17 +672,17 @@ impl WriteAheadLog {
     pub fn flush(&self) -> io::Result<()> {
         {
             // 写空 flush 标记
-            let mut inner = self.inner.lock();
-            if let Some(writer) = inner.writer.as_mut() {
+            let mut writer_guard = self.writer.lock();
+            if let Some(writer) = writer_guard.as_mut() {
                 let mut s = WalSerializer::begin(writer.as_mut(), WalType::WalFlush)?;
                 s.end()?;
             }
         }
         // fsync
-        let mut inner = self.inner.lock();
-        if let Some(writer) = inner.writer.as_mut() {
+        let mut writer_guard = self.writer.lock();
+        if let Some(writer) = writer_guard.as_mut() {
             writer.sync()?;
-            inner.wal_size = writer.file_size();
+            self.storage_manager().set_wal_size(writer.file_size());
         }
         Ok(())
     }
@@ -703,14 +694,14 @@ impl WriteAheadLog {
         if state == WalInitState::NoWal {
             return Ok(());
         }
-        let mut inner = self.inner.lock();
-        if let Some(writer) = inner.writer.as_mut() {
+        let mut writer_guard = self.writer.lock();
+        if let Some(writer) = writer_guard.as_mut() {
             writer.truncate(size)?;
-            inner.wal_size = writer.file_size();
+            self.storage_manager().set_wal_size(writer.file_size());
         } else {
             self.init_state
                 .store(WalInitState::UninitializedRequiresTruncate as u8, Ordering::Release);
-            inner.wal_size = size;
+            self.storage_manager().set_wal_size(size);
         }
         Ok(())
     }
@@ -722,12 +713,16 @@ impl WriteAheadLog {
     where
         F: FnOnce(&mut WalSerializer<'_>) -> io::Result<()>,
     {
-        let mut inner = self.inner.lock();
-        let writer = inner.writer.as_mut()
+        let mut writer_guard = self.writer.lock();
+        let writer = writer_guard.as_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "WAL not initialized"))?;
         let mut serializer = WalSerializer::begin(writer.as_mut(), wal_type)?;
         f(&mut serializer)?;
         serializer.end()
+    }
+
+    fn storage_manager(&self) -> &dyn StorageManager {
+        self.storage_manager
     }
 }
 
