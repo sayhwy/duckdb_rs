@@ -33,11 +33,12 @@ use parking_lot::Mutex;
 use crate::catalog::table_catalog_entry::PhysicalIndex;
 use crate::common::types::DataChunk;
 use crate::storage::data_table::{
-    ClientContext, ColumnDefinition, DataTable, StorageCommitState, StorageIndex,
+    ClientContext, ColumnDefinition, DataTable, StorageIndex,
 };
 use crate::storage::optimistic_data_writer::{
     OptimisticDataWriter, OptimisticWriteCollection, OptimisticWritePartialManagers,
 };
+use crate::storage::storage_manager::StorageCommitState;
 use crate::storage::storage_info::{StorageError, StorageResult};
 use crate::storage::table::append_state::{BoundConstraint, LocalAppendState, TableAppendState};
 use crate::storage::table::data_table_info::DataTableInfo;
@@ -1157,7 +1158,7 @@ impl LocalStorage {
     pub fn commit(
         &mut self,
         tables: &HashMap<u64, Arc<DataTable>>,
-    ) -> StorageResult<()> {
+    ) -> StorageResult<Vec<(u64, Idx, Idx)>> {
         // C++: auto table_storage = table_manager.MoveEntries();
         //      for (auto &entry : table_storage) {
         //          auto table = entry.first;
@@ -1165,17 +1166,20 @@ impl LocalStorage {
         //          Flush(table, *storage, commit_state);
         //          entry.second.reset();
         //      }
+        let mut append_entries = Vec::new();
         let table_storage = self.table_manager.move_entries();
         for (table_id, storage_arc) in table_storage {
             let mut storage = storage_arc.lock();
             if let Some(table) = tables.get(&table_id) {
-                self.flush_one(&mut storage, table)?;
+                if let Some(entry) = self.flush_one(&mut storage, table)? {
+                    append_entries.push(entry);
+                }
             } else {
                 // 找不到基表（可能已被 DROP）：回滚本地存储
                 storage.rollback();
             }
         }
-        Ok(())
+        Ok(append_entries)
     }
 
     /// 回滚所有本地存储（C++: `Rollback`）。
@@ -1433,10 +1437,10 @@ impl LocalStorage {
         &self,
         storage: &mut LocalTableStorage,
         table: &Arc<DataTable>,
-    ) -> StorageResult<()> {
+    ) -> StorageResult<Option<(u64, Idx, Idx)>> {
         // C++: if (storage.is_dropped) { return; }
         if storage.is_dropped {
-            return Ok(());
+            return Ok(None);
         }
 
         let total_rows = storage.get_collection().total_rows();
@@ -1445,7 +1449,7 @@ impl LocalStorage {
         //      { storage.Rollback(); return; }
         if total_rows <= storage.deleted_rows {
             storage.rollback();
-            return Ok(());
+            return Ok(None);
         }
 
         let append_count = total_rows - storage.deleted_rows;
@@ -1512,7 +1516,7 @@ impl LocalStorage {
             );
         }
 
-        Ok(())
+        Ok(Some((table.info.table_id(), row_start, append_count)))
     }
 }
 

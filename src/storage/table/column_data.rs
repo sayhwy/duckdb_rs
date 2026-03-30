@@ -277,7 +277,8 @@ impl ColumnDataContext {
                 let node = &lock.0[idx];
                 let current_start = node.row_start();
                 let current_count = node.node().count();
-                let remaining_in_segment = current_start + current_count - state.offset_in_column;
+                let segment_end = current_start + current_count;
+                let remaining_in_segment = segment_end.saturating_sub(state.offset_in_column);
 
                 if remaining_in_segment < scan_count {
                     // Not enough data in current segment — need to scan across segments
@@ -372,6 +373,51 @@ impl ColumnDataContext {
         let mut remaining = remaining;
 
         while remaining > 0 {
+            loop {
+                let advance = {
+                    let lock = self.data.lock();
+                    match state.current_segment_index {
+                        None => None,
+                        Some(idx) if idx < lock.0.len() => {
+                            let node = &lock.0[idx];
+                            let segment_end = node.row_start() + node.node().count();
+                            if state.offset_in_column >= segment_end {
+                                let next_idx = idx + 1;
+                                if next_idx < lock.0.len() {
+                                    Some((next_idx, lock.0[next_idx].row_start()))
+                                } else {
+                                    Some((usize::MAX, segment_end))
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        _ => Some((usize::MAX, state.offset_in_column)),
+                    }
+                };
+
+                match advance {
+                    None => break,
+                    Some((idx, _)) if idx == usize::MAX => {
+                        state.current_segment_index = None;
+                        state.initialized = false;
+                        state.segment_checked = false;
+                        state.scan_state = None;
+                        state.pinned_buffer = None;
+                        break;
+                    }
+                    Some((next_idx, next_row_start)) => {
+                        if let Some(old) = state.scan_state.take() {
+                            state.previous_states.push(old);
+                        }
+                        state.current_segment_index = Some(next_idx);
+                        state.segment_row_start = next_row_start;
+                        state.initialized = false;
+                        state.segment_checked = false;
+                        state.pinned_buffer = None;
+                    }
+                }
+            }
             // Clone Arc to avoid holding the tree lock during scan.
             let (seg_arc, current_start, current_count) = {
                 let lock = self.data.lock();
@@ -454,7 +500,7 @@ impl ColumnDataContext {
                 None => false,
                 Some(idx) if idx < lock.0.len() => {
                     let node = &lock.0[idx];
-                    state.offset_in_column > node.row_start() + node.node().count()
+                    state.offset_in_column >= node.row_start() + node.node().count()
                 }
                 _ => false,
             }

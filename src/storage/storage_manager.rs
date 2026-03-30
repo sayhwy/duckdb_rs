@@ -339,6 +339,11 @@ pub trait StorageCommitState: Send {
         false
     }
 
+    /// 返回当前提交阶段关联的 WAL（若存在）。
+    fn wal(&self) -> Option<Arc<WriteAheadLog>> {
+        None
+    }
+
 }
 
 // ─── WAL 提交阶段状态 ─────────────────────────────────────────────────────────
@@ -594,6 +599,10 @@ impl StorageCommitState for SingleFileStorageCommitState {
     /// 是否有任何乐观写入的 RowGroup 数据（C++: `HasRowGroupData()`）。
     fn has_row_group_data(&self) -> bool {
         !self.optimistically_written.is_empty()
+    }
+
+    fn wal(&self) -> Option<Arc<WriteAheadLog>> {
+        self.wal.lock().wal.clone()
     }
 }
 

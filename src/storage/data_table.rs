@@ -38,6 +38,7 @@ use parking_lot::Mutex;
 use crate::catalog::TableCatalogEntry;
 use crate::storage::storage_lock::StorageLockKey;
 use crate::storage::storage_info::{StorageError, StorageResult};
+use crate::storage::storage_manager::StorageCommitState;
 use crate::storage::table::append_state::{BoundConstraint, ConstraintState, LocalAppendState};
 use crate::storage::table::data_table_info::{DataTableInfo, IndexStorageInfo};
 use crate::storage::table::persistent_table_data::PersistentTableData;
@@ -49,6 +50,7 @@ use crate::storage::table::types::{Idx, RowId, TransactionData};
 use crate::common::types::{DataChunk, LogicalType};
 use crate::storage::local_storage::LocalStorage;
 use crate::storage::table::row_group_collection::RowGroupCollection;
+use crate::storage::write_ahead_log::WriteAheadLog;
 use crate::transaction::duck_transaction::DuckTransaction;
 // ─── 外部类型占位 ────────────────────────────────────────────────────────────
 // 以下占位类型在相应子系统实现后应替换为真实导入。
@@ -134,12 +136,6 @@ pub struct TableDeleteState;
 pub struct TableUpdateState;
 
 // ConstraintState 现在从 storage::table::append_state 导入，此处不再重复定义。
-
-/// WAL 写入接口（C++: `WriteAheadLog`）。
-pub struct WriteAheadLog;
-
-/// 存储提交状态（C++: `StorageCommitState`）。
-pub struct StorageCommitState;
 
 /// 表数据写入器（C++: `TableDataWriter`）。
 pub struct TableDataWriter;
@@ -805,21 +801,48 @@ impl DataTable {
     /// 写入 WAL（C++: `WriteToLog()`）。
     pub fn write_to_log(
         &self,
-        _log: &mut WriteAheadLog,
+        log: &WriteAheadLog,
         row_start: Idx,
-        count: Idx,
-        _commit_state: Option<&mut StorageCommitState>,
+        mut count: Idx,
+        mut commit_state: Option<&mut dyn StorageCommitState>,
     ) -> StorageResult<()> {
-        // C++: log.WriteSetTable(info->schema, info->table);
-        //      if (commit_state) { /* optimistic row group data path */ }
-        //      ScanTableSegment(transaction, row_start, count, [&](DataChunk &chunk) { log.WriteInsert(chunk); });
-        //
-        // The WAL writer stubs (WriteAheadLog / StorageCommitState) are not yet wired up.
-        // Implement the scan portion so that when those types are fully implemented the
-        // data will be correctly streamed.
-        let _ = (row_start, count);
-        // TODO: log.write_set_table(schema, table);
-        // TODO: self.scan_table_segment(row_start, count, |chunk| log.write_insert(chunk));
+        let schema = self.info.get_schema_name();
+        let table = self.info.get_table_name();
+        log.write_set_table(&schema, &table)
+            .map_err(StorageError::Io)?;
+
+        let mut row_start = row_start;
+        if let Some(commit_state) = commit_state.as_deref_mut() {
+            if let Some((row_group_data, optimistic_count)) =
+                commit_state.get_row_group_data(self.info.table_id(), row_start)
+            {
+                if optimistic_count > count as u64 {
+                    return Err(StorageError::Other(format!(
+                        "Optimistically written count cannot exceed actual count (got {}, expected {})",
+                        optimistic_count, count
+                    )));
+                }
+                if !row_group_data.data.is_empty() {
+                    let payload = serialize_row_group_data_payload(row_group_data);
+                    log.write_row_group_data(&payload).map_err(StorageError::Io)?;
+                }
+                row_start += optimistic_count as Idx;
+                count -= optimistic_count as Idx;
+                if count == 0 {
+                    return Ok(());
+                }
+            }
+        }
+
+        let mut write_result = Ok(());
+        self.scan_table_segment(row_start, count, |chunk| {
+            if write_result.is_err() {
+                return;
+            }
+            let payload = serialize_insert_chunk_payload(chunk);
+            write_result = log.write_insert(&payload).map_err(StorageError::Io);
+        });
+        write_result?;
         Ok(())
     }
 
@@ -1256,4 +1279,30 @@ impl DataTable {
             index_info: vec![], // 需索引层实现后填充
         }
     }
+}
+
+fn serialize_insert_chunk_payload(chunk: &DataChunk) -> Vec<u8> {
+    let mut out = Vec::new();
+    let row_count = chunk.size() as u32;
+    let column_count = chunk.column_count() as u32;
+    out.extend_from_slice(&row_count.to_le_bytes());
+    out.extend_from_slice(&column_count.to_le_bytes());
+
+    for column in &chunk.data {
+        let byte_len = (column.logical_type.physical_size() * chunk.size()) as u32;
+        out.extend_from_slice(&byte_len.to_le_bytes());
+        out.extend_from_slice(&column.raw_data()[..byte_len as usize]);
+    }
+    out
+}
+
+fn serialize_row_group_data_payload(
+    data: &crate::storage::storage_manager::PersistentCollectionData,
+) -> Vec<u8> {
+    // Current WAL replay path only needs a stable opaque payload. The full
+    // PersistentCollectionData serializer is not implemented yet in this port.
+    let mut out = Vec::new();
+    out.extend_from_slice(&(data.data.len() as u32).to_le_bytes());
+    out.extend_from_slice(&data.data);
+    out
 }

@@ -365,7 +365,21 @@ impl DuckTransaction {
         let alloc_size = AppendInfo::serialized_size();
         let entry_ref = self.undo_buffer.create_entry(UndoFlags::Append, alloc_size);
         // TODO: 将 AppendInfo { table_id, start_row, count: row_count } 序列化写入 entry_ref.payload_mut()
-        let _ = (entry_ref, AppendInfo { table_id, start_row, count: row_count });
+        let info = AppendInfo {
+            table_id,
+            start_row,
+            count: row_count,
+        };
+        let mut payload = vec![0u8; alloc_size];
+        info.serialize(&mut payload);
+        self.undo_buffer
+            .write_payload(
+                entry_ref
+                    .slab_index
+                    .expect("Append undo entry must have a slab index"),
+                entry_ref.position,
+                &payload,
+            );
     }
 
     /// 在 Undo 日志中为 UpdateInfo 预留空间，返回可写引用
@@ -664,12 +678,15 @@ impl DuckTransaction {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // C++: storage->Commit(commit_state.get());
             // 将本地 Append 数据 flush 到 WAL
-            self.storage.commit(tables)
+            let append_entries = self.storage.commit(tables)
                 .map_err(|e| format!("LocalStorage commit failed: {:?}", e))?;
+            for (table_id, row_start, row_count) in append_entries {
+                self.push_append(table_id, row_start, row_count);
+            }
 
             // C++: undo_buffer.WriteToWAL(*wal, commit_state.get());
             // 将 Undo 日志（catalog/delete/update）写入 WAL
-            self.undo_buffer.write_to_wal(commit_state.as_mut())
+            self.undo_buffer.write_to_wal(commit_state.as_mut(), tables)
                 .map_err(|e| format!("UndoBuffer write_to_wal failed: {:?}", e))?;
 
             // C++: if (commit_state->HasRowGroupData()) {
@@ -779,17 +796,23 @@ impl DuckTransaction {
 
         // 步骤 1: 提交本地存储
         // C++: storage->Commit(commit_state.get());
-        if let Err(e) = self.storage.commit(tables) {
-            // 提交失败，回滚 UndoBuffer
-            // C++: undo_buffer.RevertCommit(iterator_state, this->transaction_id);
-            self.undo_buffer.revert_commit(&iterator_state, self.transaction_id);
+        let append_entries = match self.storage.commit(tables) {
+            Ok(entries) => entries,
+            Err(e) => {
+                // 提交失败，回滚 UndoBuffer
+                // C++: undo_buffer.RevertCommit(iterator_state, this->transaction_id);
+                self.undo_buffer.revert_commit(&iterator_state, self.transaction_id);
 
-            // C++: if (commit_state) { commit_state->RevertCommit(); }
-            if let Some(cs) = commit_state {
-                cs.revert_commit();
+                // C++: if (commit_state) { commit_state->RevertCommit(); }
+                if let Some(cs) = commit_state {
+                    cs.revert_commit();
+                }
+
+                return Err(format!("LocalStorage commit failed: {:?}", e));
             }
-
-            return Err(format!("LocalStorage commit failed: {:?}", e));
+        };
+        for (table_id, row_start, row_count) in append_entries {
+            self.push_append(table_id, row_start, row_count);
         }
 
         // 步骤 2: 提交 UndoBuffer（设置版本号）

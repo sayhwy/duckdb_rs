@@ -189,34 +189,50 @@ impl UndoBuffer {
     pub fn write_to_wal(
         &self,
         commit_state: &mut dyn crate::storage::storage_manager::StorageCommitState,
+        tables: &std::collections::HashMap<u64, std::sync::Arc<crate::storage::data_table::DataTable>>,
     ) -> Result<(), String> {
-        // 创建 WAL 写入状态机
-        // 注意：当前简化实现中，WALWriteState 需要访问实际的 WriteAheadLog
-        // 由于架构限制，我们通过 StorageCommitState 间接访问 WAL
+        let wal = commit_state
+            .wal()
+            .ok_or_else(|| "StorageCommitState does not expose WAL".to_string())?;
 
-        // 正向遍历所有 Undo 条目
-        self.allocator.iterate_forward(|flags, payload| {
-            // 根据条目类型写入 WAL
-            match flags {
-                UndoFlags::CatalogEntry => {
-                    // TODO: 写入 WAL_CREATE_*/WAL_DROP_* 记录
-                    // 需要反序列化 CatalogEntry 并调用 WAL 写入方法
-                }
-                UndoFlags::DeleteTuple => {
-                    // TODO: 写入 WAL_DELETE 记录
-                    // 需要反序列化 DeleteInfo 并调用 WAL 写入方法
-                }
-                UndoFlags::UpdateTuple => {
-                    // TODO: 写入 WAL_UPDATE 记录
-                    // 需要反序列化 UpdateInfo 并调用 WAL 写入方法
-                }
-                UndoFlags::Append => {
-                    // Append 由 LocalStorage 处理，不需要在 UndoBuffer 中写 WAL
-                }
-                UndoFlags::SequenceValue | UndoFlags::Attach | UndoFlags::Empty => {
-                    // 这些类型不需要写入 WAL
+        let table_names = tables
+            .iter()
+            .map(|(table_id, table)| {
+                (
+                    *table_id,
+                    (table.info.get_schema_name(), table.info.get_table_name()),
+                )
+            })
+            .collect();
+
+        struct TableAppendWriter<'a> {
+            tables: &'a std::collections::HashMap<u64, std::sync::Arc<crate::storage::data_table::DataTable>>,
+        }
+
+        impl<'a> crate::transaction::wal_write_state::AppendWriter for TableAppendWriter<'a> {
+            fn write_append(
+                &mut self,
+                log: &crate::storage::write_ahead_log::WriteAheadLog,
+                table_id: u64,
+                start_row: u64,
+                count: u64,
+            ) {
+                if let Some(table) = self.tables.get(&table_id) {
+                    let _ = table.write_to_log(log, start_row, count, None);
                 }
             }
+        }
+
+        let append_writer = Box::new(TableAppendWriter { tables });
+        let mut wal_state = crate::transaction::wal_write_state::WALWriteState::new(
+            wal.as_ref(),
+            Some(commit_state),
+            table_names,
+            Some(append_writer),
+        );
+
+        self.allocator.iterate_forward(|flags, payload| {
+            wal_state.commit_entry(flags, payload);
         });
 
         Ok(())
