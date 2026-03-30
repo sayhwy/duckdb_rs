@@ -57,7 +57,10 @@ impl<'a> BinaryDeserializer<'a> {
             }
             shift += 7;
             if shift >= 64 {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "varint overflow"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "varint overflow",
+                ));
             }
         }
         Ok(result)
@@ -372,7 +375,9 @@ fn read_catalog_entry_object(r: &mut BinaryDeserializer<'_>) -> io::Result<Optio
     }
 }
 
-fn read_meta_block_pointer_nested(r: &mut BinaryDeserializer<'_>) -> io::Result<Option<MetaBlockPointer>> {
+fn read_meta_block_pointer_nested(
+    r: &mut BinaryDeserializer<'_>,
+) -> io::Result<Option<MetaBlockPointer>> {
     // MetaBlockPointer is serialized directly as an object (not as a nullable pointer):
     // field 100: block_pointer (varint)
     // field 101: offset (varint) - optional
@@ -383,7 +388,10 @@ fn read_meta_block_pointer_nested(r: &mut BinaryDeserializer<'_>) -> io::Result<
     loop {
         let fid = r.read_field_id();
         if fid == MESSAGE_TERMINATOR_FIELD_ID {
-            return Ok(Some(MetaBlockPointer { block_pointer, offset }));
+            return Ok(Some(MetaBlockPointer {
+                block_pointer,
+                offset,
+            }));
         }
         match fid {
             100 => block_pointer = r.read_varint()?,
@@ -410,7 +418,10 @@ fn read_table_storage_info(r: &mut BinaryDeserializer<'_>) -> io::Result<Option<
             // 读到就立即返回，不能继续循环（fid=101 是简单 varint，不是嵌套对象）
             100 => {
                 let raw_ptr = r.read_varint()?;
-                return Ok(Some(MetaBlockPointer { block_pointer: raw_ptr, offset: 0 }));
+                return Ok(Some(MetaBlockPointer {
+                    block_pointer: raw_ptr,
+                    offset: 0,
+                }));
             }
             101 => {
                 // fid=101 是简单 varint（如 row_group_count），跳过
@@ -447,7 +458,10 @@ fn read_meta_block_pointer(r: &mut BinaryDeserializer<'_>) -> io::Result<MetaBlo
     loop {
         let fid = r.read_field_id();
         if fid == MESSAGE_TERMINATOR_FIELD_ID {
-            return Ok(MetaBlockPointer { block_pointer, offset });
+            return Ok(MetaBlockPointer {
+                block_pointer,
+                offset,
+            });
         }
         match fid {
             100 => block_pointer = r.read_varint()?,

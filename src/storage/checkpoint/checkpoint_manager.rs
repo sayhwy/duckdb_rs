@@ -12,15 +12,15 @@
 
 use std::sync::Arc;
 
-use crate::common::types::LogicalTypeId;
 use crate::catalog::TableCatalogEntry;
+use crate::common::types::LogicalTypeId;
 use crate::storage::buffer::BlockManager;
-use crate::storage::data_table::DataTable;
-use crate::storage::metadata::{MetaBlockPointer, MetadataManager, MetadataWriter};
-use crate::storage::storage_info::{DatabaseHeader, INVALID_BLOCK};
-use crate::storage::checkpoint::catalog_serializer;
 use crate::storage::checkpoint::binary_serializer::BinarySerializer;
+use crate::storage::checkpoint::catalog_serializer;
+use crate::storage::data_table::DataTable;
 use crate::storage::metadata::WriteStream;
+use crate::storage::metadata::{MetaBlockPointer, MetadataManager, MetadataWriter};
+use crate::storage::storage_info::{DatabaseHeader, INVALID_BLOCK, StorageResult};
 use crate::storage::table::column_data::ColumnData;
 use crate::storage::table::column_segment::ColumnSegmentType;
 use crate::storage::table::row_group::RowGroupPointer;
@@ -53,27 +53,38 @@ impl CheckpointManager {
     /// 创建 checkpoint
     ///
     /// 返回新的 DatabaseHeader
-    pub fn create_checkpoint(
+    pub fn create_checkpoint(&self, tables: &[TableInfo]) -> DatabaseHeader {
+        self.create_checkpoint_with_meta(tables, |_| Ok(()))
+            .expect("checkpoint creation without WAL hook should not fail")
+    }
+
+    pub fn create_checkpoint_with_meta<F>(
         &self,
         tables: &[TableInfo],
-    ) -> DatabaseHeader {
-        // 1. 创建 metadata writer
+        mut on_meta_block: F,
+    ) -> StorageResult<DatabaseHeader>
+    where
+        F: FnMut(MetaBlockPointer) -> StorageResult<()>,
+    {
+        // 1. ?? metadata writer
         let mut metadata_writer = MetadataWriter::new(&self.metadata_manager, None);
         let mut table_metadata_writer = MetadataWriter::new(&self.metadata_manager, None);
 
-        // 2. 获取第一个 meta block 指针（catalog 根）
+        // 2. ????? meta block ???catalog ??
         let meta_block = metadata_writer.get_meta_block_pointer();
+        on_meta_block(meta_block)?;
 
-        // 3. 收集所有 catalog entries 和它们的存储信息
+        // 3. ???? catalog entries ????????
         let mut table_data: Vec<(&TableCatalogEntry, Option<MetaBlockPointer>, u64)> = Vec::new();
 
         for table_info in tables {
             let total_rows = table_info.storage.get_total_rows();
-            let table_pointer = self.write_table_data(&mut table_metadata_writer, &table_info.storage);
+            let table_pointer =
+                self.write_table_data(&mut table_metadata_writer, &table_info.storage);
             table_data.push((&table_info.entry, table_pointer, total_rows));
         }
 
-        // 4. 序列化 catalog
+        // 4. ??? catalog
         catalog_serializer::write_catalog(&mut metadata_writer, &table_data);
 
         // 5. Flush metadata writers
@@ -83,18 +94,18 @@ impl CheckpointManager {
         // 6. Flush metadata blocks to disk
         self.metadata_manager.flush();
 
-        // 7. 返回新的 header
+        // 7. ???? header
         let header = DatabaseHeader {
             iteration: 0,
             meta_block: meta_block.block_pointer as i64,
             free_list: INVALID_BLOCK,
             block_count: self.block_manager.block_count(),
             block_alloc_size: self.block_manager.get_block_alloc_size() as u64,
-            vector_size: 2048, // STANDARD_VECTOR_SIZE
-            serialization_compatibility: 7, // LATEST_SERIALIZATION_VERSION
+            vector_size: 2048,
+            serialization_compatibility: 7,
         };
 
-        header
+        Ok(header)
     }
 
     /// 写入表数据
@@ -175,7 +186,12 @@ impl CheckpointManager {
         serializer.begin_list(100, data_pointers.len());
         for data_pointer in &data_pointers {
             serializer.list_write_object(|s| {
-                write_data_pointer(s, data_pointer.tuple_count, data_pointer.block_id, data_pointer.offset);
+                write_data_pointer(
+                    s,
+                    data_pointer.tuple_count,
+                    data_pointer.block_id,
+                    data_pointer.offset,
+                );
             });
         }
         serializer.end_list();
@@ -183,11 +199,21 @@ impl CheckpointManager {
         // Field 101: validity child column (complete PersistentColumnData)
         // Get validity column based on column type
         let validity_column = match &column.kind {
-            crate::storage::table::column_data::ColumnKindData::Standard { validity } => validity.as_ref(),
-            crate::storage::table::column_data::ColumnKindData::List { validity, .. } => Some(validity),
-            crate::storage::table::column_data::ColumnKindData::Array { validity, .. } => Some(validity),
-            crate::storage::table::column_data::ColumnKindData::Struct { validity, .. } => Some(validity),
-            crate::storage::table::column_data::ColumnKindData::Variant { validity, .. } => validity.as_ref(),
+            crate::storage::table::column_data::ColumnKindData::Standard { validity } => {
+                validity.as_ref()
+            }
+            crate::storage::table::column_data::ColumnKindData::List { validity, .. } => {
+                Some(validity)
+            }
+            crate::storage::table::column_data::ColumnKindData::Array { validity, .. } => {
+                Some(validity)
+            }
+            crate::storage::table::column_data::ColumnKindData::Struct { validity, .. } => {
+                Some(validity)
+            }
+            crate::storage::table::column_data::ColumnKindData::Variant { validity, .. } => {
+                validity.as_ref()
+            }
             crate::storage::table::column_data::ColumnKindData::Validity => None,
         };
 
@@ -200,7 +226,12 @@ impl CheckpointManager {
             serializer.begin_list(100, validity_pointers.len());
             for data_pointer in &validity_pointers {
                 serializer.list_write_object(|s| {
-                    write_data_pointer_simple(s, data_pointer.tuple_count, data_pointer.block_id, data_pointer.offset);
+                    write_data_pointer_simple(
+                        s,
+                        data_pointer.tuple_count,
+                        data_pointer.block_id,
+                        data_pointer.offset,
+                    );
                 });
             }
             serializer.end_list();
@@ -249,7 +280,8 @@ impl CheckpointManager {
                         // - All bits set to 1 means all valid (0xFF bytes)
                         // - We compute the size per DuckDB's ValidityFinalizeAppend:
                         //   ((count + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE) * STANDARD_MASK_SIZE
-                        let vector_count = (tuple_count + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
+                        let vector_count =
+                            (tuple_count + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
                         let used_bytes = vector_count as usize * 32; // STANDARD_MASK_SIZE = 32
 
                         // Write validity mask - for now assume all valid (0xFF)
@@ -268,7 +300,8 @@ impl CheckpointManager {
                         let used_bytes = tuple_count as usize * segment.type_size as usize;
                         {
                             let buffer = segment.buffer.lock();
-                            block.payload_mut()[..used_bytes].copy_from_slice(&buffer[..used_bytes]);
+                            block.payload_mut()[..used_bytes]
+                                .copy_from_slice(&buffer[..used_bytes]);
                         }
                         self.block_manager.write_block(&block, block_id);
                         result.push(crate::storage::table::types::DataPointer {
@@ -300,9 +333,9 @@ fn write_data_pointer_simple(
     serializer.write_u8(103, compression_tag(CompressionType::Uncompressed));
     // Simplified statistics for validity - write minimal BaseStatistics without DistinctStatistics
     serializer.begin_object(104);
-    serializer.write_bool(100, false);  // has_null
-    serializer.write_bool(101, true);   // has_no_null (validity columns typically have no nulls)
-    serializer.write_varint(102, 0);    // null_count
+    serializer.write_bool(100, false); // has_null
+    serializer.write_bool(101, true); // has_no_null (validity columns typically have no nulls)
+    serializer.write_varint(102, 0); // null_count
     // Field 103: DistinctStatistics - write empty/default
     serializer.begin_object(103);
     serializer.end_object();

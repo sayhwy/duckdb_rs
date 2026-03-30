@@ -19,8 +19,8 @@
 //! | `atomic<IndexBindState>` | `AtomicU8` |
 //! | `unique_ptr<BoundIndex>` | `Option<Box<BoundIndexStub>>` |
 
-use std::sync::atomic::{AtomicU8, Ordering};
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::data_table_info::IndexStorageInfo;
 
@@ -104,7 +104,8 @@ impl IndexEntry {
 
     /// 绑定完成，设为 `Bound`。
     pub fn finish_binding(&self) {
-        self.bind_state.store(IndexBindState::Bound as u8, Ordering::Release);
+        self.bind_state
+            .store(IndexBindState::Bound as u8, Ordering::Release);
     }
 }
 
@@ -125,7 +126,10 @@ struct TableIndexListInner {
 impl TableIndexList {
     pub fn new() -> Self {
         Self {
-            entries: Mutex::new(TableIndexListInner { entries: Vec::new(), unbound_count: 0 }),
+            entries: Mutex::new(TableIndexListInner {
+                entries: Vec::new(),
+                unbound_count: 0,
+            }),
         }
     }
 
@@ -139,9 +143,9 @@ impl TableIndexList {
     /// 移除索引（C++: `RemoveIndex(const string&)`）。
     pub fn remove_index(&self, name: &str) {
         let mut inner = self.entries.lock();
-        inner.entries.retain(|e| {
-            e.index.as_ref().map(|i| i.name.as_str()) != Some(name)
-        });
+        inner
+            .entries
+            .retain(|e| e.index.as_ref().map(|i| i.name.as_str()) != Some(name));
     }
 
     /// 是否为空（C++: `Empty()`）。
@@ -167,7 +171,9 @@ impl TableIndexList {
         let inner = self.entries.lock();
         for entry in &inner.entries {
             if let Some(idx) = &entry.index {
-                if callback(idx) { break; }
+                if callback(idx) {
+                    break;
+                }
             }
         }
     }
@@ -175,7 +181,9 @@ impl TableIndexList {
     /// 查找指定名称的已绑定索引（C++: `Find(const string&)`）。
     pub fn find(&self, name: &str) -> Option<String> {
         let inner = self.entries.lock();
-        inner.entries.iter()
+        inner
+            .entries
+            .iter()
             .find(|e| e.index.as_ref().map(|i| i.name.as_str()) == Some(name))
             .map(|_| name.to_string())
     }
@@ -183,9 +191,10 @@ impl TableIndexList {
     /// 检查索引名称是否唯一（即尚未存在同名索引）（C++: `NameIsUnique(name)`）。
     pub fn name_is_unique(&self, name: &str) -> bool {
         let inner = self.entries.lock();
-        !inner.entries.iter().any(|e| {
-            e.index.as_ref().map(|i| i.name.as_str()) == Some(name)
-        })
+        !inner
+            .entries
+            .iter()
+            .any(|e| e.index.as_ref().map(|i| i.name.as_str()) == Some(name))
     }
 
     /// 查找外键索引（C++: `FindForeignKeyIndex()`）。

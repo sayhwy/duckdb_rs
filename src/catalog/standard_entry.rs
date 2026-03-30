@@ -16,11 +16,11 @@
 //! | `SchemaCatalogEntry& ParentSchema()`  | `parent_schema() -> &str`              |
 //! | `const SchemaCatalogEntry& ParentSchema() const` | `parent_schema() -> &str` （同一方法，Rust 不区分 const） |
 
-use super::catalog_entry::{InCatalogEntry, CatalogEntryFields, CatalogEntryVirtual};
+use super::catalog_entry::{CatalogEntryFields, CatalogEntryVirtual, InCatalogEntry};
 use super::dependency::LogicalDependencyList;
-use super::types::{CatalogType, CreateInfo, AlterInfo};
 use super::error::CatalogError;
 use super::transaction::CatalogTransaction;
+use super::types::{AlterInfo, CatalogType, CreateInfo};
 
 // ─── StandardEntry ─────────────────────────────────────────────────────────────
 

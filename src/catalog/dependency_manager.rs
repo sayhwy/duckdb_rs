@@ -20,19 +20,19 @@
 //! | `CatalogSet dependents` | `dependents: CatalogSet` |
 //! | `DependencyCatalogSet` | `DependencyCatalogSet` |
 
-use std::collections::HashMap;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 
-use super::types::CatalogType;
-use super::error::CatalogError;
-use super::dependency::{
-    CatalogEntryInfo, DependencyInfo, DependencySubject, DependencyDependent,
-    DependencySubjectFlags, DependencyDependentFlags,
-    MangledEntryName, MangledDependencyName, LogicalDependencyList,
-};
-use super::transaction::CatalogTransaction;
-use super::entry::{CatalogEntryBase, CatalogEntryKind, CatalogEntryNode, DependencyRelationData};
 use super::catalog_set::{CatalogSet, LookupFailureReason};
+use super::dependency::{
+    CatalogEntryInfo, DependencyDependent, DependencyDependentFlags, DependencyInfo,
+    DependencySubject, DependencySubjectFlags, LogicalDependencyList, MangledDependencyName,
+    MangledEntryName,
+};
+use super::entry::{CatalogEntryBase, CatalogEntryKind, CatalogEntryNode, DependencyRelationData};
+use super::error::CatalogError;
+use super::transaction::CatalogTransaction;
+use super::types::CatalogType;
 
 // ─── DependencyCatalogSet ──────────────────────────────────────────────────────
 
@@ -48,7 +48,11 @@ pub struct DependencyCatalogSet<'a> {
 impl<'a> DependencyCatalogSet<'a> {
     pub fn new(set: &'a CatalogSet, info: CatalogEntryInfo) -> Self {
         let mangled_name = MangledEntryName::new(&info);
-        Self { set, _info: info, _mangled_name: mangled_name }
+        Self {
+            set,
+            _info: info,
+            _mangled_name: mangled_name,
+        }
     }
 
     /// 创建依赖记录（C++: `DependencyCatalogSet::CreateEntry`）。
@@ -68,8 +72,12 @@ impl<'a> DependencyCatalogSet<'a> {
         );
         base.internal = true;
         base.set_timestamp(txn.transaction_id);
-        let node = Box::new(CatalogEntryNode::new(base, CatalogEntryKind::DependencyRelation(data)));
-        self.set.create_entry(txn, &dep_name.name, node, &LogicalDependencyList::new())
+        let node = Box::new(CatalogEntryNode::new(
+            base,
+            CatalogEntryKind::DependencyRelation(data),
+        ));
+        self.set
+            .create_entry(txn, &dep_name.name, node, &LogicalDependencyList::new())
     }
 
     /// 查找依赖记录（C++: `DependencyCatalogSet::GetEntry`）。
@@ -106,7 +114,7 @@ impl<'a> DependencyCatalogSet<'a> {
 /// 追踪 catalog 条目之间的依赖关系，在 DROP 时进行级联或阻止删除。
 pub struct DependencyManager {
     /// 被依赖方视图（key = mangled(subject)）（C++: `CatalogSet subjects`）。
-    pub subjects:  CatalogSet,
+    pub subjects: CatalogSet,
     /// 依赖方视图（key = mangled(dependent)）（C++: `CatalogSet dependents`）。
     pub dependents: CatalogSet,
     /// 所属 catalog 的 OID。
@@ -118,7 +126,7 @@ pub struct DependencyManager {
 impl DependencyManager {
     pub fn new(catalog_oid: u64) -> Self {
         Self {
-            subjects:   CatalogSet::new(catalog_oid),
+            subjects: CatalogSet::new(catalog_oid),
             dependents: CatalogSet::new(catalog_oid),
             catalog_oid,
             write_lock: Mutex::new(()),
@@ -174,7 +182,9 @@ impl DependencyManager {
             let subj_dep_set = DependencyCatalogSet::new(&self.subjects, subject_info.clone());
             let _ = subj_dep_set.create_entry(
                 txn,
-                &MangledEntryName { name: dep_dep_name.name.clone() },
+                &MangledEntryName {
+                    name: dep_dep_name.name.clone(),
+                },
                 subj_data,
             );
 
@@ -188,7 +198,9 @@ impl DependencyManager {
             let dep_dep_set = DependencyCatalogSet::new(&self.dependents, dependent_info.clone());
             let _ = dep_dep_set.create_entry(
                 txn,
-                &MangledEntryName { name: dep_subj_name.name.clone() },
+                &MangledEntryName {
+                    name: dep_subj_name.name.clone(),
+                },
                 dep_data,
             );
         }
@@ -223,7 +235,9 @@ impl DependencyManager {
         let subj_set = DependencyCatalogSet::new(&self.subjects, owned_info.clone());
         let _ = subj_set.create_entry(
             txn,
-            &MangledEntryName { name: ownership_name.name.clone() },
+            &MangledEntryName {
+                name: ownership_name.name.clone(),
+            },
             subj_data,
         );
 
@@ -256,7 +270,10 @@ impl DependencyManager {
         });
 
         if !cascade && !to_drop.is_empty() {
-            let names: Vec<_> = to_drop.iter().map(|i| format!("{}.{}", i.schema, i.name)).collect();
+            let names: Vec<_> = to_drop
+                .iter()
+                .map(|i| format!("{}.{}", i.schema, i.name))
+                .collect();
             return Err(CatalogError::dependency_violation(
                 &subject_info.name,
                 format!("used by: {}", names.join(", ")),
@@ -318,13 +335,13 @@ impl DependencyManager {
     pub fn reorder_entries(&self, entries: &mut Vec<CatalogEntryInfo>) {
         // 简单实现：按类型排序（视图/索引先删，表后删，schema 最后）
         entries.sort_by_key(|e| match e.entry_type {
-            CatalogType::IndexEntry        => 0u8,
-            CatalogType::ViewEntry         => 1,
-            CatalogType::TableEntry        => 2,
-            CatalogType::SequenceEntry     => 3,
-            CatalogType::TypeEntry         => 4,
-            CatalogType::SchemaEntry       => 5,
-            _                              => 3,
+            CatalogType::IndexEntry => 0u8,
+            CatalogType::ViewEntry => 1,
+            CatalogType::TableEntry => 2,
+            CatalogType::SequenceEntry => 3,
+            CatalogType::TypeEntry => 4,
+            CatalogType::SchemaEntry => 5,
+            _ => 3,
         });
     }
 }

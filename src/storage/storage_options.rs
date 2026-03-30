@@ -66,9 +66,9 @@ impl CipherType {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Invalid => "INVALID",
-            Self::Gcm     => "GCM",
-            Self::Ctr     => "CTR",
-            Self::Cbc     => "CBC",
+            Self::Gcm => "GCM",
+            Self::Ctr => "CTR",
+            Self::Cbc => "CBC",
         }
     }
 }
@@ -143,7 +143,11 @@ mod tests {
 
     #[test]
     fn cipher_type_roundtrip() {
-        for (s, expected) in [("GCM", CipherType::Gcm), ("CTR", CipherType::Ctr), ("CBC", CipherType::Cbc)] {
+        for (s, expected) in [
+            ("GCM", CipherType::Gcm),
+            ("CTR", CipherType::Ctr),
+            ("CBC", CipherType::Cbc),
+        ] {
             let parsed = CipherType::from_str(s).unwrap();
             assert_eq!(parsed, expected);
             assert_eq!(parsed.as_str(), s);

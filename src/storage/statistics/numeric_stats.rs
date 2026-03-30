@@ -1,5 +1,5 @@
-use crate::common::types::{LogicalType, LogicalTypeId};
 use super::FilterPropagateResult;
+use crate::common::types::{LogicalType, LogicalTypeId};
 use std::fmt;
 
 /// Union type for storing numeric values of different types
@@ -92,7 +92,9 @@ impl NumericStats {
             match logical_type.id {
                 LogicalTypeId::Boolean => data.min.boolean = *((&value as *const T) as *const bool),
                 LogicalTypeId::TinyInt => data.min.tinyint = *((&value as *const T) as *const i8),
-                LogicalTypeId::SmallInt => data.min.smallint = *((&value as *const T) as *const i16),
+                LogicalTypeId::SmallInt => {
+                    data.min.smallint = *((&value as *const T) as *const i16)
+                }
                 LogicalTypeId::Integer => data.min.integer = *((&value as *const T) as *const i32),
                 LogicalTypeId::BigInt => data.min.bigint = *((&value as *const T) as *const i64),
                 LogicalTypeId::HugeInt => data.min.hugeint = *((&value as *const T) as *const i128),
@@ -110,7 +112,9 @@ impl NumericStats {
             match logical_type.id {
                 LogicalTypeId::Boolean => data.max.boolean = *((&value as *const T) as *const bool),
                 LogicalTypeId::TinyInt => data.max.tinyint = *((&value as *const T) as *const i8),
-                LogicalTypeId::SmallInt => data.max.smallint = *((&value as *const T) as *const i16),
+                LogicalTypeId::SmallInt => {
+                    data.max.smallint = *((&value as *const T) as *const i16)
+                }
                 LogicalTypeId::Integer => data.max.integer = *((&value as *const T) as *const i32),
                 LogicalTypeId::BigInt => data.max.bigint = *((&value as *const T) as *const i64),
                 LogicalTypeId::HugeInt => data.max.hugeint = *((&value as *const T) as *const i128),
@@ -122,7 +126,11 @@ impl NumericStats {
     }
 
     /// Merge two numeric statistics
-    pub fn merge(data: &mut NumericStatsData, other: &NumericStatsData, logical_type: &LogicalType) {
+    pub fn merge(
+        data: &mut NumericStatsData,
+        other: &NumericStatsData,
+        logical_type: &LogicalType,
+    ) {
         if !other.has_min || !data.has_min {
             data.has_min = false;
         } else {
@@ -144,29 +152,75 @@ impl NumericStats {
 
     /// Compare two numeric values
     /// Returns: -1 if a < b, 0 if a == b, 1 if a > b
-    fn compare_values(a: &NumericValueUnion, b: &NumericValueUnion, logical_type: &LogicalType) -> i32 {
+    fn compare_values(
+        a: &NumericValueUnion,
+        b: &NumericValueUnion,
+        logical_type: &LogicalType,
+    ) -> i32 {
         unsafe {
             match logical_type.id {
                 LogicalTypeId::TinyInt => {
-                    if a.tinyint < b.tinyint { -1 } else if a.tinyint > b.tinyint { 1 } else { 0 }
+                    if a.tinyint < b.tinyint {
+                        -1
+                    } else if a.tinyint > b.tinyint {
+                        1
+                    } else {
+                        0
+                    }
                 }
                 LogicalTypeId::SmallInt => {
-                    if a.smallint < b.smallint { -1 } else if a.smallint > b.smallint { 1 } else { 0 }
+                    if a.smallint < b.smallint {
+                        -1
+                    } else if a.smallint > b.smallint {
+                        1
+                    } else {
+                        0
+                    }
                 }
                 LogicalTypeId::Integer => {
-                    if a.integer < b.integer { -1 } else if a.integer > b.integer { 1 } else { 0 }
+                    if a.integer < b.integer {
+                        -1
+                    } else if a.integer > b.integer {
+                        1
+                    } else {
+                        0
+                    }
                 }
                 LogicalTypeId::BigInt => {
-                    if a.bigint < b.bigint { -1 } else if a.bigint > b.bigint { 1 } else { 0 }
+                    if a.bigint < b.bigint {
+                        -1
+                    } else if a.bigint > b.bigint {
+                        1
+                    } else {
+                        0
+                    }
                 }
                 LogicalTypeId::HugeInt => {
-                    if a.hugeint < b.hugeint { -1 } else if a.hugeint > b.hugeint { 1 } else { 0 }
+                    if a.hugeint < b.hugeint {
+                        -1
+                    } else if a.hugeint > b.hugeint {
+                        1
+                    } else {
+                        0
+                    }
                 }
                 LogicalTypeId::Float => {
-                    if a.float < b.float { -1 } else if a.float > b.float { 1 } else { 0 }
+                    if a.float < b.float {
+                        -1
+                    } else if a.float > b.float {
+                        1
+                    } else {
+                        0
+                    }
                 }
                 LogicalTypeId::Double => {
-                    if a.double < b.double { -1 } else if a.double > b.double { 1 } else { 0 }
+                    if a.double < b.double {
+                        -1
+                    } else if a.double > b.double {
+                        1
+                    } else {
+                        0
+                    }
                 }
                 _ => 0,
             }

@@ -23,14 +23,14 @@
 //! to determine when to flush. When the number of unflushed complete row groups
 //! exceeds this threshold, they are written to disk using the partial block manager.
 
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::sync::Arc;
 
 use crate::storage::data_table::{ClientContext, ColumnDefinition, DataTable};
 use crate::storage::table::column_checkpoint_state::PartialBlockManager;
+use crate::storage::table::data_table_info::DataTableInfo;
 use crate::storage::table::row_group::RowGroup;
 use crate::storage::table::row_group_collection::RowGroupCollection;
-use crate::storage::table::data_table_info::DataTableInfo;
 use crate::storage::table::types::{CompressionType, Idx, LogicalType};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -147,11 +147,7 @@ impl OptimisticDataWriter {
 
         // Create the row group collection with a large max_row_id
         const MAX_ROW_ID: Idx = i64::MAX as Idx;
-        let row_groups = RowGroupCollection::new(
-            table_info,
-            insert_types.to_vec(),
-            MAX_ROW_ID,
-        );
+        let row_groups = RowGroupCollection::new(table_info, insert_types.to_vec(), MAX_ROW_ID);
 
         let mut collection = OptimisticWriteCollection::new(row_groups);
 
@@ -160,7 +156,9 @@ impl OptimisticDataWriter {
             for _ in 0..insert_types.len() {
                 // Create a new partial block manager for each column
                 // In a full implementation, this would get the block manager from table IO manager
-                collection.partial_block_managers.push(Box::new(PartialBlockManager));
+                collection
+                    .partial_block_managers
+                    .push(Box::new(PartialBlockManager));
             }
         }
 
@@ -336,7 +334,8 @@ impl OptimisticDataWriter {
         segment_indexes: &[i64],
     ) {
         // Get compression types for all columns
-        let compression_types: Vec<CompressionType> = self.table
+        let compression_types: Vec<CompressionType> = self
+            .table
             .column_definitions
             .iter()
             .map(|col| self.get_compression_type(col))
@@ -353,10 +352,9 @@ impl OptimisticDataWriter {
             let write_data = rg.write_to_disk(&write_info);
 
             // Replace the row group in the collection with the checkpointed version
-            collection.collection.set_row_group(
-                segment_indexes[i],
-                write_data.result_row_group,
-            );
+            collection
+                .collection
+                .set_row_group(segment_indexes[i], write_data.result_row_group);
         }
     }
 

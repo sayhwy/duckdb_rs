@@ -15,13 +15,13 @@
 //   两者分开定义，通过 BlockManager::buffer_manager() 关联：
 //   对应 C++ 中 BlockManager 持有 BufferManager& 成员。
 
-use std::any::Any;
-use std::sync::Arc;
-use super::types::{BlockId, MemoryTag, MAXIMUM_BLOCK};
-use super::file_buffer::FileBuffer;
 use super::block_handle::BlockHandle;
 use super::buffer_handle::BufferHandle;
 use super::buffer_pool::BufferPool;
+use super::file_buffer::FileBuffer;
+use super::types::{BlockId, MAXIMUM_BLOCK, MemoryTag};
+use std::any::Any;
+use std::sync::Arc;
 
 // ─── BufferManager trait ──────────────────────────────────────
 /// 对应 C++ BufferManager（部分接口）
@@ -54,12 +54,7 @@ pub trait BufferManager: Send + Sync {
 
     /// 对应 C++ BufferManager::WriteTemporaryBuffer()
     /// 将 ManagedBuffer 溢写到临时文件。
-    fn write_temporary_buffer(
-        &self,
-        tag: MemoryTag,
-        block_id: BlockId,
-        buffer: &FileBuffer,
-    );
+    fn write_temporary_buffer(&self, tag: MemoryTag, block_id: BlockId, buffer: &FileBuffer);
 
     /// 对应 C++ BufferManager::DeleteTemporaryFile()
     fn delete_temporary_file(&self, block: &BlockHandle);
@@ -137,11 +132,8 @@ pub trait BlockManager: Send + Sync {
     ///
     /// 分配一个新 FileBuffer 用于持久化 block；
     /// 若提供 `reusable` 且 header_size 匹配则复用。
-    fn create_block(
-        &self,
-        block_id: BlockId,
-        reusable: Option<Box<FileBuffer>>,
-    ) -> Box<FileBuffer>;
+    fn create_block(&self, block_id: BlockId, reusable: Option<Box<FileBuffer>>)
+    -> Box<FileBuffer>;
 
     /// 对应 C++ Read(FileBuffer &block, block_id_t id)
     /// 从磁盘读取 block_id 对应的数据到 block.raw_mut()。
@@ -164,16 +156,13 @@ pub trait BlockManager: Send + Sync {
         block_id: BlockId,
         reusable: Option<Box<FileBuffer>>,
     ) -> Box<FileBuffer> {
-        self.buffer_manager().read_temporary_buffer(tag, block_id, reusable)
+        self.buffer_manager()
+            .read_temporary_buffer(tag, block_id, reusable)
     }
 
-    fn write_temporary_buffer(
-        &self,
-        tag: MemoryTag,
-        block_id: BlockId,
-        buffer: &FileBuffer,
-    ) {
-        self.buffer_manager().write_temporary_buffer(tag, block_id, buffer);
+    fn write_temporary_buffer(&self, tag: MemoryTag, block_id: BlockId, buffer: &FileBuffer) {
+        self.buffer_manager()
+            .write_temporary_buffer(tag, block_id, buffer);
     }
 
     // ── 持久化转换 ───────────────────────────────────────────
@@ -182,11 +171,7 @@ pub trait BlockManager: Send + Sync {
     ///
     /// 将 source FileBuffer 转换为适合持久化的 Block 格式
     /// （可能需要重新分配以匹配 header 大小）。
-    fn convert_block(
-        &self,
-        block_id: BlockId,
-        source: &FileBuffer,
-    ) -> Box<FileBuffer>;
+    fn convert_block(&self, block_id: BlockId, source: &FileBuffer) -> Box<FileBuffer>;
 
     /// 对应 C++ ConvertToPersistent(QueryContext, block_id_t, Arc<BlockHandle>)
     ///

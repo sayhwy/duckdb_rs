@@ -34,22 +34,20 @@
 //! **TransactionRef 定位**：`Transaction::transaction_id()` 方法让管理器在收到 `&TransactionRef`
 //! 时，通过 transaction_id 在 `active_transactions` 中找到对应 `Arc<DuckTxnHandle>`。
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::Mutex;
 
-use super::types::{
-    TransactionId, Idx,
-    ActiveTransactionState,
-    TRANSACTION_ID_START, MAX_TRANSACTION_ID,
-};
-use super::transaction::{Transaction, TransactionRef};
-use super::transaction_manager::{TransactionManager, ErrorData};
-use super::undo_buffer::CommitInfo;
 use super::duck_transaction::{DuckTransaction, SequenceValue};
-use crate::storage::storage_lock::{StorageLock, StorageLockKey};
+use super::transaction::{Transaction, TransactionRef};
+use super::transaction_manager::{ErrorData, TransactionManager};
+use super::types::{
+    ActiveTransactionState, Idx, MAX_TRANSACTION_ID, TRANSACTION_ID_START, TransactionId,
+};
+use super::undo_buffer::CommitInfo;
 use crate::storage::data_table::DataTable;
+use crate::storage::storage_lock::{StorageLock, StorageLockKey};
 use crate::storage::storage_manager::StorageManager;
 
 // ─── CheckpointType ────────────────────────────────────────────────────────────
@@ -82,12 +80,20 @@ pub struct CheckpointDecision {
 impl CheckpointDecision {
     /// 可以做指定类型的 checkpoint。
     pub fn yes(checkpoint_type: CheckpointType) -> Self {
-        Self { can_checkpoint: true, reason: String::new(), checkpoint_type }
+        Self {
+            can_checkpoint: true,
+            reason: String::new(),
+            checkpoint_type,
+        }
     }
 
     /// 不能做 checkpoint，附原因。
     pub fn no(reason: impl Into<String>) -> Self {
-        Self { can_checkpoint: false, reason: reason.into(), checkpoint_type: CheckpointType::FullCheckpoint }
+        Self {
+            can_checkpoint: false,
+            reason: reason.into(),
+            checkpoint_type: CheckpointType::FullCheckpoint,
+        }
     }
 }
 
@@ -135,7 +141,9 @@ pub struct DuckTxnHandle {
 
 impl DuckTxnHandle {
     fn wrap(txn: DuckTransaction) -> Arc<Self> {
-        Arc::new(Self { inner: Mutex::new(txn) })
+        Arc::new(Self {
+            inner: Mutex::new(txn),
+        })
     }
 
     /// 获取内部 DuckTransaction 的 MutexGuard。
@@ -189,7 +197,9 @@ impl Transaction for DuckTxnHandle {
         self.transaction_id()
     }
 
-    fn is_duck_transaction(&self) -> bool { true }
+    fn is_duck_transaction(&self) -> bool {
+        true
+    }
 
     fn active_query(&self) -> TransactionId {
         self.inner.lock().active_query()
@@ -215,7 +225,10 @@ pub struct DuckCleanupInfo {
 
 impl DuckCleanupInfo {
     fn new() -> Self {
-        Self { lowest_start_time: TRANSACTION_ID_START, transactions: Vec::new() }
+        Self {
+            lowest_start_time: TRANSACTION_ID_START,
+            transactions: Vec::new(),
+        }
     }
 
     /// 执行 cleanup（C++: `DuckCleanupInfo::Cleanup() noexcept`）。
@@ -268,12 +281,15 @@ impl TransactionLockInner {
 
     /// 检查是否存在除 `exclude_id` 之外的其他活跃事务（C++: `HasOtherTransactions()`）。
     fn has_other_transactions(&self, exclude_id: TransactionId) -> bool {
-        self.active_transactions.iter().any(|h| h.transaction_id() != exclude_id)
+        self.active_transactions
+            .iter()
+            .any(|h| h.transaction_id() != exclude_id)
     }
 
     /// 构建除 `exclude_id` 之外的其他活跃事务 ID 列表（调试信息用）。
     fn other_transaction_ids(&self, exclude_id: TransactionId) -> String {
-        self.active_transactions.iter()
+        self.active_transactions
+            .iter()
             .filter(|h| h.transaction_id() != exclude_id)
             .map(|h| format!("[{}]", h.transaction_id()))
             .collect::<Vec<_>>()
@@ -294,7 +310,6 @@ struct CleanupQueueInner {
 /// DuckDB 原生事务管理器（C++: `class DuckTransactionManager : public TransactionManager`）。
 pub struct DuckTransactionManager {
     // ── 原子计数器（无锁快速读）──────────────────────────────────────────────
-
     /// 全局最低活跃 transaction_id（C++: `atomic<transaction_t> lowest_active_id`）。
     ///
     /// 初始值 = `TRANSACTION_ID_START`（无活跃事务时）。
@@ -318,7 +333,6 @@ pub struct DuckTransactionManager {
     last_uncommitted_catalog_version: AtomicU64,
 
     // ── Mutex 保护的可变状态 ───────────────────────────────────────────────────
-
     /// 核心事务状态（C++: 多字段在 `transaction_lock` 下）。
     inner: Mutex<TransactionLockInner>,
 
@@ -334,7 +348,6 @@ pub struct DuckTransactionManager {
     start_transaction_lock: Mutex<()>,
 
     // ── Checkpoint 锁 ─────────────────────────────────────────────────────────
-
     /// Checkpoint 读写锁（C++: `StorageLock checkpoint_lock`）。
     ///
     /// 写事务持有共享锁（阻止并发 checkpoint），checkpoint 持有独占锁（等待所有写事务完成）。
@@ -354,7 +367,7 @@ impl DuckTransactionManager {
             active_checkpoint: AtomicU64::new(MAX_TRANSACTION_ID),
             last_uncommitted_catalog_version: AtomicU64::new(TRANSACTION_ID_START),
             inner: Mutex::new(TransactionLockInner {
-                current_start_timestamp: 2,            // C++: start at 2
+                current_start_timestamp: 2, // C++: start at 2
                 current_transaction_id: TRANSACTION_ID_START,
                 active_transactions: Vec::new(),
                 recently_committed_transactions: Vec::new(),
@@ -412,7 +425,8 @@ impl DuckTransactionManager {
 
     /// 重置活跃 checkpoint ID 为 MAX（C++: `DuckTransactionManager::ResetCheckpointId()`）。
     pub fn reset_checkpoint_id(&self) {
-        self.active_checkpoint.store(MAX_TRANSACTION_ID, Ordering::Release);
+        self.active_checkpoint
+            .store(MAX_TRANSACTION_ID, Ordering::Release);
     }
 
     // ── Checkpoint 锁公共接口 ──────────────────────────────────────────────────
@@ -425,7 +439,10 @@ impl DuckTransactionManager {
 
     /// 尝试将现有共享锁升级为独占锁
     /// （C++: `DuckTransactionManager::TryUpgradeCheckpointLock()`）。
-    pub fn try_upgrade_checkpoint_lock(&self, lock: &StorageLockKey) -> Option<Box<StorageLockKey>> {
+    pub fn try_upgrade_checkpoint_lock(
+        &self,
+        lock: &StorageLockKey,
+    ) -> Option<Box<StorageLockKey>> {
         self.checkpoint_lock.try_upgrade_checkpoint_lock(lock)
     }
 
@@ -474,20 +491,25 @@ impl DuckTransactionManager {
     ) -> Result<(), ErrorData> {
         if !db_ctx.is_system && !db_ctx.is_temporary && transaction.is_read_only() {
             return Err(ErrorData::new(
-                "Attempting to do catalog changes on a transaction that is read-only"
+                "Attempting to do catalog changes on a transaction that is read-only",
             ));
         }
         // 找到对应事务句柄
         let txn_id = transaction.transaction_id();
         let inner = self.inner.lock();
-        let handle = inner.active_transactions.iter()
+        let handle = inner
+            .active_transactions
+            .iter()
             .find(|h| h.transaction_id() == txn_id)
             .cloned()
             .ok_or_else(|| ErrorData::new("Transaction not found in active list"))?;
         drop(inner); // 释放 transaction_lock，避免与 sequence_lock 死锁
 
         // C++: transaction.catalog_version = ++last_uncommitted_catalog_version;
-        let new_version = self.last_uncommitted_catalog_version.fetch_add(1, Ordering::AcqRel) + 1;
+        let new_version = self
+            .last_uncommitted_catalog_version
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
         {
             let mut txn = handle.inner.lock();
             txn.catalog_version.store(new_version, Ordering::Relaxed);
@@ -510,13 +532,18 @@ impl DuckTransactionManager {
         }
         let txn_id = transaction.transaction_id();
         let inner = self.inner.lock();
-        let handle = inner.active_transactions.iter()
+        let handle = inner
+            .active_transactions
+            .iter()
             .find(|h| h.transaction_id() == txn_id)
             .cloned()
             .ok_or_else(|| ErrorData::new("Transaction not found in active list"))?;
         drop(inner);
 
-        let new_version = self.last_uncommitted_catalog_version.fetch_add(1, Ordering::AcqRel) + 1;
+        let new_version = self
+            .last_uncommitted_catalog_version
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
         {
             let mut txn = handle.inner.lock();
             txn.catalog_version.store(new_version, Ordering::Relaxed);
@@ -560,21 +587,26 @@ impl DuckTransactionManager {
 
         // C++: if (!transaction.AutomaticCheckpoint(db, undo_properties)) return "no reason";
         let undo_properties = handle.inner.lock().get_undo_properties();
-        let should_auto_checkpoint = handle.inner.lock().automatic_checkpoint(
-            db,
-            &undo_properties,
-        );
+        let should_auto_checkpoint = handle
+            .inner
+            .lock()
+            .automatic_checkpoint(db, &undo_properties);
         if !should_auto_checkpoint {
             return CheckpointDecision::no("no reason to automatically checkpoint");
         }
 
         // C++: if (DebugSkipCheckpointOnCommitSetting) return "disabled through config";
         if db_ctx.debug_skip_checkpoint_on_commit {
-            return CheckpointDecision::no("checkpointing on commit disabled through configuration");
+            return CheckpointDecision::no(
+                "checkpointing on commit disabled through configuration",
+            );
         }
 
         // C++: lock = transaction.TryGetCheckpointLock(); if (!lock) return "failed to obtain lock";
-        let lock = handle.inner.lock().try_get_checkpoint_lock(&self.checkpoint_lock);
+        let lock = handle
+            .inner
+            .lock()
+            .try_get_checkpoint_lock(&self.checkpoint_lock);
         if lock.is_none() {
             return CheckpointDecision::no(
                 "Failed to obtain checkpoint lock - another thread is writing/checkpointing \
@@ -609,7 +641,9 @@ impl DuckTransactionManager {
         // C++: if (storage_manager.InMemory() && !storage_manager.CompressionIsEnabled()) { ... }
         if db_ctx.storage_in_memory && !db_ctx.compression_enabled {
             if checkpoint_type == CheckpointType::ConcurrentCheckpoint {
-                return CheckpointDecision::no("Cannot vacuum, and compression is disabled for in-memory table");
+                return CheckpointDecision::no(
+                    "Cannot vacuum, and compression is disabled for in-memory table",
+                );
             }
             return CheckpointDecision::yes(CheckpointType::VacuumOnly);
         }
@@ -650,8 +684,12 @@ impl DuckTransactionManager {
             }
             let st = h.start_time();
             let ti = h.transaction_id();
-            if st < lowest_start_time { lowest_start_time = st; }
-            if ti < lowest_transaction_id { lowest_transaction_id = ti; }
+            if st < lowest_start_time {
+                lowest_start_time = st;
+            }
+            if ti < lowest_transaction_id {
+                lowest_transaction_id = ti;
+            }
         }
 
         // C++: if (active_checkpoint_id != MAX_TRANSACTION_ID && active_checkpoint_id < lowest_start_time)
@@ -661,10 +699,15 @@ impl DuckTransactionManager {
         }
 
         // ── 步骤 2：更新原子计数器 ─────────────────────────────────────────
-        self.lowest_active_start.store(lowest_start_time, Ordering::Release);
-        self.lowest_active_id.store(lowest_transaction_id, Ordering::Release);
+        self.lowest_active_start
+            .store(lowest_start_time, Ordering::Release);
+        self.lowest_active_id
+            .store(lowest_transaction_id, Ordering::Release);
 
-        debug_assert!(t_index < inner.active_transactions.len(), "Transaction not found in active list");
+        debug_assert!(
+            t_index < inner.active_transactions.len(),
+            "Transaction not found in active list"
+        );
 
         // ── 步骤 3：取出目标事务 ───────────────────────────────────────────
         let current_transaction = inner.active_transactions.remove(t_index);
@@ -675,7 +718,9 @@ impl DuckTransactionManager {
             if commit_id != 0 {
                 // 已提交：暂存到 recently_committed（可能被其他活跃事务读旧版本）
                 // C++: recently_committed_transactions.push_back(std::move(current_transaction));
-                inner.recently_committed_transactions.push(current_transaction);
+                inner
+                    .recently_committed_transactions
+                    .push(current_transaction);
             } else {
                 // 已中止（回滚）：直接进 cleanup
                 // C++: cleanup_info->transactions.push_back(std::move(current_transaction));
@@ -704,8 +749,10 @@ impl DuckTransactionManager {
             drain_count += 1;
         }
         if drain_count > 0 {
-            let drained: Vec<Arc<DuckTxnHandle>> =
-                inner.recently_committed_transactions.drain(..drain_count).collect();
+            let drained: Vec<Arc<DuckTxnHandle>> = inner
+                .recently_committed_transactions
+                .drain(..drain_count)
+                .collect();
             cleanup_info.transactions.extend(drained);
         }
 
@@ -785,7 +832,7 @@ impl DuckTransactionManager {
 
         // 构建 DbContext（C++: 从 AttachedDatabase 获取）
         let db_ctx = DbContext {
-            is_system: false, // TODO: 从 db 获取
+            is_system: false,    // TODO: 从 db 获取
             is_temporary: false, // TODO: 从 db 获取
             is_read_only: false,
             storage_loaded: true,
@@ -810,7 +857,12 @@ impl DuckTransactionManager {
         let mut inner = self.inner.lock();
 
         // 找到事务句柄（持有 transaction_lock 期间）
-        let handle = match inner.active_transactions.iter().find(|h| h.transaction_id() == txn_id).cloned() {
+        let handle = match inner
+            .active_transactions
+            .iter()
+            .find(|h| h.transaction_id() == txn_id)
+            .cloned()
+        {
             Some(h) => h,
             None => return Some(ErrorData::new("Transaction not found in active list")),
         };
@@ -819,7 +871,7 @@ impl DuckTransactionManager {
         if !db_ctx.is_system && !db_ctx.is_temporary {
             if handle.changes_made() && handle.is_read_only() {
                 return Some(ErrorData::new(
-                    "Attempting to commit a transaction that is read-only but has made changes"
+                    "Attempting to commit a transaction that is read-only but has made changes",
                 ));
             }
         }
@@ -830,7 +882,12 @@ impl DuckTransactionManager {
         //      auto checkpoint_decision = CanCheckpoint(transaction, lock, undo_properties);
         let mut checkpoint_lock_key: Option<Box<StorageLockKey>> = None;
         let mut checkpoint_decision = self.can_checkpoint(
-            &inner, txn_id, &handle, &mut checkpoint_lock_key, db, &db_ctx,
+            &inner,
+            txn_id,
+            &handle,
+            &mut checkpoint_lock_key,
+            db,
+            &db_ctx,
         );
 
         // ── 步骤 3：写 WAL（若需要）──────────────────────────────────────────
@@ -838,8 +895,12 @@ impl DuckTransactionManager {
         //          t_lock.unlock(); // grab WAL lock, write WAL, t_lock.lock();
         //      }
         let mut commit_error: Option<ErrorData> = None;
-        let mut commit_state: Option<Box<dyn crate::storage::storage_manager::StorageCommitState>> = None;
-        let should_write_wal = handle.inner.lock().should_write_to_wal(db_ctx.is_system, db_ctx.has_wal);
+        let mut commit_state: Option<Box<dyn crate::storage::storage_manager::StorageCommitState>> =
+            None;
+        let should_write_wal = handle
+            .inner
+            .lock()
+            .should_write_to_wal(db_ctx.is_system, db_ctx.has_wal);
         if !checkpoint_decision.can_checkpoint && should_write_wal {
             // 释放 transaction_lock，避免长时间 WAL 写阻塞其他事务开始
             drop(inner);
@@ -848,7 +909,11 @@ impl DuckTransactionManager {
             if db_ctx.recovery_mode_default {
                 // 调用 write_to_wal，传入 storage_manager 和 tables
                 if let Some(storage_mgr) = db_ctx.storage_manager.as_ref() {
-                    match handle.inner.lock().write_to_wal(storage_mgr.as_ref(), &tables) {
+                    match handle
+                        .inner
+                        .lock()
+                        .write_to_wal(storage_mgr.as_ref(), &tables)
+                    {
                         Ok(state) => {
                             commit_state = Some(state);
                         }
@@ -857,7 +922,9 @@ impl DuckTransactionManager {
                         }
                     }
                 } else {
-                    commit_error = Some(ErrorData::new("StorageManager not available for WAL write".to_string()));
+                    commit_error = Some(ErrorData::new(
+                        "StorageManager not available for WAL write".to_string(),
+                    ));
                 }
             }
             // 重新获取 transaction_lock
@@ -902,9 +969,8 @@ impl DuckTransactionManager {
         if commit_error.is_some() {
             // C++: commit 失败 → Rollback
             // checkpoint_decision = CheckpointDecision(error.Message());
-            checkpoint_decision = CheckpointDecision::no(
-                commit_error.as_ref().unwrap().message.clone()
-            );
+            checkpoint_decision =
+                CheckpointDecision::no(commit_error.as_ref().unwrap().message.clone());
             let mut txn = handle.inner.lock();
             txn.commit_id = 0;
             if let Err(rollback_err) = txn.rollback() {
@@ -921,11 +987,17 @@ impl DuckTransactionManager {
 
             // C++: if (transaction.catalog_version >= TRANSACTION_ID_START)
             //          transaction.catalog_version = ++last_committed_version;
-            let catalog_version = handle.inner.lock().catalog_version.load(std::sync::atomic::Ordering::Relaxed);
+            let catalog_version = handle
+                .inner
+                .lock()
+                .catalog_version
+                .load(std::sync::atomic::Ordering::Relaxed);
             if catalog_version >= TRANSACTION_ID_START {
                 inner.last_committed_version += 1;
-                handle.inner.lock().catalog_version
-                    .store(inner.last_committed_version, std::sync::atomic::Ordering::Relaxed);
+                handle.inner.lock().catalog_version.store(
+                    inner.last_committed_version,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
         }
 
@@ -997,13 +1069,23 @@ impl DuckTransactionManager {
         // C++: lock_guard<mutex> t_lock(transaction_lock);
         let mut inner = self.inner.lock();
 
-        let handle = match inner.active_transactions.iter().find(|h| h.transaction_id() == txn_id).cloned() {
+        let handle = match inner
+            .active_transactions
+            .iter()
+            .find(|h| h.transaction_id() == txn_id)
+            .cloned()
+        {
             Some(h) => h,
             None => return Some(ErrorData::new("Transaction not found in active list")),
         };
 
         // C++: error = transaction.Rollback();
-        let rollback_error = handle.inner.lock().rollback().err().map(|e| ErrorData::new(e));
+        let rollback_error = handle
+            .inner
+            .lock()
+            .rollback()
+            .err()
+            .map(|e| ErrorData::new(e));
 
         // C++: auto cleanup_info = RemoveTransaction(transaction);
         //      (store_transaction = transaction.ChangesMade())
@@ -1018,7 +1100,10 @@ impl DuckTransactionManager {
 
         // C++: if (error.HasError()) throw FatalException(...);
         if let Some(ref err) = rollback_error {
-            panic!("Failed to rollback transaction. Cannot continue operation.\nError: {}", err.message);
+            panic!(
+                "Failed to rollback transaction. Cannot continue operation.\nError: {}",
+                err.message
+            );
         }
 
         rollback_error
@@ -1044,11 +1129,11 @@ impl DuckTransactionManager {
         if current_txn_id.is_some() {
             if force {
                 return Err(ErrorData::new(
-                    "Cannot FORCE CHECKPOINT: the current transaction has been started for this database"
+                    "Cannot FORCE CHECKPOINT: the current transaction has been started for this database",
                 ));
             } else if current_txn_has_changes {
                 return Err(ErrorData::new(
-                    "Cannot CHECKPOINT: the current transaction has transaction local changes"
+                    "Cannot CHECKPOINT: the current transaction has transaction local changes",
                 ));
             }
         }
@@ -1056,11 +1141,15 @@ impl DuckTransactionManager {
         let lock: Box<StorageLockKey>;
         if !force {
             // C++: lock = checkpoint_lock.TryGetExclusiveLock(); if (!lock) throw ...;
-            lock = self.checkpoint_lock.try_get_exclusive_lock()
-                .ok_or_else(|| ErrorData::new(
-                    "Cannot CHECKPOINT: there are other write transactions active. \
-                     Try using FORCE CHECKPOINT to wait until all active transactions are finished"
-                ))?;
+            lock = self
+                .checkpoint_lock
+                .try_get_exclusive_lock()
+                .ok_or_else(|| {
+                    ErrorData::new(
+                        "Cannot CHECKPOINT: there are other write transactions active. \
+                     Try using FORCE CHECKPOINT to wait until all active transactions are finished",
+                    )
+                })?;
         } else {
             // C++: lock_guard<mutex> start_lock(start_transaction_lock);
             //      while (!lock) { lock = checkpoint_lock.TryGetExclusiveLock(); }
@@ -1075,7 +1164,9 @@ impl DuckTransactionManager {
         }
 
         // C++: if (GetLastCommit() > LowestActiveStart()) options.type = CONCURRENT_CHECKPOINT;
-        let _checkpoint_type = if self.last_commit.load(Ordering::Acquire) > self.lowest_active_start.load(Ordering::Acquire) {
+        let _checkpoint_type = if self.last_commit.load(Ordering::Acquire)
+            > self.lowest_active_start.load(Ordering::Acquire)
+        {
             CheckpointType::ConcurrentCheckpoint
         } else {
             CheckpointType::FullCheckpoint
@@ -1090,7 +1181,9 @@ impl DuckTransactionManager {
 }
 
 impl Default for DuckTransactionManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TransactionManager for DuckTransactionManager {
@@ -1123,7 +1216,9 @@ impl TransactionManager for DuckTransactionManager {
     ) -> Option<ErrorData> {
         // 注意：这个方法缺少 DatabaseInstance 引用，无法完全实现
         // 应该通过新的 commit_transaction(db, transaction) 方法调用
-        Some(ErrorData::new("commit_transaction requires DatabaseInstance reference - use the new API"))
+        Some(ErrorData::new(
+            "commit_transaction requires DatabaseInstance reference - use the new API",
+        ))
     }
 
     /// 回滚事务（C++: `DuckTransactionManager::RollbackTransaction()`）。
@@ -1136,7 +1231,9 @@ impl TransactionManager for DuckTransactionManager {
         let _ = self.checkpoint_with_context(None, false, force);
     }
 
-    fn is_duck_transaction_manager(&self) -> bool { true }
+    fn is_duck_transaction_manager(&self) -> bool {
+        true
+    }
 }
 
 impl DuckTransactionManager {
@@ -1174,8 +1271,10 @@ impl DuckTransactionManager {
         //          lowest_active_id = transaction_id;
         //      }
         if inner.active_transactions.is_empty() {
-            self.lowest_active_start.store(start_time, Ordering::Release);
-            self.lowest_active_id.store(transaction_id, Ordering::Release);
+            self.lowest_active_start
+                .store(start_time, Ordering::Release);
+            self.lowest_active_id
+                .store(transaction_id, Ordering::Release);
         }
 
         // C++: auto transaction = make_uniq<DuckTransaction>(*this, context, start_time, transaction_id,

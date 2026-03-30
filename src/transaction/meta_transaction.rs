@@ -19,14 +19,14 @@
 //! | `atomic<transaction_t> active_query` | `AtomicU64` |
 //! | `DuckTransactionManager &manager` | `Arc<DuckTransactionManager>` |
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
-use parking_lot::Mutex;
 
-use super::types::{TransactionId, Timestamp, TransactionState, MAXIMUM_QUERY_ID};
-use super::transaction_manager::ErrorData;
 use super::duck_transaction_manager::{DuckTransactionManager, DuckTxnHandle};
+use super::transaction_manager::ErrorData;
+use super::types::{MAXIMUM_QUERY_ID, Timestamp, TransactionId, TransactionState};
 use crate::storage::data_table::DataTable;
 
 // ─── TransactionReference ──────────────────────────────────────────────────────
@@ -41,7 +41,10 @@ pub struct TransactionReference {
 
 impl TransactionReference {
     pub fn new(transaction: Arc<DuckTxnHandle>) -> Self {
-        Self { state: TransactionState::Uncommitted, transaction }
+        Self {
+            state: TransactionState::Uncommitted,
+            transaction,
+        }
     }
 }
 
@@ -122,16 +125,23 @@ impl MetaTransaction {
         }
         // 首次访问：创建 DuckTransaction（C++: manager.StartTransaction(context)）
         let is_read_only = inner.is_read_only;
-        let handle = self.transaction_manager.start_duck_transaction(is_read_only);
+        let handle = self
+            .transaction_manager
+            .start_duck_transaction(is_read_only);
         inner.all_transactions.push(db_id);
-        inner.transactions.insert(db_id, TransactionReference::new(Arc::clone(&handle)));
+        inner
+            .transactions
+            .insert(db_id, TransactionReference::new(Arc::clone(&handle)));
         handle
     }
 
     /// 尝试获取已有事务，不存在返回 `None`（C++: `TryGetTransaction()`）。
     pub fn try_get_transaction(&self, db_id: u64) -> Option<Arc<DuckTxnHandle>> {
         let inner = self.inner.lock();
-        inner.transactions.get(&db_id).map(|r| Arc::clone(&r.transaction))
+        inner
+            .transactions
+            .get(&db_id)
+            .map(|r| Arc::clone(&r.transaction))
     }
 
     /// 移除指定数据库的事务记录（C++: `RemoveTransaction()`）。
@@ -168,10 +178,7 @@ impl MetaTransaction {
             // C++: auto error = manager.CommitTransaction(context, transaction);
             use super::transaction::Transaction;
             let txn_ref = Arc::clone(&handle) as Arc<dyn Transaction>;
-            let result = self.transaction_manager.commit_transaction(
-                &db,
-                &txn_ref,
-            );
+            let result = self.transaction_manager.commit_transaction(&db, &txn_ref);
             if let Some(err) = result {
                 // 提交失败：回滚所有尚未提交的子事务
                 // C++: for (auto &[db, txn_ref] : transactions) { if txn_ref.state == Uncommitted rollback }
@@ -182,7 +189,8 @@ impl MetaTransaction {
                     }
                     if let Some(r) = inner.transactions.get(&remaining_db) {
                         if r.state == TransactionState::Uncommitted {
-                            self.transaction_manager.rollback_duck_transaction(&r.transaction);
+                            self.transaction_manager
+                                .rollback_duck_transaction(&r.transaction);
                         }
                     }
                 }
@@ -202,7 +210,8 @@ impl MetaTransaction {
         //          manager.RollbackTransaction(txn.transaction);
         for &db_id in inner.all_transactions.iter().rev() {
             if let Some(r) = inner.transactions.get(&db_id) {
-                self.transaction_manager.rollback_duck_transaction(&r.transaction);
+                self.transaction_manager
+                    .rollback_duck_transaction(&r.transaction);
             }
         }
     }
@@ -242,7 +251,9 @@ impl MetaTransaction {
                 inner.is_read_only = false; // 写事务
             }
             Some(existing) if existing == db_id => {}
-            Some(_) => panic!("MetaTransaction: cannot modify more than one database per transaction"),
+            Some(_) => {
+                panic!("MetaTransaction: cannot modify more than one database per transaction")
+            }
         }
     }
 

@@ -11,11 +11,11 @@
 //! - **Commit**：正向遍历，设置版本号 / 写入 WAL。
 //! - **Cleanup**：正向遍历，回收 MVCC 旧版本（在无活跃事务可见它时）。
 
-use super::types::{ActiveTransactionState, TransactionId, UndoFlags, UNDO_ENTRY_HEADER_SIZE};
-use super::undo_buffer_allocator::{UndoBufferAllocator, UndoBufferReference};
+use super::cleanup_state::CleanupState;
 use super::commit_state::CommitState;
 use super::rollback_state::RollbackState;
-use super::cleanup_state::CleanupState;
+use super::types::{ActiveTransactionState, TransactionId, UNDO_ENTRY_HEADER_SIZE, UndoFlags};
+use super::undo_buffer_allocator::{UndoBufferAllocator, UndoBufferReference};
 
 // ─── UndoBufferProperties ──────────────────────────────────────────────────────
 
@@ -135,13 +135,11 @@ impl UndoBuffer {
         properties.estimated_size = self.allocator.total_size();
 
         // 遍历条目统计类型
-        self.allocator.iterate_forward(|flags, _| {
-            match flags {
-                UndoFlags::UpdateTuple => properties.has_updates = true,
-                UndoFlags::DeleteTuple => properties.has_deletes = true,
-                UndoFlags::CatalogEntry => properties.has_catalog_changes = true,
-                _ => {}
-            }
+        self.allocator.iterate_forward(|flags, _| match flags {
+            UndoFlags::UpdateTuple => properties.has_updates = true,
+            UndoFlags::DeleteTuple => properties.has_deletes = true,
+            UndoFlags::CatalogEntry => properties.has_catalog_changes = true,
+            _ => {}
         });
 
         properties
@@ -189,7 +187,10 @@ impl UndoBuffer {
     pub fn write_to_wal(
         &self,
         commit_state: &mut dyn crate::storage::storage_manager::StorageCommitState,
-        tables: &std::collections::HashMap<u64, std::sync::Arc<crate::storage::data_table::DataTable>>,
+        tables: &std::collections::HashMap<
+            u64,
+            std::sync::Arc<crate::storage::data_table::DataTable>,
+        >,
     ) -> Result<(), String> {
         let wal = commit_state
             .wal()
@@ -206,7 +207,10 @@ impl UndoBuffer {
             .collect();
 
         struct TableAppendWriter<'a> {
-            tables: &'a std::collections::HashMap<u64, std::sync::Arc<crate::storage::data_table::DataTable>>,
+            tables: &'a std::collections::HashMap<
+                u64,
+                std::sync::Arc<crate::storage::data_table::DataTable>,
+            >,
         }
 
         impl<'a> crate::transaction::wal_write_state::AppendWriter for TableAppendWriter<'a> {
@@ -271,10 +275,8 @@ impl UndoBuffer {
     ///
     /// 只有在提交成功后、且所有可能看见旧版本的事务都已结束时调用。
     pub fn cleanup(&self, lowest_active_transaction: TransactionId) {
-        let mut cleanup_state = CleanupState::new(
-            lowest_active_transaction,
-            self.active_transaction_state,
-        );
+        let mut cleanup_state =
+            CleanupState::new(lowest_active_transaction, self.active_transaction_state);
 
         self.allocator.iterate_forward(|flags, payload| {
             cleanup_state.cleanup_entry(flags, payload);

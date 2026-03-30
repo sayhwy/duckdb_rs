@@ -17,18 +17,14 @@
 //
 // ============================================================
 
+use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
-use parking_lot::Mutex;
 
 use crate::storage::buffer::{
-    BlockGuard, BlockHandle,
-    BlockManager, BufferManager,
-    BufferHandle,
-    BufferPool,
-    BufferPoolReservation, MemoryTracker,
-    FileBuffer,
-    BlockId, BlockState, DestroyBufferUpon, FileBufferType, MemoryTag, MAXIMUM_BLOCK,
+    BlockGuard, BlockHandle, BlockId, BlockManager, BlockState, BufferHandle, BufferManager,
+    BufferPool, BufferPoolReservation, DestroyBufferUpon, FileBuffer, FileBufferType,
+    MAXIMUM_BLOCK, MemoryTag, MemoryTracker,
 };
 
 use super::storage_info::{FileOpenFlags, FileSystem, StorageResult};
@@ -141,10 +137,7 @@ impl StandardBufferManager {
             result.reservation.into_inner()
         } else {
             // 直接构造一个新预约并 resize 到 size
-            let mut r = BufferPoolReservation::new(
-                tag,
-                Arc::clone(pool) as Arc<dyn MemoryTracker>,
-            );
+            let mut r = BufferPoolReservation::new(tag, Arc::clone(pool) as Arc<dyn MemoryTracker>);
             r.resize(size);
             r
         }

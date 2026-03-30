@@ -5,8 +5,8 @@
 //!   - `duckdb/catalog/similar_catalog_entry.hpp`
 //!   - `duckdb/catalog/catalog_search_path.hpp`（部分）
 
-use super::types::CatalogType;
 use super::error::CatalogError;
+use super::types::CatalogType;
 
 // ─── EntryLookupInfo ───────────────────────────────────────────────────────────
 
@@ -68,12 +68,20 @@ impl CatalogEntryLookup {
 
     /// 未找到（返回 None）。
     pub fn missing() -> Self {
-        Self { schema_name: None, entry_name: None, error: None }
+        Self {
+            schema_name: None,
+            entry_name: None,
+            error: None,
+        }
     }
 
     /// 未找到（返回错误）。
     pub fn with_error(error: CatalogError) -> Self {
-        Self { schema_name: None, entry_name: None, error: Some(error) }
+        Self {
+            schema_name: None,
+            entry_name: None,
+            error: Some(error),
+        }
     }
 
     /// 是否找到结果。
@@ -82,10 +90,7 @@ impl CatalogEntryLookup {
     }
 
     /// 取出错误，如果未找到且没有存储错误则生成默认错误。
-    pub fn into_error_or_not_found(
-        self,
-        lookup: &EntryLookupInfo,
-    ) -> CatalogError {
+    pub fn into_error_or_not_found(self, lookup: &EntryLookupInfo) -> CatalogError {
         if let Some(e) = self.error {
             e
         } else {
@@ -109,11 +114,17 @@ pub struct SimilarCatalogEntry {
 
 impl SimilarCatalogEntry {
     pub fn new(name: impl Into<String>, score: f64, schema_name: Option<String>) -> Self {
-        Self { name: name.into(), score, schema_name }
+        Self {
+            name: name.into(),
+            score,
+            schema_name,
+        }
     }
 
     /// 是否找到相似结果（C++: `bool Found() const`）。
-    pub fn found(&self) -> bool { !self.name.is_empty() }
+    pub fn found(&self) -> bool {
+        !self.name.is_empty()
+    }
 
     /// 完全限定名称（C++: `GetQualifiedName`）。
     pub fn qualified_name(&self, qualify_schema: bool) -> String {
@@ -128,8 +139,12 @@ impl SimilarCatalogEntry {
 
 /// 计算两个字符串的相似度（Jaro-Winkler 近似，用于 "did you mean?" 提示）。
 pub fn string_similarity(s1: &str, s2: &str) -> f64 {
-    if s1 == s2 { return 1.0; }
-    if s1.is_empty() || s2.is_empty() { return 0.0; }
+    if s1 == s2 {
+        return 1.0;
+    }
+    if s1.is_empty() || s2.is_empty() {
+        return 0.0;
+    }
 
     let s1 = s1.to_lowercase();
     let s2 = s2.to_lowercase();
@@ -138,12 +153,10 @@ pub fn string_similarity(s1: &str, s2: &str) -> f64 {
     let len2 = s2.len();
 
     // 简单的 Jaccard 系数（使用字符 bigram）
-    let bigrams1: std::collections::HashSet<(char, char)> = s1.chars()
-        .zip(s1.chars().skip(1))
-        .collect();
-    let bigrams2: std::collections::HashSet<(char, char)> = s2.chars()
-        .zip(s2.chars().skip(1))
-        .collect();
+    let bigrams1: std::collections::HashSet<(char, char)> =
+        s1.chars().zip(s1.chars().skip(1)).collect();
+    let bigrams2: std::collections::HashSet<(char, char)> =
+        s2.chars().zip(s2.chars().skip(1)).collect();
 
     if bigrams1.is_empty() || bigrams2.is_empty() {
         // 单字符时退化为字符集合比较
@@ -151,19 +164,27 @@ pub fn string_similarity(s1: &str, s2: &str) -> f64 {
         let chars2: std::collections::HashSet<char> = s2.chars().collect();
         let intersection = chars1.intersection(&chars2).count();
         let union = chars1.union(&chars2).count();
-        return if union == 0 { 0.0 } else { intersection as f64 / union as f64 };
+        return if union == 0 {
+            0.0
+        } else {
+            intersection as f64 / union as f64
+        };
     }
 
     let intersection = bigrams1.intersection(&bigrams2).count();
     let union = bigrams1.union(&bigrams2).count();
 
-    if union == 0 { 0.0 } else { intersection as f64 / union as f64 }
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f64 / union as f64
+    }
 }
 
 /// 从候选列表中找出最相似的条目（C++: `SimilarEntriesInSchemas` 辅助）。
 pub fn find_most_similar<'a>(
     target: &str,
-    candidates: impl Iterator<Item = (&'a str, &'a str)>,  // (schema, name)
+    candidates: impl Iterator<Item = (&'a str, &'a str)>, // (schema, name)
     threshold: f64,
 ) -> SimilarCatalogEntry {
     let mut best = SimilarCatalogEntry::default();

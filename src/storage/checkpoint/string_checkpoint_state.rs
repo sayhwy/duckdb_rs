@@ -65,11 +65,7 @@ impl UncompressedStringSegmentState {
         handle
     }
 
-    pub fn register_block(
-        &mut self,
-        manager: &Arc<dyn BlockManager>,
-        block_id: BlockId,
-    ) {
+    pub fn register_block(&mut self, manager: &Arc<dyn BlockManager>, block_id: BlockId) {
         if self.handles.contains_key(&block_id) {
             panic!(
                 "UncompressedStringSegmentState::register_block: block id {} already exists",

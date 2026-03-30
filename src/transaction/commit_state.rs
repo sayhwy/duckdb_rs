@@ -12,9 +12,9 @@
 //! - **Commit**：将版本号从 `transaction_id` 改写为 `commit_id`，并清理索引数据。
 //! - **RevertCommit**：将版本号从 `commit_id` 改回 `transaction_id`（commit 失败时）。
 
-use super::types::{TransactionId, ActiveTransactionState, CommitMode, UndoFlags, NOT_DELETED_ID};
 use super::append_info::AppendInfo;
 use super::delete_info::DeleteInfo;
+use super::types::{ActiveTransactionState, CommitMode, NOT_DELETED_ID, TransactionId, UndoFlags};
 
 // ─── IndexDataRemover ──────────────────────────────────────────────────────────
 
@@ -99,7 +99,9 @@ pub struct CommitState {
     /// 索引删除批处理器。
     index_data_remover: IndexDataRemover,
     /// 存储管理器引用（用于提交时的存储操作）。
-    tables: Option<std::collections::HashMap<u64, std::sync::Arc<crate::storage::data_table::DataTable>>>,
+    tables: Option<
+        std::collections::HashMap<u64, std::sync::Arc<crate::storage::data_table::DataTable>>,
+    >,
 }
 
 impl CommitState {
@@ -109,7 +111,8 @@ impl CommitState {
         active_transaction_state: ActiveTransactionState,
         commit_mode: CommitMode,
     ) -> Self {
-        let removal_type = IndexDataRemover::index_removal_type(active_transaction_state, commit_mode);
+        let removal_type =
+            IndexDataRemover::index_removal_type(active_transaction_state, commit_mode);
         Self {
             commit_id,
             commit_mode,
@@ -119,7 +122,13 @@ impl CommitState {
     }
 
     /// 设置表映射（用于提交时的存储操作）。
-    pub fn set_tables(&mut self, tables: std::collections::HashMap<u64, std::sync::Arc<crate::storage::data_table::DataTable>>) {
+    pub fn set_tables(
+        &mut self,
+        tables: std::collections::HashMap<
+            u64,
+            std::sync::Arc<crate::storage::data_table::DataTable>,
+        >,
+    ) {
         self.tables = Some(tables);
     }
 
@@ -127,9 +136,9 @@ impl CommitState {
     pub fn commit_entry(&mut self, flags: UndoFlags, payload: &[u8]) {
         match flags {
             UndoFlags::CatalogEntry => self.commit_catalog_entry(payload),
-            UndoFlags::DeleteTuple  => self.commit_delete(payload),
-            UndoFlags::UpdateTuple  => self.commit_update(payload),
-            UndoFlags::Append       => self.commit_append(payload),
+            UndoFlags::DeleteTuple => self.commit_delete(payload),
+            UndoFlags::UpdateTuple => self.commit_update(payload),
+            UndoFlags::Append => self.commit_append(payload),
             UndoFlags::SequenceValue | UndoFlags::Attach | UndoFlags::Empty => {}
             _ => {}
         }
@@ -174,7 +183,8 @@ impl CommitState {
                 .collect();
             self.index_data_remover.push_delete(info.table_id, &row_ids);
         } else if let Some(ref rows) = info.rows {
-            let row_ids: Vec<i64> = rows.iter()
+            let row_ids: Vec<i64> = rows
+                .iter()
                 .map(|r| (info.base_row + *r as u64) as i64)
                 .collect();
             self.index_data_remover.push_delete(info.table_id, &row_ids);

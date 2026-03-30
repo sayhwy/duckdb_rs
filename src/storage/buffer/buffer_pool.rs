@@ -17,17 +17,17 @@
 //   BufferPoolReservation 通过 Arc<dyn MemoryTracker> 回调，
 //   从而打破 BufferPoolReservation ↔ BufferPool 的直接循环引用。
 
+use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use parking_lot::Mutex;
 
-use super::types::{FileBufferType, MemoryTag};
-use super::file_buffer::FileBuffer;
-use super::memory_usage::MemoryUsage;
+use super::block_handle::BlockHandle;
 use super::buffer_pool_reservation::{MemoryTracker, TempBufferPoolReservation};
 use super::eviction_queue::{EvictionNode, EvictionQueue};
-use super::block_handle::BlockHandle;
+use super::file_buffer::FileBuffer;
+use super::memory_usage::MemoryUsage;
+use super::types::{FileBufferType, MemoryTag};
 
 // ─── 辅助 trait ───────────────────────────────────────────────
 /// 对应 C++ BlockAllocator（用于 FlushAll）
@@ -43,10 +43,14 @@ pub trait BlockAllocator: Send + Sync {
 /// 对应 C++ TemporaryMemoryManager（骨架，后续在 temporary_memory_manager.rs 展开）
 pub struct TemporaryMemoryManager;
 impl TemporaryMemoryManager {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 impl Default for TemporaryMemoryManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─── EvictionResult ───────────────────────────────────────────
@@ -152,15 +156,15 @@ impl BufferPool {
     // ─── 限制管理 ─────────────────────────────────────────────
 
     /// 对应 C++ SetLimit(idx_t limit, const char *exception_postscript)
-    pub fn set_limit(
-        self: &Arc<Self>,
-        limit: usize,
-    ) -> Result<(), String> {
+    pub fn set_limit(self: &Arc<Self>, limit: usize) -> Result<(), String> {
         let _guard = self.limit_lock.lock();
 
         // 第一次驱逐：尝试腾出空间
         let mut dummy: Option<Box<FileBuffer>> = None;
-        if !self.evict_blocks(MemoryTag::Extension, 0, limit, &mut dummy).success {
+        if !self
+            .evict_blocks(MemoryTag::Extension, 0, limit, &mut dummy)
+            .success
+        {
             return Err(format!(
                 "Failed to change memory limit to {limit}: \
                  could not free up enough memory for the new limit"
@@ -170,7 +174,10 @@ impl BufferPool {
         let old_limit = self.maximum_memory.swap(limit, Ordering::Relaxed);
 
         // 第二次驱逐：确认新限制有效
-        if !self.evict_blocks(MemoryTag::Extension, 0, limit, &mut dummy).success {
+        if !self
+            .evict_blocks(MemoryTag::Extension, 0, limit, &mut dummy)
+            .success
+        {
             self.maximum_memory.store(old_limit, Ordering::Relaxed);
             return Err(format!(
                 "Failed to change memory limit to {limit}: \
@@ -245,9 +252,8 @@ impl BufferPool {
         reusable_buffer: &mut Option<Box<FileBuffer>>,
     ) -> EvictionResult {
         for queue in &self.queues {
-            let result = self.evict_blocks_internal(
-                queue, tag, extra_memory, memory_limit, reusable_buffer,
-            );
+            let result =
+                self.evict_blocks_internal(queue, tag, extra_memory, memory_limit, reusable_buffer);
             // 驱逐成功，或已到达最后一个队列 → 返回
             if result.success {
                 return result;
@@ -256,7 +262,10 @@ impl BufferPool {
         // 所有队列都失败，返回最后一次的失败结果
         self.evict_blocks_internal(
             self.queues.last().unwrap(),
-            tag, extra_memory, memory_limit, reusable_buffer,
+            tag,
+            extra_memory,
+            memory_limit,
+            reusable_buffer,
         )
     }
 
@@ -284,7 +293,10 @@ impl BufferPool {
             if extra_memory > flush_threshold {
                 self.block_allocator.flush_all(extra_memory);
             }
-            return EvictionResult { success: true, reservation };
+            return EvictionResult {
+                success: true,
+                reservation,
+            };
         }
 
         let flush_threshold = self
@@ -341,7 +353,10 @@ impl BufferPool {
             self.block_allocator.flush_all(extra_memory);
         }
 
-        EvictionResult { success: true, reservation }
+        EvictionResult {
+            success: true,
+            reservation,
+        }
     }
 
     // ─── 按时间清理（对应 C++ PurgeAgedBlocks）────────────────
@@ -422,8 +437,8 @@ impl BufferPool {
 fn file_buffer_type_to_queue_type(t: FileBufferType) -> usize {
     match t {
         FileBufferType::Block | FileBufferType::ExternalFile => 0,
-        FileBufferType::ManagedBuffer                        => 1,
-        FileBufferType::TinyBuffer                           => 2,
+        FileBufferType::ManagedBuffer => 1,
+        FileBufferType::TinyBuffer => 2,
     }
 }
 

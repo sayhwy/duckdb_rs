@@ -32,7 +32,8 @@ impl<'a, W: WriteStream + ?Sized> BinarySerializer<'a, W> {
 
     /// 结束序列化一个对象，写入终止符
     pub fn end_object(&mut self) {
-        self.stream.write_data(&MESSAGE_TERMINATOR_FIELD_ID.to_le_bytes());
+        self.stream
+            .write_data(&MESSAGE_TERMINATOR_FIELD_ID.to_le_bytes());
     }
 
     /// 写入字段 ID

@@ -67,12 +67,17 @@ INSERT INTO students VALUES
     if output.status.success() {
         println!("│  ✓ DuckDB 创建学生表成功");
     } else {
-        println!("│  ✗ DuckDB 创建表失败: {}", String::from_utf8_lossy(&output.stderr));
+        println!(
+            "│  ✗ DuckDB 创建表失败: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     // 检查文件
     if Path::new(TEST_DB_DUCKDB).exists() {
-        let size = std::fs::metadata(TEST_DB_DUCKDB).map(|m| m.len()).unwrap_or(0);
+        let size = std::fs::metadata(TEST_DB_DUCKDB)
+            .map(|m| m.len())
+            .unwrap_or(0);
         println!("│  ✓ 数据库文件已创建: {} 字节", size);
 
         // 尝试用 Rust 读取
@@ -109,7 +114,9 @@ INSERT INTO students VALUES
 
             // 检查文件
             if Path::new(TEST_DB_RUST).exists() {
-                let size = std::fs::metadata(TEST_DB_RUST).map(|m| m.len()).unwrap_or(0);
+                let size = std::fs::metadata(TEST_DB_RUST)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
                 println!("│  ✓ 数据库文件已创建: {} 字节", size);
 
                 // 用 DuckDB 读取
@@ -127,7 +134,10 @@ INSERT INTO students VALUES
                         println!("│    {}", line);
                     }
                 } else {
-                    println!("│  ✗ DuckDB 读取失败: {}", String::from_utf8_lossy(&output.stderr));
+                    println!(
+                        "│  ✗ DuckDB 读取失败: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
                 }
             } else {
                 println!("│  ✗ 数据库文件未创建");
@@ -173,7 +183,9 @@ fn test_rust_read_duckdb_file() -> Result<Vec<String>, String> {
                 let rows = decode_student_rows(&chunks)?;
                 let expected = expected_students();
                 if rows != expected {
-                    return Err(format!("读取结果不匹配: actual={rows:?}, expected={expected:?}"));
+                    return Err(format!(
+                        "读取结果不匹配: actual={rows:?}, expected={expected:?}"
+                    ));
                 }
                 println!("│    ✓ 数据校验通过");
 
@@ -195,8 +207,7 @@ fn test_rust_read_duckdb_file() -> Result<Vec<String>, String> {
 
 fn test_rust_create_student_table() -> Result<(), String> {
     // 创建内存数据库
-    let mut db = DB::open(TEST_DB_RUST)
-        .map_err(|e| format!("无法创建数据库: {:?}", e))?;
+    let mut db = DB::open(TEST_DB_RUST).map_err(|e| format!("无法创建数据库: {:?}", e))?;
 
     // 创建学生表
     db.create_table(
@@ -233,11 +244,13 @@ fn test_rust_create_student_table() -> Result<(), String> {
 
         // age (INTEGER)
         let age_offset = i * 4;
-        chunk.data[1].raw_data_mut()[age_offset..age_offset + 4].copy_from_slice(&age.to_le_bytes());
+        chunk.data[1].raw_data_mut()[age_offset..age_offset + 4]
+            .copy_from_slice(&age.to_le_bytes());
 
         // score (DOUBLE)
         let score_offset = i * 8;
-        chunk.data[2].raw_data_mut()[score_offset..score_offset + 8].copy_from_slice(&score.to_le_bytes());
+        chunk.data[2].raw_data_mut()[score_offset..score_offset + 8]
+            .copy_from_slice(&score.to_le_bytes());
 
         // class_id (BIGINT)
         let class_offset = i * 8;
@@ -251,13 +264,16 @@ fn test_rust_create_student_table() -> Result<(), String> {
         .map_err(|e| format!("插入数据失败: {:?}", e))?;
 
     // 验证插入
-    let results = db.scan_chunks("students", None)
+    let results = db
+        .scan_chunks("students", None)
         .map_err(|e| format!("查询失败: {:?}", e))?;
     let total_rows: usize = results.iter().map(|c| c.size()).sum();
     println!("│  已插入 {} 行数据", total_rows);
     let rows = decode_student_rows(&results)?;
     if rows != students {
-        return Err(format!("checkpoint 前查询结果不匹配: actual={rows:?}, expected={students:?}"));
+        return Err(format!(
+            "checkpoint 前查询结果不匹配: actual={rows:?}, expected={students:?}"
+        ));
     }
 
     // 执行 checkpoint 将数据写入磁盘
@@ -296,20 +312,26 @@ fn decode_student_rows(chunks: &[DataChunk]) -> Result<Vec<(i32, i32, f64, i64)>
 fn read_i32(chunk: &DataChunk, col: usize, row: usize) -> Result<i32, String> {
     let raw = chunk.data[col].raw_data();
     let offset = row * 4;
-    let bytes = raw.get(offset..offset + 4).ok_or_else(|| format!("列 {col} 第 {row} 行超界"))?;
+    let bytes = raw
+        .get(offset..offset + 4)
+        .ok_or_else(|| format!("列 {col} 第 {row} 行超界"))?;
     Ok(i32::from_le_bytes(bytes.try_into().unwrap()))
 }
 
 fn read_i64(chunk: &DataChunk, col: usize, row: usize) -> Result<i64, String> {
     let raw = chunk.data[col].raw_data();
     let offset = row * 8;
-    let bytes = raw.get(offset..offset + 8).ok_or_else(|| format!("列 {col} 第 {row} 行超界"))?;
+    let bytes = raw
+        .get(offset..offset + 8)
+        .ok_or_else(|| format!("列 {col} 第 {row} 行超界"))?;
     Ok(i64::from_le_bytes(bytes.try_into().unwrap()))
 }
 
 fn read_f64(chunk: &DataChunk, col: usize, row: usize) -> Result<f64, String> {
     let raw = chunk.data[col].raw_data();
     let offset = row * 8;
-    let bytes = raw.get(offset..offset + 8).ok_or_else(|| format!("列 {col} 第 {row} 行超界"))?;
+    let bytes = raw
+        .get(offset..offset + 8)
+        .ok_or_else(|| format!("列 {col} 第 {row} 行超界"))?;
     Ok(f64::from_le_bytes(bytes.try_into().unwrap()))
 }

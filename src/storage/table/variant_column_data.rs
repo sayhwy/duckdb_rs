@@ -19,14 +19,14 @@
 //! | `shared_ptr<ValidityColumnData> validity` | `validity: Option<Arc<Mutex<ValidityColumnData>>>` |
 //! | 静态方法 `ShredVariantData/UnshredVariantData` | 迁移到 `variant/` 子模块 |
 
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::sync::Arc;
 
-use super::column_data::{ColumnDataContext, ColumnData, ColumnDataType, PersistentColumnData};
-use super::validity_column_data::ValidityColumnData;
-use super::types::{Idx, LogicalType, TransactionData, RowId};
 use super::column_checkpoint_state::ColumnCheckpointState;
+use super::column_data::{ColumnData, ColumnDataContext, ColumnDataType, PersistentColumnData};
 use super::data_table_info::DataTableInfo;
+use super::types::{Idx, LogicalType, RowId, TransactionData};
+use super::validity_column_data::ValidityColumnData;
 
 // ─── VariantColumnData ────────────────────────────────────────────────────────
 

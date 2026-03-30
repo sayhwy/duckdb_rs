@@ -14,8 +14,8 @@
 //   C++ 析构时 D_ASSERT(size == 0)，即调用者必须先 resize(0)。
 //   Rust 沿用此约定：Drop 里 debug_assert，Release 下静默放行。
 
-use std::sync::Arc;
 use super::types::MemoryTag;
+use std::sync::Arc;
 
 // ─── MemoryTracker trait ──────────────────────────────────────
 /// 对应 C++ 中 BufferPool::UpdateUsedMemory() 的最小接口。
@@ -30,15 +30,19 @@ pub trait MemoryTracker: Send + Sync {
 /// RAII 内存预约：构造时不占用内存，通过 `resize()` 声明占用量，
 /// 析构前必须调用 `resize(0)` 归还（否则 debug_assert 报错）。
 pub struct BufferPoolReservation {
-    pub tag:  MemoryTag,
+    pub tag: MemoryTag,
     pub size: usize,
-    tracker:  Arc<dyn MemoryTracker>,
+    tracker: Arc<dyn MemoryTracker>,
 }
 
 impl BufferPoolReservation {
     /// 对应 C++ BufferPoolReservation(MemoryTag tag, BufferPool &pool)
     pub fn new(tag: MemoryTag, tracker: Arc<dyn MemoryTracker>) -> Self {
-        Self { tag, size: 0, tracker }
+        Self {
+            tag,
+            size: 0,
+            tracker,
+        }
     }
 
     /// 对应 C++ Resize(idx_t new_size)
@@ -114,7 +118,7 @@ impl TempBufferPoolReservation {
         // 先把 size 记下来，然后把内部归零（阻止 Drop 双重扣减），
         // 再构造一个持有相同 size 的新 reservation 返回给调用者。
         let size = self.0.size;
-        let tag  = self.0.tag;
+        let tag = self.0.tag;
         let tracker = Arc::clone(&self.0.tracker);
         self.0.size = 0; // 阻止 Drop 里 resize(0)
         let mut r = BufferPoolReservation::new(tag, tracker);

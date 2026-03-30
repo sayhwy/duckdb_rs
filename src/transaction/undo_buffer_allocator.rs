@@ -68,7 +68,10 @@ pub struct UndoBufferReference {
 impl UndoBufferReference {
     /// 空引用。
     pub fn null() -> Self {
-        Self { slab_index: None, position: 0 }
+        Self {
+            slab_index: None,
+            position: 0,
+        }
     }
 
     /// 是否有效。
@@ -99,7 +102,10 @@ pub struct UndoBufferPointer {
 impl UndoBufferPointer {
     /// Null 指针。
     pub const fn null() -> Self {
-        Self { slab_index: None, position: 0 }
+        Self {
+            slab_index: None,
+            position: 0,
+        }
     }
 
     /// 是否有效。

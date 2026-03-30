@@ -119,7 +119,9 @@ impl RowGroupReorderer {
     /// 获取下一个 RowGroup（C++: `GetNextRowGroup(SegmentNode<RowGroup>&)`）。
     pub fn get_next_segment_index(&mut self) -> Option<usize> {
         self.current_index += 1;
-        self.ordered_row_group_indices.get(self.current_index).copied()
+        self.ordered_row_group_indices
+            .get(self.current_index)
+            .copied()
     }
 
     /// 从统计值中提取排序键（C++: `RetrieveStat(stats, order_by, column_type)`）。

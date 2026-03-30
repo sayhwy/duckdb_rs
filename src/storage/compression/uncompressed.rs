@@ -29,7 +29,9 @@ impl<'a> UncompressedReader<'a> {
 
     pub fn read_u8(&mut self) -> Option<u8> {
         let b = self.data.get(self.pos).copied();
-        if b.is_some() { self.pos += 1; }
+        if b.is_some() {
+            self.pos += 1;
+        }
         b
     }
 

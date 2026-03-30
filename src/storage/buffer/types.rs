@@ -34,21 +34,21 @@ pub const DEFAULT_BLOCK_HEADER_SIZE: usize = 8;
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemoryTag {
-    BaseTable       = 0,
-    HashTable       = 1,
-    ParquetReader   = 2,
-    CsvReader       = 3,
-    OrderBy         = 4,
-    ArtIndex        = 5,
-    ColumnData      = 6,
-    Metadata        = 7,
+    BaseTable = 0,
+    HashTable = 1,
+    ParquetReader = 2,
+    CsvReader = 3,
+    OrderBy = 4,
+    ArtIndex = 5,
+    ColumnData = 6,
+    Metadata = 7,
     OverflowStrings = 8,
-    InMemoryTable   = 9,
-    Allocator       = 10,
-    Extension       = 11,
-    Transaction     = 12,
+    InMemoryTable = 9,
+    Allocator = 10,
+    Extension = 11,
+    Transaction = 12,
     ExternalFileCache = 13,
-    Window          = 14,
+    Window = 14,
 }
 
 /// 对应 C++ MEMORY_TAG_COUNT = 15
@@ -61,13 +61,13 @@ pub const MEMORY_TAG_COUNT: usize = 15;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileBufferType {
     /// 对应磁盘上的持久化 block（驱逐代价低，直接丢弃即可）
-    Block         = 0,
+    Block = 0,
     /// 由 BufferManager 管理的内存缓冲区（驱逐时需写临时文件）
     ManagedBuffer = 1,
     /// 小型内存缓冲区（最后驱逐）
-    TinyBuffer    = 2,
+    TinyBuffer = 2,
     /// 外部文件缓存
-    ExternalFile  = 3,
+    ExternalFile = 3,
 }
 
 /// 对应 C++ FILE_BUFFER_TYPE_COUNT
@@ -79,7 +79,7 @@ pub const FILE_BUFFER_TYPE_COUNT: usize = 4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockState {
     Unloaded = 0,
-    Loaded   = 1,
+    Loaded = 1,
 }
 
 // ─── DestroyBufferUpon ────────────────────────────────────────
@@ -89,9 +89,9 @@ pub enum BlockState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DestroyBufferUpon {
     /// 块可被驱逐到存储，销毁 BlockHandle 时销毁缓冲区
-    Block    = 0,
+    Block = 0,
     /// 驱逐时直接销毁（不写临时文件）
     Eviction = 1,
     /// Unpin 时立即销毁，不加入驱逐队列
-    Unpin    = 2,
+    Unpin = 2,
 }

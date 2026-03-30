@@ -30,31 +30,28 @@
 //! Rust 层完全实现的类型，因此复杂逻辑体保留为 `todo!()` 存根。
 //! 结构字段、公开 API 签名、版本控制逻辑和简单查询方法已完整实现。
 
+use crate::catalog::TableCatalogEntry;
+use crate::common::types::{DataChunk, LogicalType};
+use crate::storage::local_storage::LocalStorage;
+use crate::storage::storage_info::{StorageError, StorageResult};
+use crate::storage::storage_lock::StorageLockKey;
+use crate::storage::storage_manager::StorageCommitState;
+use crate::storage::table::append_state::TableAppendState as PhysicalTableAppendState;
+use crate::storage::table::append_state::{BoundConstraint, ConstraintState, LocalAppendState};
+use crate::storage::table::data_table_info::{DataTableInfo, IndexStorageInfo};
+use crate::storage::table::persistent_table_data::PersistentTableData;
+use crate::storage::table::row_group_collection::RowGroupCollection;
+use crate::storage::table::scan_state::{ColumnFetchState, ParallelTableScanState, TableScanState};
+use crate::storage::table::types::{Idx, RowId, TransactionData};
+use crate::storage::write_ahead_log::WriteAheadLog;
+use crate::transaction::duck_transaction::DuckTransaction;
+use parking_lot::Mutex;
 use std::sync::{
     Arc,
     atomic::{AtomicU8, Ordering},
 };
-use parking_lot::Mutex;
-use crate::catalog::TableCatalogEntry;
-use crate::storage::storage_lock::StorageLockKey;
-use crate::storage::storage_info::{StorageError, StorageResult};
-use crate::storage::storage_manager::StorageCommitState;
-use crate::storage::table::append_state::{BoundConstraint, ConstraintState, LocalAppendState};
-use crate::storage::table::data_table_info::{DataTableInfo, IndexStorageInfo};
-use crate::storage::table::persistent_table_data::PersistentTableData;
-use crate::storage::table::scan_state::{
-    ColumnFetchState, ParallelTableScanState, TableScanState,
-};
-use crate::storage::table::append_state::TableAppendState as PhysicalTableAppendState;
-use crate::storage::table::types::{Idx, RowId, TransactionData};
-use crate::common::types::{DataChunk, LogicalType};
-use crate::storage::local_storage::LocalStorage;
-use crate::storage::table::row_group_collection::RowGroupCollection;
-use crate::storage::write_ahead_log::WriteAheadLog;
-use crate::transaction::duck_transaction::DuckTransaction;
 // ─── 外部类型占位 ────────────────────────────────────────────────────────────
 // 以下占位类型在相应子系统实现后应替换为真实导入。
-
 
 // ── 执行层占位 ──────────────────────────────────────────────────────────────
 
@@ -85,11 +82,19 @@ pub struct ColumnDefinition {
 
 impl ColumnDefinition {
     pub fn new(name: impl Into<String>, logical_type: LogicalType) -> Self {
-        Self { name: name.into(), logical_type, storage_oid: 0 }
+        Self {
+            name: name.into(),
+            logical_type,
+            storage_oid: 0,
+        }
     }
 
-    pub fn name(&self) -> &str { &self.name }
-    pub fn logical_type(&self) -> &LogicalType { &self.logical_type }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn logical_type(&self) -> &LogicalType {
+        &self.logical_type
+    }
 }
 
 // ─── Scan 相关类型 ────────────────────────────────────────────────────────────
@@ -149,9 +154,9 @@ pub enum DataTableVersion {
     /// 最新版本，未被 ALTER 或 DROP（C++: `MAIN_TABLE`）。
     MainTable = 0,
     /// 已被 ALTER（C++: `ALTERED`）。
-    Altered   = 1,
+    Altered = 1,
     /// 已被 DROP（C++: `DROPPED`）。
-    Dropped   = 2,
+    Dropped = 2,
 }
 
 impl DataTableVersion {
@@ -172,29 +177,24 @@ impl DataTableVersion {
 /// 通过 `Arc<DataTable>` 在 catalog、事务、查询执行之间共享。
 pub struct DataTable {
     // ── 元数据 ───────────────────────────────────────────────────────────────
-
     /// 表的共享元数据（C++: `shared_ptr<DataTableInfo> info`）。
     pub info: Arc<DataTableInfo>,
 
     // ── 列定义 ───────────────────────────────────────────────────────────────
-
     /// 表的物理列定义列表（C++: `vector<ColumnDefinition> column_definitions`）。
     pub column_definitions: Vec<ColumnDefinition>,
 
     // ── Append 互斥 ──────────────────────────────────────────────────────────
-
     /// Append 操作互斥锁（C++: `mutex append_lock`）。
     ///
     /// 通过 `Mutex<()>` 实现；持有期间由 `TableAppendState.append_lock` 拥有。
     append_lock: Mutex<()>,
 
     // ── 行组数据 ─────────────────────────────────────────────────────────────
-
     /// 所有行组的有序集合（C++: `shared_ptr<RowGroupCollection> row_groups`）。
     pub row_groups: Arc<RowGroupCollection>,
 
     // ── 版本 ─────────────────────────────────────────────────────────────────
-
     /// 表版本（C++: `atomic<DataTableVersion> version`）。
     version: AtomicU8,
 }
@@ -215,8 +215,16 @@ impl DataTable {
     ) -> Arc<Self> {
         let schema = schema.into();
         let table = table.into();
-        let info = Arc::new(DataTableInfo::new(db_id, table_io_manager_id, schema, table));
-        let types: Vec<LogicalType> = column_definitions.iter().map(|c| c.logical_type.clone()).collect();
+        let info = Arc::new(DataTableInfo::new(
+            db_id,
+            table_io_manager_id,
+            schema,
+            table,
+        ));
+        let types: Vec<LogicalType> = column_definitions
+            .iter()
+            .map(|c| c.logical_type.clone())
+            .collect();
         let row_groups = RowGroupCollection::new(Arc::clone(&info), types, 0);
 
         let table = Arc::new(Self {
@@ -244,17 +252,20 @@ impl DataTable {
     /// 构造添加列后的新 DataTable（C++: 第二个构造函数）。
     ///
     /// 父表被标记为 `Altered`，此表接管其 `info`。
-    pub fn with_added_column(
-        parent: &DataTable,
-        new_column: ColumnDefinition,
-    ) -> Arc<Self> {
-        let mut column_definitions: Vec<ColumnDefinition> = parent.column_definitions.iter().cloned().collect();
+    pub fn with_added_column(parent: &DataTable, new_column: ColumnDefinition) -> Arc<Self> {
+        let mut column_definitions: Vec<ColumnDefinition> =
+            parent.column_definitions.iter().cloned().collect();
         column_definitions.push(new_column);
 
         // parent 被替换，标记为 Altered
-        parent.version.store(DataTableVersion::Altered as u8, Ordering::Release);
+        parent
+            .version
+            .store(DataTableVersion::Altered as u8, Ordering::Release);
 
-        let types: Vec<LogicalType> = column_definitions.iter().map(|c| c.logical_type.clone()).collect();
+        let types: Vec<LogicalType> = column_definitions
+            .iter()
+            .map(|c| c.logical_type.clone())
+            .collect();
         let table = Arc::new(Self {
             info: Arc::clone(&parent.info),
             column_definitions,
@@ -267,18 +278,24 @@ impl DataTable {
     }
 
     /// 构造移除列后的新 DataTable（C++: 第三个构造函数）。
-    pub fn with_removed_column(
-        parent: &DataTable,
-        removed_column: usize,
-    ) -> Arc<Self> {
-        assert!(removed_column < parent.column_definitions.len(), "removed_column out of range");
+    pub fn with_removed_column(parent: &DataTable, removed_column: usize) -> Arc<Self> {
+        assert!(
+            removed_column < parent.column_definitions.len(),
+            "removed_column out of range"
+        );
 
-        let mut column_definitions: Vec<ColumnDefinition> = parent.column_definitions.iter().cloned().collect();
+        let mut column_definitions: Vec<ColumnDefinition> =
+            parent.column_definitions.iter().cloned().collect();
         column_definitions.remove(removed_column);
 
-        parent.version.store(DataTableVersion::Altered as u8, Ordering::Release);
+        parent
+            .version
+            .store(DataTableVersion::Altered as u8, Ordering::Release);
 
-        let types: Vec<LogicalType> = column_definitions.iter().map(|c| c.logical_type.clone()).collect();
+        let types: Vec<LogicalType> = column_definitions
+            .iter()
+            .map(|c| c.logical_type.clone())
+            .collect();
         let table = Arc::new(Self {
             info: Arc::clone(&parent.info),
             column_definitions,
@@ -294,12 +311,14 @@ impl DataTable {
 
     /// 设置为主表（C++: `SetAsMainTable()`）。
     pub fn set_as_main_table(&self) {
-        self.version.store(DataTableVersion::MainTable as u8, Ordering::Release);
+        self.version
+            .store(DataTableVersion::MainTable as u8, Ordering::Release);
     }
 
     /// 标记为已 DROP（C++: `SetAsDropped()`）。
     pub fn set_as_dropped(&self) {
-        self.version.store(DataTableVersion::Dropped as u8, Ordering::Release);
+        self.version
+            .store(DataTableVersion::Dropped as u8, Ordering::Release);
     }
 
     /// 是否是当前主版本（C++: `IsMainTable() / IsRoot()`）。
@@ -321,8 +340,8 @@ impl DataTable {
     pub fn table_modification(&self) -> &'static str {
         match self.version() {
             DataTableVersion::MainTable => "no changes",
-            DataTableVersion::Altered  => "altered",
-            DataTableVersion::Dropped  => "dropped",
+            DataTableVersion::Altered => "altered",
+            DataTableVersion::Dropped => "dropped",
         }
     }
 
@@ -355,7 +374,10 @@ impl DataTable {
 
     /// 列类型列表（C++: `GetTypes()`）。
     pub fn get_types(&self) -> Vec<LogicalType> {
-        self.column_definitions.iter().map(|c| c.logical_type.clone()).collect()
+        self.column_definitions
+            .iter()
+            .map(|c| c.logical_type.clone())
+            .collect()
     }
 
     /// 列定义只读视图（C++: `Columns()`）。
@@ -407,7 +429,8 @@ impl DataTable {
         // 初始化公共列 ID 列表
         state.initialize(column_ids.clone());
         // 持久化行组部分（对应 row_groups->InitializeScan(...)）
-        self.row_groups.initialize_scan(&mut state.table_state, &column_ids);
+        self.row_groups
+            .initialize_scan(&mut state.table_state, &column_ids);
         // 事务本地部分（对应 local_storage.InitializeScan(...)）
         state.local_state.set_column_ids(column_ids);
         state.local_state.row_group_index = None;
@@ -446,7 +469,10 @@ impl DataTable {
             start_time: transaction.start_time,
             transaction_id: transaction.transaction_id,
         };
-        if self.row_groups.scan(tx_data, &mut state.table_state, result) {
+        if self
+            .row_groups
+            .scan(tx_data, &mut state.table_state, result)
+        {
             debug_assert!(result.size() > 0, "scan returned true but result is empty");
             return;
         }
@@ -502,9 +528,13 @@ impl DataTable {
     pub fn initialize_parallel_scan(&self, state: &mut ParallelTableScanState) {
         // C++: row_groups->InitializeParallelScan(state.scan_state);
         //      local_storage.InitializeParallelScan(*this, state.local_state);
-        self.row_groups.initialize_parallel_scan(&mut state.scan_state);
+        self.row_groups
+            .initialize_parallel_scan(&mut state.scan_state);
         // Local storage parallel scan not yet wired up.
-        state.local_state.current_row_group_index.store(0, std::sync::atomic::Ordering::Relaxed);
+        state
+            .local_state
+            .current_row_group_index
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         state.local_state.max_row = 0;
     }
 
@@ -534,11 +564,16 @@ impl DataTable {
         let tree = self.row_groups.get_row_groups();
         let total = tree.segment_count() as u64;
         loop {
-            let current = parallel_state.scan_state.current_row_group_index.load(Ordering::Relaxed);
+            let current = parallel_state
+                .scan_state
+                .current_row_group_index
+                .load(Ordering::Relaxed);
             if current >= total {
                 break;
             }
-            let claimed = parallel_state.scan_state.current_row_group_index
+            let claimed = parallel_state
+                .scan_state
+                .current_row_group_index
                 .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Relaxed);
             if claimed.is_ok() {
                 // Initialize scan_state.table_state for this row group.
@@ -549,7 +584,8 @@ impl DataTable {
                     let node_row_start = node.row_start();
                     drop(lock);
                     let col_ids = scan_state.column_ids().to_vec();
-                    self.row_groups.initialize_scan(&mut scan_state.table_state, &col_ids);
+                    self.row_groups
+                        .initialize_scan(&mut scan_state.table_state, &col_ids);
                     scan_state.table_state.row_group_index = Some(idx);
                     rg.initialize_scan(&mut scan_state.table_state, node_row_start);
                 }
@@ -580,7 +616,10 @@ impl DataTable {
         // C++: return state.table_state.ScanCommitted(result, type);
         // Scan all committed rows (no MVCC visibility filtering).
         self.row_groups.scan(
-            TransactionData { start_time: u64::MAX, transaction_id: 0 },
+            TransactionData {
+                start_time: u64::MAX,
+                transaction_id: 0,
+            },
             &mut state.table_state,
             result,
         )
@@ -625,13 +664,10 @@ impl DataTable {
     ///   while (state.table_state.ScanCommitted(chunk, TABLE_SCAN_COMMITTED_ROWS))
     ///       f(chunk);
     /// ```
-    pub fn scan_table_segment(
-        &self,
-        row_start: Idx,
-        count: Idx,
-        mut f: impl FnMut(&DataChunk),
-    ) {
-        if count == 0 { return; }
+    pub fn scan_table_segment(&self, row_start: Idx, count: Idx, mut f: impl FnMut(&DataChunk)) {
+        if count == 0 {
+            return;
+        }
         let end = row_start + count;
 
         // Build full-column scan.
@@ -661,11 +697,17 @@ impl DataTable {
         let mut chunk = DataChunk::new();
         chunk.initialize(&types, STANDARD_VECTOR_SIZE as usize);
 
-        let tx_data = TransactionData { start_time: u64::MAX, transaction_id: 0 };
+        let tx_data = TransactionData {
+            start_time: u64::MAX,
+            transaction_id: 0,
+        };
         let mut current_row = row_start_aligned;
         while current_row < end {
             chunk.reset();
-            if !self.row_groups.scan(tx_data, &mut state.table_state, &mut chunk) {
+            if !self
+                .row_groups
+                .scan(tx_data, &mut state.table_state, &mut chunk)
+            {
                 break;
             }
             if chunk.size() == 0 {
@@ -758,7 +800,11 @@ impl DataTable {
     }
 
     /// 追加一个数据块（C++: `Append(DataChunk &chunk, TableAppendState &state)`）。
-    pub fn append(&self, chunk: &mut DataChunk, state: &mut PhysicalTableAppendState) -> StorageResult<()> {
+    pub fn append(
+        &self,
+        chunk: &mut DataChunk,
+        state: &mut PhysicalTableAppendState,
+    ) -> StorageResult<()> {
         if !self.is_main_table() {
             return Err(StorageError::Corrupt {
                 msg: format!(
@@ -774,7 +820,11 @@ impl DataTable {
     }
 
     /// 完成 Append（C++: `FinalizeAppend(DuckTransaction &transaction, TableAppendState &state)`）。
-    pub fn finalize_append(&self, transaction: TransactionData, state: &mut PhysicalTableAppendState) -> StorageResult<()> {
+    pub fn finalize_append(
+        &self,
+        transaction: TransactionData,
+        state: &mut PhysicalTableAppendState,
+    ) -> StorageResult<()> {
         // C++: row_groups->FinalizeAppend(transaction, state);
         self.row_groups.finalize_append(transaction, state);
         Ok(())
@@ -824,7 +874,8 @@ impl DataTable {
                 }
                 if !row_group_data.data.is_empty() {
                     let payload = serialize_row_group_data_payload(row_group_data);
-                    log.write_row_group_data(&payload).map_err(StorageError::Io)?;
+                    log.write_row_group_data(&payload)
+                        .map_err(StorageError::Io)?;
                 }
                 row_start += optimistic_count as Idx;
                 count -= optimistic_count as Idx;
@@ -1144,7 +1195,10 @@ impl DataTable {
     // ── 统计 ─────────────────────────────────────────────────────────────────
 
     /// 获取列统计信息（C++: `GetStatistics()`）。
-    pub fn get_statistics(&self, column_id: u64) -> Option<crate::storage::data_pointer::BaseStatistics> {
+    pub fn get_statistics(
+        &self,
+        column_id: u64,
+    ) -> Option<crate::storage::data_pointer::BaseStatistics> {
         if column_id == u64::MAX {
             // C++: if (column_id == COLUMN_IDENTIFIER_ROW_ID) return nullptr;
             return None;
@@ -1162,11 +1216,13 @@ impl DataTable {
         self.row_groups
             .get_column_segment_info()
             .into_iter()
-            .map(|(column_id, row_group_index, segment_type)| ColumnSegmentInfo {
-                column_id,
-                row_group_index,
-                segment_type,
-            })
+            .map(
+                |(column_id, row_group_index, segment_type)| ColumnSegmentInfo {
+                    column_id,
+                    row_group_index,
+                    segment_type,
+                },
+            )
             .collect()
     }
 
@@ -1197,11 +1253,7 @@ impl DataTable {
         state
     }
 
-    pub fn scan_committed_chunk(
-        &self,
-        state: &mut TableScanState,
-        result: &mut DataChunk,
-    ) -> bool {
+    pub fn scan_committed_chunk(&self, state: &mut TableScanState, result: &mut DataChunk) -> bool {
         if result.column_count() != state.column_ids().len() {
             let types: Vec<LogicalType> = state
                 .column_ids()

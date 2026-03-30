@@ -161,7 +161,9 @@ pub struct ConstraintState {
 impl ConstraintState {
     /// Mirrors `ConstraintState(TableCatalogEntry&, vector<unique_ptr<BoundConstraint>>&)`.
     pub fn new(table_name: impl Into<String>, _bound_constraints: &[BoundConstraint]) -> Self {
-        Self { table_name: table_name.into() }
+        Self {
+            table_name: table_name.into(),
+        }
     }
 }
 
@@ -214,5 +216,7 @@ impl LocalAppendState {
 }
 
 impl Default for LocalAppendState {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

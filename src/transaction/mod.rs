@@ -25,20 +25,20 @@
 //! └── wal_write_state.rs          — WAL 写入状态机
 //! ```
 
-pub mod types;
-pub mod undo_buffer_allocator;
-pub mod undo_buffer;
 pub mod append_info;
 pub mod delete_info;
-pub mod update_info;
-pub mod transaction;
 pub mod duck_transaction;
-pub mod transaction_manager;
 pub mod duck_transaction_manager;
 pub mod meta_transaction;
+pub mod transaction;
 pub mod transaction_context;
+pub mod transaction_manager;
+pub mod types;
+pub mod undo_buffer;
+pub mod undo_buffer_allocator;
+pub mod update_info;
 // local_storage 已移至 crate::storage::local_storage
+pub mod cleanup_state;
 pub mod commit_state;
 pub mod rollback_state;
-pub mod cleanup_state;
 pub mod wal_write_state;

@@ -11,7 +11,7 @@
 //! | `transaction_t transaction_id` | `transaction_id: TransactionId` |
 //! | `transaction_t start_time` | `start_time: TransactionId` |
 
-use crate::transaction::types::{TransactionId, TRANSACTION_ID_START};
+use crate::transaction::types::{TRANSACTION_ID_START, TransactionId};
 
 // ─── CatalogTransaction ────────────────────────────────────────────────────────
 
@@ -34,18 +34,30 @@ pub struct CatalogTransaction {
 impl CatalogTransaction {
     /// 创建用户事务上下文（C++: `CatalogTransaction(Catalog&, ClientContext&)`）。
     pub fn new(db_oid: u64, transaction_id: TransactionId, start_time: TransactionId) -> Self {
-        Self { db_oid, transaction_id, start_time, has_context: true }
+        Self {
+            db_oid,
+            transaction_id,
+            start_time,
+            has_context: true,
+        }
     }
 
     /// 创建系统事务上下文（C++: `CatalogTransaction::GetSystemTransaction(DatabaseInstance&)`）。
     ///
     /// 系统事务的 start_time = 0，transaction_id = 0，可以看到所有已提交数据。
     pub fn system(db_oid: u64) -> Self {
-        Self { db_oid, transaction_id: 0, start_time: 0, has_context: false }
+        Self {
+            db_oid,
+            transaction_id: 0,
+            start_time: 0,
+            has_context: false,
+        }
     }
 
     /// 是否为系统事务（无客户端上下文）。
-    pub fn is_system(&self) -> bool { !self.has_context }
+    pub fn is_system(&self) -> bool {
+        !self.has_context
+    }
 
     /// 是否为活跃未提交事务（事务 ID 在活跃范围内）。
     pub fn is_active_transaction(&self) -> bool {
@@ -88,7 +100,10 @@ pub fn is_committed(timestamp: TransactionId) -> bool {
 }
 
 /// 判断是否由其他活跃事务创建（C++: `CatalogSet::CreatedByOtherActiveTransaction`）。
-pub fn created_by_other_active_transaction(txn: &CatalogTransaction, timestamp: TransactionId) -> bool {
+pub fn created_by_other_active_transaction(
+    txn: &CatalogTransaction,
+    timestamp: TransactionId,
+) -> bool {
     timestamp != txn.transaction_id && timestamp >= TRANSACTION_ID_START
 }
 

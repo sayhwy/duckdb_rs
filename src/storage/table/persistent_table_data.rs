@@ -20,8 +20,8 @@
 //! | `idx_t total_rows` | `u64` |
 //! | `idx_t row_group_count` | `u64` |
 
-use super::types::{MetaBlockPointer, Idx};
 use super::table_statistics::TableStatistics;
+use super::types::{Idx, MetaBlockPointer};
 use crate::storage::buffer::BlockManager;
 use crate::storage::metadata::MetadataManager;
 use std::sync::Arc;

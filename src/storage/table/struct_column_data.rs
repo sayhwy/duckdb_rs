@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use super::column_data::{ColumnDataContext, ColumnData};
+use super::column_data::{ColumnData, ColumnDataContext};
 use super::validity_column_data::ValidityColumnData;
 
 /// Nested struct column.
@@ -23,10 +23,10 @@ pub struct StructColumnData {
 }
 
 impl StructColumnData {
-    pub fn new(
-        sub_columns: Vec<Arc<ColumnData>>,
-        validity: Arc<ValidityColumnData>,
-    ) -> Self {
-        StructColumnData { sub_columns, validity }
+    pub fn new(sub_columns: Vec<Arc<ColumnData>>, validity: Arc<ValidityColumnData>) -> Self {
+        StructColumnData {
+            sub_columns,
+            validity,
+        }
     }
 }

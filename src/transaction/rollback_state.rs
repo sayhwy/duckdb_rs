@@ -15,9 +15,9 @@
 //! - **CatalogEntry**：撤销 Catalog 条目变更（恢复旧版本）。
 //! - **Append**：回滚追加的行。
 
-use super::types::{UndoFlags, NOT_DELETED_ID};
 use super::append_info::AppendInfo;
 use super::delete_info::DeleteInfo;
+use super::types::{NOT_DELETED_ID, UndoFlags};
 
 // ─── RollbackState ─────────────────────────────────────────────────────────────
 
@@ -33,10 +33,10 @@ impl RollbackState {
     /// 处理一条 Undo 条目（反向遍历）。
     pub fn rollback_entry(&mut self, flags: UndoFlags, payload: &[u8]) {
         match flags {
-            UndoFlags::UpdateTuple  => self.rollback_update(payload),
-            UndoFlags::DeleteTuple  => self.rollback_delete(payload),
+            UndoFlags::UpdateTuple => self.rollback_update(payload),
+            UndoFlags::DeleteTuple => self.rollback_delete(payload),
             UndoFlags::CatalogEntry => self.rollback_catalog_entry(payload),
-            UndoFlags::Append       => self.rollback_append(payload),
+            UndoFlags::Append => self.rollback_append(payload),
             UndoFlags::SequenceValue | UndoFlags::Attach | UndoFlags::Empty => {}
             _ => {}
         }

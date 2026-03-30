@@ -10,32 +10,23 @@
 //   metadata_reader   ← metadata_manager, types
 //   metadata_writer   ← metadata_manager, types
 
-mod types;
+pub mod free_list_block_writer;
 mod metadata_block;
 mod metadata_manager;
 mod metadata_reader;
 mod metadata_writer;
-pub mod free_list_block_writer;
+mod types;
 
 // ─── 公开导出 ─────────────────────────────────────────────────
 
 pub use types::{
-    MetaBlockPointer,
-    BlockPointer,
-    MetadataPointer,
-    MetadataHandle,
-    MetadataBlockInfo,
-    ReadStream,
+    BlockPointer, MetaBlockPointer, MetadataBlockInfo, MetadataHandle, MetadataPointer, ReadStream,
     WriteStream,
 };
 
 pub use metadata_block::MetadataBlock;
 
-pub use metadata_manager::{
-    MetadataManager,
-    MetadataManagerInner,
-    METADATA_BLOCK_COUNT,
-};
+pub use metadata_manager::{METADATA_BLOCK_COUNT, MetadataManager, MetadataManagerInner};
 
 pub use metadata_reader::{BlockReaderType, MetadataReader};
 pub use metadata_writer::MetadataWriter;

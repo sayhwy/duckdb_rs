@@ -23,49 +23,38 @@
 //     全部通过 Arc<dyn Trait> 指针，Rust 允许此类运行时引用环；
 //     实际运行中不构成 Arc 引用环（BlockManager 持 Weak<BlockHandle>）。
 
-mod types;
-mod file_buffer;
-mod memory_usage;
-mod buffer_pool_reservation;
-mod eviction_queue;
 mod block_handle;
+mod block_manager;
 mod buffer_handle;
 mod buffer_pool;
-mod block_manager;
+mod buffer_pool_reservation;
+mod eviction_queue;
+mod file_buffer;
+mod memory_usage;
+mod types;
 
 // ─── 公开导出 ─────────────────────────────────────────────────
 // 按层次导出，外部模块直接使用 storage::buffer::Foo 即可
 
 pub use types::{
-    BlockId, Idx,
-    INVALID_BLOCK, MAXIMUM_BLOCK, INVALID_INDEX,
-    DEFAULT_BLOCK_ALLOC_SIZE, DEFAULT_BLOCK_HEADER_SIZE,
-    MemoryTag, MEMORY_TAG_COUNT,
-    FileBufferType, FILE_BUFFER_TYPE_COUNT,
-    BlockState,
-    DestroyBufferUpon,
+    BlockId, BlockState, DEFAULT_BLOCK_ALLOC_SIZE, DEFAULT_BLOCK_HEADER_SIZE, DestroyBufferUpon,
+    FILE_BUFFER_TYPE_COUNT, FileBufferType, INVALID_BLOCK, INVALID_INDEX, Idx, MAXIMUM_BLOCK,
+    MEMORY_TAG_COUNT, MemoryTag,
 };
 
 pub use file_buffer::FileBuffer;
 pub use memory_usage::MemoryUsage;
 
 pub use buffer_pool_reservation::{
-    MemoryTracker,
-    BufferPoolReservation,
-    TempBufferPoolReservation,
+    BufferPoolReservation, MemoryTracker, TempBufferPoolReservation,
 };
 
 pub use eviction_queue::{EvictionNode, EvictionQueue};
 
-pub use block_handle::{BlockGuard, BlockInner, BlockHandle};
+pub use block_handle::{BlockGuard, BlockHandle, BlockInner};
 
 pub use buffer_handle::BufferHandle;
 
-pub use buffer_pool::{
-    BlockAllocator,
-    TemporaryMemoryManager,
-    EvictionResult,
-    BufferPool,
-};
+pub use buffer_pool::{BlockAllocator, BufferPool, EvictionResult, TemporaryMemoryManager};
 
 pub use block_manager::{BlockManager, BufferManager};

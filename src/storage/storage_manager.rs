@@ -31,19 +31,22 @@
 //! | `bool load_complete` | `AtomicBool` |
 //! | `optional_idx storage_version` | `Option<u64>` |
 
-use std::io;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use parking_lot::Mutex;
+use std::io;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
 use super::StandardBufferManager;
-use super::write_ahead_log::{WriteAheadLog, WalInitState, WalWriter};
-use super::metadata::MetaBlockPointer;
 use super::buffer::{BlockAllocator, BlockManager, BufferPool};
+use super::metadata::MetaBlockPointer;
 use super::single_file_block_manager::SingleFileBlockManager;
 use super::standard_file_system::LocalFileSystem;
-use super::storage_info::{FileHandle, FileOpenFlags, FileSystem, StorageManagerOptions};
+use super::storage_info::{
+    BLOCK_HEADER_SIZE, DatabaseHeader, FileHandle, FileOpenFlags, FileSystem, MainHeader,
+    StorageManagerOptions,
+};
 use super::storage_info::{StorageError, StorageResult};
+use super::write_ahead_log::{WalInitState, WalWriter, WriteAheadLog};
 
 // ─── FileWalWriter ─────────────────────────────────────────────────────────────
 
@@ -332,7 +335,11 @@ pub trait StorageCommitState: Send {
     /// 获取之前记录的 RowGroup 数据（C++: `GetRowGroupData()`）。
     ///
     /// 返回 `Some((&PersistentCollectionData, count))` 或 `None`（未乐观写入）。
-    fn get_row_group_data(&self, table_id: u64, start_index: u64) -> Option<(&PersistentCollectionData, u64)>;
+    fn get_row_group_data(
+        &self,
+        table_id: u64,
+        start_index: u64,
+    ) -> Option<(&PersistentCollectionData, u64)>;
 
     /// 是否有任何乐观写入的 RowGroup 数据（C++: `HasRowGroupData()`）。
     fn has_row_group_data(&self) -> bool {
@@ -343,7 +350,6 @@ pub trait StorageCommitState: Send {
     fn wal(&self) -> Option<Arc<WriteAheadLog>> {
         None
     }
-
 }
 
 // ─── WAL 提交阶段状态 ─────────────────────────────────────────────────────────
@@ -429,8 +435,8 @@ pub struct SingleFileStorageCommitState {
 
     /// 乐观写入的行组：table_id → (start_index → entry)。
     /// C++: `reference_map_t<DataTable, unordered_map<idx_t, OptimisticallyWrittenRowGroupData>>`
-    optimistically_written: std::collections::HashMap<u64, std::collections::HashMap<u64, OptimisticallyWrittenEntry>>,
-
+    optimistically_written:
+        std::collections::HashMap<u64, std::collections::HashMap<u64, OptimisticallyWrittenEntry>>,
 }
 
 /// WAL 操作的简化包装，避免持有 WriteAheadLog 的直接引用。
@@ -441,17 +447,11 @@ struct WalRef {
 
 impl SingleFileStorageCommitState {
     /// 构造（C++: `SingleFileStorageCommitState(StorageManager&, WriteAheadLog&)`）。
-    pub fn new(
-        initial_wal_size: u64,
-        initial_written: u64,
-        wal: Arc<WriteAheadLog>,
-    ) -> Self {
+    pub fn new(initial_wal_size: u64, initial_written: u64, wal: Arc<WriteAheadLog>) -> Self {
         Self {
             initial_wal_size,
             initial_written,
-            wal: Arc::new(Mutex::new(WalRef {
-                wal: Some(wal),
-            })),
+            wal: Arc::new(Mutex::new(WalRef { wal: Some(wal) })),
             state: WalCommitState::InProgress,
             optimistically_written: Default::default(),
         }
@@ -565,10 +565,13 @@ impl StorageCommitState for SingleFileStorageCommitState {
             return;
         }
 
-        entries.insert(start_index, OptimisticallyWrittenEntry {
-            count,
-            row_group_data,
-        });
+        entries.insert(
+            start_index,
+            OptimisticallyWrittenEntry {
+                count,
+                row_group_data,
+            },
+        );
     }
 
     /// 获取之前记录的 RowGroup 数据（C++: `GetRowGroupData()`）。
@@ -590,7 +593,11 @@ impl StorageCommitState for SingleFileStorageCommitState {
     ///     return start_entry->second.row_group_data.get();
     /// }
     /// ```
-    fn get_row_group_data(&self, table_id: u64, start_index: u64) -> Option<(&PersistentCollectionData, u64)> {
+    fn get_row_group_data(
+        &self,
+        table_id: u64,
+        start_index: u64,
+    ) -> Option<(&PersistentCollectionData, u64)> {
         let entries = self.optimistically_written.get(&table_id)?;
         let entry = entries.get(&start_index)?;
         Some((&entry.row_group_data, entry.count))
@@ -748,6 +755,7 @@ pub struct SingleFileStorageManager {
     ///
     /// 内部使用 `Mutex` 保护，允许延迟初始化。
     block_manager_inner: Mutex<Option<Arc<dyn BlockManager>>>,
+    db_instance: Mutex<Option<Weak<crate::connection::DatabaseInstance>>>,
 }
 
 impl SingleFileStorageManager {
@@ -767,12 +775,16 @@ impl SingleFileStorageManager {
         Self {
             path: resolved_path,
             read_only,
-            wal_state: Mutex::new(WalState { wal: None, wal_path }),
+            wal_state: Mutex::new(WalState {
+                wal: None,
+                wal_path,
+            }),
             wal_size_atomic: Arc::new(AtomicU64::new(0)),
             load_complete: AtomicBool::new(false),
             storage_version: Mutex::new(None),
             storage_options: options,
             block_manager_inner: Mutex::new(None),
+            db_instance: Mutex::new(None),
         }
     }
 
@@ -804,10 +816,7 @@ impl SingleFileStorageManager {
 
     /// 获取当前活跃 WAL（若存在）。
     pub fn get_wal(&self) -> Option<Arc<WriteAheadLog>> {
-        if self.in_memory()
-            || self.read_only
-            || !self.load_complete.load(Ordering::Acquire)
-        {
+        if self.in_memory() || self.read_only || !self.load_complete.load(Ordering::Acquire) {
             return None;
         }
         self.wal_state.lock().wal.clone()
@@ -816,6 +825,59 @@ impl SingleFileStorageManager {
     /// 获取数据库磁盘 WAL 大小（字节）（C++: `GetWALSize()`）。
     pub fn get_wal_size(&self) -> u64 {
         self.wal_size_atomic.load(Ordering::Relaxed)
+    }
+
+    pub fn bind_database_instance(&self, db_instance: Weak<crate::connection::DatabaseInstance>) {
+        *self.db_instance.lock() = Some(db_instance);
+    }
+
+    fn checkpoint_tables(&self) -> StorageResult<Vec<crate::storage::checkpoint::TableInfo>> {
+        let db_instance = self
+            .db_instance
+            .lock()
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| {
+                StorageError::Other("StorageManager is not bound to DatabaseInstance".into())
+            })?;
+
+        let tables = db_instance.tables.lock();
+        Ok(tables
+            .values()
+            .map(|handle| crate::storage::checkpoint::TableInfo {
+                entry: Arc::new(handle.catalog_entry.clone()),
+                storage: handle.storage.clone(),
+            })
+            .collect())
+    }
+
+    fn read_active_header(&self, fs: &dyn FileSystem) -> StorageResult<DatabaseHeader> {
+        let mut file = fs.open_file(&self.path, FileOpenFlags::READ)?;
+
+        let mut main_header_buf = vec![0u8; super::storage_info::FILE_HEADER_SIZE];
+        file.read_at(&mut main_header_buf, 0)?;
+        let payload = &main_header_buf[BLOCK_HEADER_SIZE..];
+        MainHeader::deserialize(payload).ok_or_else(|| StorageError::Corrupt {
+            msg: "Invalid DuckDB main header".to_string(),
+        })?;
+
+        let mut header_buf = vec![0u8; super::storage_info::FILE_HEADER_SIZE];
+        file.read_at(
+            &mut header_buf,
+            super::storage_info::FILE_HEADER_SIZE as u64,
+        )?;
+        let h0 = DatabaseHeader::deserialize(
+            &header_buf[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + DatabaseHeader::SERIALIZED_SIZE],
+        );
+        file.read_at(
+            &mut header_buf,
+            (super::storage_info::FILE_HEADER_SIZE * 2) as u64,
+        )?;
+        let h1 = DatabaseHeader::deserialize(
+            &header_buf[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + DatabaseHeader::SERIALIZED_SIZE],
+        );
+        let headers = [h0, h1];
+        Ok(headers[MainHeader::active_header_idx(&headers)].clone())
     }
 }
 
@@ -842,17 +904,8 @@ impl StorageManager for SingleFileStorageManager {
 
         let fs = Arc::new(LocalFileSystem);
         let allocator: Arc<dyn BlockAllocator> = Arc::new(NoopBlockAllocator);
-        let buffer_pool = BufferPool::new(
-            allocator,
-            512 * 1024 * 1024,
-            false,
-            0,
-        );
-        let buffer_manager = StandardBufferManager::new(
-            buffer_pool,
-            None,
-            fs.clone(),
-        );
+        let buffer_pool = BufferPool::new(allocator, 512 * 1024 * 1024, false, 0);
+        let buffer_manager = StandardBufferManager::new(buffer_pool, None, fs.clone());
         let block_options = StorageManagerOptions {
             read_only: self.read_only,
             use_direct_io: false,
@@ -952,7 +1005,10 @@ impl StorageManager for SingleFileStorageManager {
 
         println!("🟡 [CHECKPOINT] WALStartCheckpoint 开始");
         println!("   - 数据库路径: {}", self.path);
-        println!("   - 当前 WAL 大小: {} bytes", self.wal_size_atomic.load(Ordering::Relaxed));
+        println!(
+            "   - 当前 WAL 大小: {} bytes",
+            self.wal_size_atomic.load(Ordering::Relaxed)
+        );
 
         let mut wal_state = self.wal_state.lock();
 
@@ -1030,7 +1086,9 @@ impl StorageManager for SingleFileStorageManager {
         println!("🟡 [CHECKPOINT] WALFinishCheckpoint 开始");
 
         let mut wal_state = self.wal_state.lock();
-        let wal = wal_state.wal.take()
+        let wal = wal_state
+            .wal
+            .take()
             .ok_or_else(|| StorageError::Other("WAL not set in WALFinishCheckpoint".into()))?;
 
         if !wal.is_initialized() {
@@ -1080,7 +1138,10 @@ impl StorageManager for SingleFileStorageManager {
         }
 
         println!("   ✅ WALFinishCheckpoint 完成");
-        println!("   - WAL 大小: {} bytes", self.wal_size_atomic.load(Ordering::Relaxed));
+        println!(
+            "   - WAL 大小: {} bytes",
+            self.wal_size_atomic.load(Ordering::Relaxed)
+        );
 
         Ok(())
     }
@@ -1105,44 +1166,80 @@ impl StorageManager for SingleFileStorageManager {
         initial_size.saturating_add(estimated_wal_bytes) > DEFAULT_CHECKPOINT_WAL_SIZE
     }
 
-    fn create_checkpoint(&self, options: CheckpointOptions) -> StorageResult<()> {
-        // C++: SingleFileStorageManager::CreateCheckpoint()
-        //   → 创建 SingleFileCheckpointWriter
-        //   → SingleFileCheckpointWriter::CreateCheckpoint()
-        //      ├─ WALStartCheckpoint(meta_block, options)
-        //      ├─ 序列化 Catalog（遍历所有 Schema/Table/View）
-        //      ├─ 写入 TableData（RowGroups → ColumnData → 数据块）
-        //      ├─ Flush MetadataWriter
-        //      ├─ 写入新 DatabaseHeader（双 Header 交替写入）
-        //      └─ WALFinishCheckpoint()
-        //
-        // 注意：此方法需要访问 Catalog（表结构和数据），
-        // 在当前 Rust 架构中由 DB::checkpoint() 负责完整实现。
-        // StorageManager 层暂不持有 Catalog 引用。
-
-        println!("🔵 [CHECKPOINT] create_checkpoint 被调用");
-        println!("   - 数据库路径: {}", self.path);
-        println!("   - 只读模式: {}", self.read_only);
-        println!("   - 已加载: {}", self.load_complete.load(Ordering::Acquire));
-        println!("   - Checkpoint 动作: {:?}", options.action);
-        println!("   - 事务 ID: {:?}", options.transaction_id);
-
+    fn create_checkpoint(&self, mut options: CheckpointOptions) -> StorageResult<()> {
         if self.read_only || !self.load_complete.load(Ordering::Acquire) {
-            println!("   ⚠️  跳过 checkpoint（只读或未加载）");
+            return Ok(());
+        }
+        if self.in_memory() {
             return Ok(());
         }
 
-        println!("   ❌ Checkpoint 未实现（需要 Catalog 支持）");
-        Err(StorageError::Other(
-            "create_checkpoint: 请通过 DB::checkpoint() 调用，StorageManager 层需要访问 Catalog".into(),
-        ))
+        let wal_size = self.get_wal_size();
+        let force_checkpoint = matches!(
+            options.action,
+            CheckpointAction::ForceCheckpoint | CheckpointAction::AlwaysCheckpoint
+        );
+        if wal_size == 0 && !force_checkpoint {
+            return Ok(());
+        }
+
+        let fs = Arc::new(LocalFileSystem);
+        let allocator: Arc<dyn BlockAllocator> = Arc::new(NoopBlockAllocator);
+        let buffer_pool = BufferPool::new(allocator, 256 * 1024 * 1024, false, 0);
+        let buffer_manager = StandardBufferManager::new(buffer_pool.clone(), None, fs.clone());
+        let current_header = self.read_active_header(&*fs)?;
+
+        let block_manager = SingleFileBlockManager::new(
+            buffer_manager.clone(),
+            fs,
+            self.path.clone(),
+            &StorageManagerOptions {
+                read_only: false,
+                use_direct_io: false,
+                debug_initialize: None,
+                block_alloc_size: current_header.block_alloc_size as usize,
+                block_header_size: Some(BLOCK_HEADER_SIZE),
+                storage_version: Some(current_header.serialization_compatibility),
+                encryption_options: Default::default(),
+            },
+        );
+        buffer_manager.set_block_manager(block_manager.clone());
+        block_manager.initialize()?;
+
+        let metadata_manager = Arc::new(super::metadata::MetadataManager::new(
+            block_manager.clone() as Arc<dyn BlockManager>,
+            buffer_manager,
+        ));
+        block_manager.set_metadata_manager(metadata_manager.clone());
+
+        let table_infos = self.checkpoint_tables()?;
+        let checkpoint_manager = crate::storage::checkpoint::CheckpointManager::new(
+            block_manager.clone() as Arc<dyn BlockManager>,
+            metadata_manager,
+        );
+        let mut has_wal = false;
+        let new_header =
+            checkpoint_manager.create_checkpoint_with_meta(&table_infos, |meta_block| {
+                has_wal = self.wal_start_checkpoint(meta_block, &mut options)?;
+                Ok(())
+            })?;
+        block_manager.write_header_with_free_list(new_header)?;
+        if has_wal {
+            self.wal_finish_checkpoint()?;
+        }
+        Ok(())
     }
 
-    fn is_checkpoint_clean(&self, _checkpoint_id: MetaBlockPointer) -> bool {
-        // C++: block_manager.IsRootBlock(checkpoint_id)
-        // 检查给定的 meta_block 指针是否与磁盘上当前 DatabaseHeader 中的指针一致
-        // 用于判断内存中的数据是否已全部持久化
-        false // 保守返回 false，促使调用方重新 Checkpoint
+    fn is_checkpoint_clean(&self, checkpoint_id: MetaBlockPointer) -> bool {
+        if self.in_memory() || !self.load_complete.load(Ordering::Acquire) {
+            return false;
+        }
+        let fs = LocalFileSystem;
+        self.read_active_header(&fs)
+            .map(|header| {
+                header.meta_block == checkpoint_id.block_pointer as i64 && checkpoint_id.offset == 0
+            })
+            .unwrap_or(false)
     }
 
     fn database_size(&self) -> DatabaseSize {
@@ -1171,7 +1268,9 @@ impl StorageManager for SingleFileStorageManager {
     }
 
     fn block_manager(&self) -> &dyn BlockManager {
-        panic!("SingleFileStorageManager::block_manager requires Arc-based access in the current Rust port")
+        panic!(
+            "SingleFileStorageManager::block_manager requires Arc-based access in the current Rust port"
+        )
     }
 
     fn gen_storage_commit_state(&self) -> Option<Box<dyn StorageCommitState>> {

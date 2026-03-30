@@ -21,8 +21,8 @@
 //! | `Vector intermediate` | `Vec<u8>` 原始缓冲 |
 //! | `vector<vector<optional_ptr<CompressionFunction>>>` | `Vec<Vec<Option<CompressionFunctionId>>>` |
 
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::sync::Arc;
 
 use super::column_checkpoint_state::{ColumnCheckpointState, CompressionFunction};
 use super::types::Idx;
@@ -52,12 +52,18 @@ pub struct CheckpointAnalyzeResult {
 impl CheckpointAnalyzeResult {
     /// 默认构造（无需 checkpoint 的列）（C++: 默认构造函数）。
     pub fn none() -> Self {
-        Self { analyze_state: None, function_id: None }
+        Self {
+            analyze_state: None,
+            function_id: None,
+        }
     }
 
     /// 有压缩结果。
     pub fn new(analyze_state: Box<AnalyzeState>, function_id: CompressionFunctionId) -> Self {
-        Self { analyze_state: Some(analyze_state), function_id: Some(function_id) }
+        Self {
+            analyze_state: Some(analyze_state),
+            function_id: Some(function_id),
+        }
     }
 }
 
@@ -86,7 +92,11 @@ pub struct ColumnDataCheckpointData {
 impl ColumnDataCheckpointData {
     /// 默认构造（列不需要 checkpoint）。
     pub fn none() -> Self {
-        Self { checkpoint_state: None, col_data_id: None, row_group_id: None }
+        Self {
+            checkpoint_state: None,
+            col_data_id: None,
+            row_group_id: None,
+        }
     }
 
     pub fn new(
@@ -108,7 +118,9 @@ impl ColumnDataCheckpointData {
 
     /// 获取 checkpoint 状态（C++: `GetCheckpointState()`）。
     pub fn get_checkpoint_state(&self) -> Arc<Mutex<ColumnCheckpointState>> {
-        self.checkpoint_state.clone().expect("checkpoint_state not set")
+        self.checkpoint_state
+            .clone()
+            .expect("checkpoint_state not set")
     }
 }
 

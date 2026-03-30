@@ -53,55 +53,98 @@ pub struct LogicalType {
 impl LogicalType {
     // ── 构造快捷方式 ──────────────────────────────────────────────────────────
 
-    pub fn boolean()   -> Self { Self { id: LogicalTypeId::Boolean   } }
-    pub fn tinyint()   -> Self { Self { id: LogicalTypeId::TinyInt   } }
-    pub fn smallint()  -> Self { Self { id: LogicalTypeId::SmallInt  } }
-    pub fn integer()   -> Self { Self { id: LogicalTypeId::Integer   } }
-    pub fn bigint()    -> Self { Self { id: LogicalTypeId::BigInt    } }
-    pub fn hugeint()   -> Self { Self { id: LogicalTypeId::HugeInt   } }
-    pub fn float()     -> Self { Self { id: LogicalTypeId::Float     } }
-    pub fn double()    -> Self { Self { id: LogicalTypeId::Double    } }
-    pub fn varchar()   -> Self { Self { id: LogicalTypeId::Varchar   } }
-    pub fn row_id()    -> Self { Self { id: LogicalTypeId::BigInt    } } // row_t = i64
+    pub fn boolean() -> Self {
+        Self {
+            id: LogicalTypeId::Boolean,
+        }
+    }
+    pub fn tinyint() -> Self {
+        Self {
+            id: LogicalTypeId::TinyInt,
+        }
+    }
+    pub fn smallint() -> Self {
+        Self {
+            id: LogicalTypeId::SmallInt,
+        }
+    }
+    pub fn integer() -> Self {
+        Self {
+            id: LogicalTypeId::Integer,
+        }
+    }
+    pub fn bigint() -> Self {
+        Self {
+            id: LogicalTypeId::BigInt,
+        }
+    }
+    pub fn hugeint() -> Self {
+        Self {
+            id: LogicalTypeId::HugeInt,
+        }
+    }
+    pub fn float() -> Self {
+        Self {
+            id: LogicalTypeId::Float,
+        }
+    }
+    pub fn double() -> Self {
+        Self {
+            id: LogicalTypeId::Double,
+        }
+    }
+    pub fn varchar() -> Self {
+        Self {
+            id: LogicalTypeId::Varchar,
+        }
+    }
+    pub fn row_id() -> Self {
+        Self {
+            id: LogicalTypeId::BigInt,
+        }
+    } // row_t = i64
 
     /// 该类型每个值占用的字节数（用于 flat vector 的缓冲区分配）。
     pub fn physical_size(&self) -> usize {
         match self.id {
-            LogicalTypeId::Boolean | LogicalTypeId::TinyInt     =>  1,
-            LogicalTypeId::SmallInt                              =>  2,
-            LogicalTypeId::Integer  | LogicalTypeId::Float       =>  4,
-            LogicalTypeId::BigInt   | LogicalTypeId::Double
-            | LogicalTypeId::Timestamp | LogicalTypeId::Date
-            | LogicalTypeId::Time   | LogicalTypeId::Interval    =>  8,
-            LogicalTypeId::HugeInt                               => 16,
+            LogicalTypeId::Boolean | LogicalTypeId::TinyInt => 1,
+            LogicalTypeId::SmallInt => 2,
+            LogicalTypeId::Integer | LogicalTypeId::Float => 4,
+            LogicalTypeId::BigInt
+            | LogicalTypeId::Double
+            | LogicalTypeId::Timestamp
+            | LogicalTypeId::Date
+            | LogicalTypeId::Time
+            | LogicalTypeId::Interval => 8,
+            LogicalTypeId::HugeInt => 16,
             // VARCHAR 在 flat vector 中存为 string_t (4 + 4 + 8 bytes = 16)
-            LogicalTypeId::Varchar                               => 16,
+            LogicalTypeId::Varchar => 16,
             // 其余类型（List / Struct / Map）使用 8 字节指针占位
-            _                                                    =>  8,
+            _ => 8,
         }
     }
 
     /// 类型名称字符串（调试用，C++: `LogicalType::ToString()`）。
     pub fn name(&self) -> &'static str {
         match self.id {
-            LogicalTypeId::Boolean   => "BOOLEAN",
-            LogicalTypeId::TinyInt   => "TINYINT",
-            LogicalTypeId::SmallInt  => "SMALLINT",
-            LogicalTypeId::Integer   => "INTEGER",
-            LogicalTypeId::BigInt    => "BIGINT",
-            LogicalTypeId::HugeInt   => "HUGEINT",
-            LogicalTypeId::Float     => "FLOAT",
-            LogicalTypeId::Double    => "DOUBLE",
-            LogicalTypeId::Varchar   => "VARCHAR",
+            LogicalTypeId::Boolean => "BOOLEAN",
+            LogicalTypeId::TinyInt => "TINYINT",
+            LogicalTypeId::SmallInt => "SMALLINT",
+            LogicalTypeId::Integer => "INTEGER",
+            LogicalTypeId::BigInt => "BIGINT",
+            LogicalTypeId::HugeInt => "HUGEINT",
+            LogicalTypeId::Float => "FLOAT",
+            LogicalTypeId::Double => "DOUBLE",
+            LogicalTypeId::Varchar => "VARCHAR",
             LogicalTypeId::Timestamp => "TIMESTAMP",
-            LogicalTypeId::Date      => "DATE",
-            LogicalTypeId::Time      => "TIME",
-            LogicalTypeId::Interval  => "INTERVAL",
-            LogicalTypeId::List      => "LIST",
-            LogicalTypeId::Struct    => "STRUCT",
-            LogicalTypeId::Map       => "MAP",
-            LogicalTypeId::Invalid   => "INVALID",
-            LogicalTypeId::Validity  => "VALIDITY",
+            LogicalTypeId::Date => "DATE",
+            LogicalTypeId::Time => "TIME",
+            LogicalTypeId::Interval => "INTERVAL",
+            LogicalTypeId::List => "LIST",
+            LogicalTypeId::Struct => "STRUCT",
+            LogicalTypeId::Map => "MAP",
+            LogicalTypeId::Invalid => "INVALID",
+            LogicalTypeId::Validity => "VALIDITY",
         }
     }
 }
@@ -126,7 +169,7 @@ pub enum LogicalTypeId {
     Struct,
     Map,
     Invalid,
-    Validity,  // Added for NULL bitmask columns
+    Validity, // Added for NULL bitmask columns
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -145,18 +188,24 @@ pub struct SelectionVector {
 impl SelectionVector {
     /// 创建容量为 `capacity` 的未初始化选择向量。
     pub fn with_capacity(capacity: usize) -> Self {
-        Self { indices: Vec::with_capacity(capacity) }
+        Self {
+            indices: Vec::with_capacity(capacity),
+        }
     }
 
     /// 创建恒等映射：`indices[i] = i`（C++: `SelectionVector(idx_t count)`）。
     pub fn identity(count: usize) -> Self {
-        Self { indices: (0..count as u32).collect() }
+        Self {
+            indices: (0..count as u32).collect(),
+        }
     }
 
     /// 创建区间 `[offset, offset + count)` 的恒等映射
     /// （C++: `SelectionVector(idx_t offset, idx_t count)`）。
     pub fn range(offset: u32, count: usize) -> Self {
-        Self { indices: (offset..offset + count as u32).collect() }
+        Self {
+            indices: (offset..offset + count as u32).collect(),
+        }
     }
 
     /// 读取第 `i` 个下标（C++: `get_index(idx_t i)`）。
@@ -171,8 +220,12 @@ impl SelectionVector {
         self.indices[i] = idx;
     }
 
-    pub fn len(&self) -> usize { self.indices.len() }
-    pub fn is_empty(&self) -> bool { self.indices.is_empty() }
+    pub fn len(&self) -> usize {
+        self.indices.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -196,13 +249,21 @@ pub struct ValidityMask {
 impl ValidityMask {
     /// 创建全部有效（无 NULL）的 mask（C++: 默认构造或 `SetAllValid()`）。
     pub fn all_valid(row_count: usize) -> Self {
-        Self { bits: Vec::new(), row_count, all_valid: true }
+        Self {
+            bits: Vec::new(),
+            row_count,
+            all_valid: true,
+        }
     }
 
     /// 创建全部无效（全 NULL）的 mask（C++: `SetAllInvalid()`）。
     pub fn all_invalid(row_count: usize) -> Self {
         let nwords = (row_count + 63) / 64;
-        Self { bits: vec![0u64; nwords], row_count, all_valid: false }
+        Self {
+            bits: vec![0u64; nwords],
+            row_count,
+            all_valid: false,
+        }
     }
 
     /// 创建有指定行数的 mask，初始全部有效。
@@ -220,10 +281,14 @@ impl ValidityMask {
     /// 第 `row` 行是否有效（非 NULL）（C++: `RowIsValid(idx_t row)`）。
     #[inline]
     pub fn row_is_valid(&self, row: usize) -> bool {
-        if self.all_valid { return true; }
-        if self.bits.is_empty() { return true; }
+        if self.all_valid {
+            return true;
+        }
+        if self.bits.is_empty() {
+            return true;
+        }
         let word = row / 64;
-        let bit  = row % 64;
+        let bit = row % 64;
         (self.bits[word] >> bit) & 1 == 1
     }
 
@@ -231,7 +296,7 @@ impl ValidityMask {
     pub fn set_valid(&mut self, row: usize) {
         self.ensure_allocated();
         let word = row / 64;
-        let bit  = row % 64;
+        let bit = row % 64;
         self.bits[word] |= 1 << bit;
     }
 
@@ -240,13 +305,15 @@ impl ValidityMask {
         self.ensure_allocated();
         self.all_valid = false;
         let word = row / 64;
-        let bit  = row % 64;
+        let bit = row % 64;
         self.bits[word] &= !(1u64 << bit);
     }
 
     /// 是否所有行都有效（C++: `AllValid()`）。
     pub fn is_all_valid(&self) -> bool {
-        if self.all_valid { return true; }
+        if self.all_valid {
+            return true;
+        }
         self.bits.iter().all(|&w| w == !0u64)
     }
 
@@ -257,7 +324,9 @@ impl ValidityMask {
         self.all_valid = true;
     }
 
-    pub fn row_count(&self) -> usize { self.row_count }
+    pub fn row_count(&self) -> usize {
+        self.row_count
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -381,8 +450,12 @@ impl Vector {
 
     // ── 类型与布局 ────────────────────────────────────────────────────────
 
-    pub fn get_type(&self) -> &LogicalType { &self.logical_type }
-    pub fn get_vector_type(&self) -> VectorType { self.vector_type }
+    pub fn get_type(&self) -> &LogicalType {
+        &self.logical_type
+    }
+    pub fn get_vector_type(&self) -> VectorType {
+        self.vector_type
+    }
 
     /// 将此向量变为引用 `other` 的 Dictionary 向量（恒等选择）
     /// （C++: `Vector::Reference(const Vector&)`）。
@@ -411,10 +484,14 @@ impl Vector {
     // ── 数据访问 ──────────────────────────────────────────────────────────
 
     /// 返回 Flat 向量的原始字节切片（只读）。
-    pub fn raw_data(&self) -> &[u8] { &self.data }
+    pub fn raw_data(&self) -> &[u8] {
+        &self.data
+    }
 
     /// 返回 Flat 向量的原始字节切片（可写）。
-    pub fn raw_data_mut(&mut self) -> &mut [u8] { &mut self.data }
+    pub fn raw_data_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
 
     /// 将向量展平为 Flat 布局，丢弃选择向量等间接层
     /// （C++: `Vector::Flatten(idx_t count)`）。
@@ -528,7 +605,9 @@ impl Vector {
                     seq_increment: 0,
                 });
                 self.child = Some(child);
-                self.sel = Some(SelectionVector { indices: sel.indices[..count].to_vec() });
+                self.sel = Some(SelectionVector {
+                    indices: sel.indices[..count].to_vec(),
+                });
                 self.vector_type = VectorType::Dictionary;
             }
             VectorType::Constant => {} // 常量向量忽略 slice
@@ -591,7 +670,10 @@ struct VectorCache {
 
 impl VectorCache {
     fn new(logical_type: LogicalType, capacity: usize) -> Self {
-        Self { logical_type, capacity }
+        Self {
+            logical_type,
+            capacity,
+        }
     }
 
     /// 将 `vector` 重置为缓存时的初始状态（C++: `Vector::ResetFromCache()`）。
@@ -653,7 +735,10 @@ impl DataChunk {
     ///
     /// 适用于不需要实际存储数据的"引用 chunk"。
     pub fn initialize_empty(&mut self, types: &[LogicalType]) {
-        debug_assert!(self.data.is_empty(), "DataChunk::initialize_empty 只能在空 chunk 上调用");
+        debug_assert!(
+            self.data.is_empty(),
+            "DataChunk::initialize_empty 只能在空 chunk 上调用"
+        );
         self.capacity = STANDARD_VECTOR_SIZE;
         for t in types {
             self.data.push(Vector::new_empty(t.clone()));
@@ -674,7 +759,10 @@ impl DataChunk {
         capacity: usize,
     ) {
         debug_assert_eq!(types.len(), init_mask.len());
-        debug_assert!(self.data.is_empty(), "DataChunk::initialize_with_mask 只能在空 chunk 上调用");
+        debug_assert!(
+            self.data.is_empty(),
+            "DataChunk::initialize_with_mask 只能在空 chunk 上调用"
+        );
 
         self.capacity = capacity;
         self.initial_capacity = capacity;
@@ -695,22 +783,32 @@ impl DataChunk {
 
     /// 当前行数（C++: `size()`）。
     #[inline]
-    pub fn size(&self) -> usize { self.count }
+    pub fn size(&self) -> usize {
+        self.count
+    }
 
     /// 列数（C++: `ColumnCount()`）。
     #[inline]
-    pub fn column_count(&self) -> usize { self.data.len() }
+    pub fn column_count(&self) -> usize {
+        self.data.len()
+    }
 
     /// 最大容量（C++: `GetCapacity()`）。
     #[inline]
-    pub fn capacity(&self) -> usize { self.capacity }
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
 
     /// 设置当前行数（C++: `SetCardinality(idx_t count)`）。
     ///
     /// `count` 不得超过 `capacity()`。
     #[inline]
     pub fn set_cardinality(&mut self, count: usize) {
-        debug_assert!(count <= self.capacity, "DataChunk: cardinality {count} > capacity {}", self.capacity);
+        debug_assert!(
+            count <= self.capacity,
+            "DataChunk: cardinality {count} > capacity {}",
+            self.capacity
+        );
         self.count = count;
     }
 
@@ -720,7 +818,9 @@ impl DataChunk {
     }
 
     /// 设置容量（C++: `SetCapacity(idx_t capacity)`）。
-    pub fn set_capacity(&mut self, capacity: usize) { self.capacity = capacity; }
+    pub fn set_capacity(&mut self, capacity: usize) {
+        self.capacity = capacity;
+    }
 
     // ── 生命周期 ──────────────────────────────────────────────────────────
 
@@ -759,7 +859,9 @@ impl DataChunk {
         sel: Option<(&SelectionVector, usize)>,
     ) {
         let append_count = sel.map_or(other.size(), |(_, c)| c);
-        if append_count == 0 { return; }
+        if append_count == 0 {
+            return;
+        }
 
         let new_size = self.count + append_count;
         if new_size > self.capacity {
@@ -908,12 +1010,17 @@ impl DataChunk {
 
     /// 估算总内存占用（C++: `DataChunk::GetAllocationSize()`）。
     pub fn allocation_size(&self) -> usize {
-        self.data.iter().map(|v| v.allocation_size(self.count)).sum()
+        self.data
+            .iter()
+            .map(|v| v.allocation_size(self.count))
+            .sum()
     }
 
     /// 所有列是否都是 Constant 向量（C++: `DataChunk::AllConstant()`）。
     pub fn all_constant(&self) -> bool {
-        self.data.iter().all(|v| v.get_vector_type() == VectorType::Constant)
+        self.data
+            .iter()
+            .all(|v| v.get_vector_type() == VectorType::Constant)
     }
 
     /// 调试字符串（C++: `DataChunk::ToString()`）。
@@ -937,7 +1044,8 @@ impl DataChunk {
                     assert!(
                         col.data.len() >= self.count * col.logical_type.physical_size(),
                         "Vector data buffer too small: {} < {}",
-                        col.data.len(), expected
+                        col.data.len(),
+                        expected
                     );
                 }
                 _ => {}
@@ -965,7 +1073,9 @@ impl DataChunk {
 pub const STANDARD_VECTOR_SIZE: usize = 2048;
 
 impl Default for DataChunk {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // DataChunk 不可 Clone（C++: `DataChunk(const DataChunk&) = delete`）
@@ -989,8 +1099,8 @@ mod tests {
     fn logical_type_physical_sizes() {
         assert_eq!(LogicalType::boolean().physical_size(), 1);
         assert_eq!(LogicalType::integer().physical_size(), 4);
-        assert_eq!(LogicalType::bigint().physical_size(),  8);
-        assert_eq!(LogicalType::double().physical_size(),  8);
+        assert_eq!(LogicalType::bigint().physical_size(), 8);
+        assert_eq!(LogicalType::double().physical_size(), 8);
         assert_eq!(LogicalType::hugeint().physical_size(), 16);
     }
 
@@ -1000,7 +1110,9 @@ mod tests {
     fn selection_vector_identity() {
         let sel = SelectionVector::identity(5);
         assert_eq!(sel.len(), 5);
-        for i in 0..5 { assert_eq!(sel.get_index(i), i); }
+        for i in 0..5 {
+            assert_eq!(sel.get_index(i), i);
+        }
     }
 
     #[test]
@@ -1015,7 +1127,9 @@ mod tests {
     #[test]
     fn validity_mask_all_valid() {
         let mask = ValidityMask::new(100);
-        for i in 0..100 { assert!(mask.row_is_valid(i)); }
+        for i in 0..100 {
+            assert!(mask.row_is_valid(i));
+        }
     }
 
     #[test]
@@ -1030,7 +1144,9 @@ mod tests {
     #[test]
     fn validity_mask_all_invalid() {
         let mask = ValidityMask::all_invalid(10);
-        for i in 0..10 { assert!(!mask.row_is_valid(i)); }
+        for i in 0..10 {
+            assert!(!mask.row_is_valid(i));
+        }
     }
 
     // ── Vector ───────────────────────────────────────────────────────────────
@@ -1062,7 +1178,7 @@ mod tests {
         let data = v.raw_data();
         // 10, 12, 14, 16
         for i in 0..4usize {
-            let val = i64::from_le_bytes(data[i*8..(i+1)*8].try_into().unwrap());
+            let val = i64::from_le_bytes(data[i * 8..(i + 1) * 8].try_into().unwrap());
             assert_eq!(val, 10 + 2 * i as i64);
         }
     }
@@ -1146,7 +1262,14 @@ mod tests {
     #[test]
     fn data_chunk_split_and_fuse() {
         let mut a = DataChunk::new();
-        a.initialize(&[LogicalType::integer(), LogicalType::bigint(), LogicalType::double()], 4);
+        a.initialize(
+            &[
+                LogicalType::integer(),
+                LogicalType::bigint(),
+                LogicalType::double(),
+            ],
+            4,
+        );
         a.set_cardinality(4);
 
         let mut b = DataChunk::new();
@@ -1163,17 +1286,23 @@ mod tests {
     #[test]
     fn data_chunk_all_constant() {
         let mut chunk = DataChunk::new();
-        chunk.data.push(Vector::new_constant(LogicalType::integer()));
+        chunk
+            .data
+            .push(Vector::new_constant(LogicalType::integer()));
         chunk.data.push(Vector::new_constant(LogicalType::bigint()));
         assert!(chunk.all_constant());
-        chunk.data.push(Vector::with_capacity(LogicalType::float(), 10));
+        chunk
+            .data
+            .push(Vector::with_capacity(LogicalType::float(), 10));
         assert!(!chunk.all_constant());
     }
 
     #[test]
     fn data_chunk_flatten() {
         let mut chunk = DataChunk::new();
-        chunk.data.push(Vector::new_constant(LogicalType::integer()));
+        chunk
+            .data
+            .push(Vector::new_constant(LogicalType::integer()));
         chunk.set_cardinality(5);
         chunk.flatten();
         assert_eq!(chunk.data[0].get_vector_type(), VectorType::Flat);
@@ -1187,7 +1316,8 @@ mod tests {
         let mut src = DataChunk::new();
         src.initialize(&[LogicalType::integer()], 4);
         // 写入源数据
-        src.data[0].raw_data_mut()[..16].copy_from_slice(&[1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0]);
+        src.data[0].raw_data_mut()[..16]
+            .copy_from_slice(&[1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0]);
         src.set_cardinality(4);
 
         dst.append(&src, false, None);

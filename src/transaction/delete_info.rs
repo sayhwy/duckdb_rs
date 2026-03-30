@@ -80,7 +80,9 @@ impl DeleteInfo {
             let mut rows = Vec::with_capacity(count as usize);
             for i in 0..count as usize {
                 let offset = rows_start + i * 2;
-                rows.push(u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap()));
+                rows.push(u16::from_le_bytes(
+                    bytes[offset..offset + 2].try_into().unwrap(),
+                ));
             }
             Some(rows)
         };
@@ -99,7 +101,10 @@ impl DeleteInfo {
     /// 序列化到 UndoBuffer 载荷字节。
     pub fn serialize(&self, out: &mut [u8]) {
         let min_size = 8 + 8 + 8 + 8 + 8 + 1;
-        assert!(out.len() >= self.serialized_size(), "DeleteInfo output buffer too short");
+        assert!(
+            out.len() >= self.serialized_size(),
+            "DeleteInfo output buffer too short"
+        );
 
         out[0..8].copy_from_slice(&self.table_id.to_le_bytes());
         out[8..16].copy_from_slice(&self.version_info_id.to_le_bytes());

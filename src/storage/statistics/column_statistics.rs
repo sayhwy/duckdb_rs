@@ -28,7 +28,10 @@ impl ColumnStatistics {
     }
 
     /// Create new column statistics with both base and distinct stats
-    pub fn with_distinct(stats: BaseStatistics, distinct_stats: Option<DistinctStatistics>) -> Self {
+    pub fn with_distinct(
+        stats: BaseStatistics,
+        distinct_stats: Option<DistinctStatistics>,
+    ) -> Self {
         Self {
             stats,
             distinct_stats,
@@ -133,12 +136,12 @@ mod tests {
 
     #[test]
     fn test_merge() {
-        let mut stats1 = ColumnStatistics::new(
-            BaseStatistics::create_empty(crate::common::types::LogicalType::integer())
-        );
-        let stats2 = ColumnStatistics::new(
-            BaseStatistics::create_empty(crate::common::types::LogicalType::integer())
-        );
+        let mut stats1 = ColumnStatistics::new(BaseStatistics::create_empty(
+            crate::common::types::LogicalType::integer(),
+        ));
+        let stats2 = ColumnStatistics::new(BaseStatistics::create_empty(
+            crate::common::types::LogicalType::integer(),
+        ));
 
         stats1.statistics_mut().set_has_null();
         stats1.merge(&stats2);
@@ -148,9 +151,9 @@ mod tests {
 
     #[test]
     fn test_copy() {
-        let stats = ColumnStatistics::new(
-            BaseStatistics::create_empty(crate::common::types::LogicalType::integer())
-        );
+        let stats = ColumnStatistics::new(BaseStatistics::create_empty(
+            crate::common::types::LogicalType::integer(),
+        ));
         let copied = stats.copy();
 
         assert_eq!(

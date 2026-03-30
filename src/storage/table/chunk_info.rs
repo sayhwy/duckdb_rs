@@ -10,7 +10,10 @@
 //! `EMPTY_INFO` in C++ is represented as `None<ChunkInfo>` in Rust — callers
 //! use `Option<ChunkInfo>`.
 
-use super::types::{Idx, RowId, TransactionData, TransactionId, is_row_visible, use_inserted_version, use_deleted_version, NOT_DELETED_ID, TRANSACTION_ID_START};
+use super::types::{
+    Idx, NOT_DELETED_ID, RowId, TRANSACTION_ID_START, TransactionData, TransactionId,
+    is_row_visible, use_deleted_version, use_inserted_version,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public enum
@@ -157,7 +160,8 @@ impl ChunkConstantInfo {
         max_count: Idx,
     ) -> Idx {
         let committed_inserted = self.insert_id < TRANSACTION_ID_START;
-        let not_committed_deleted = self.delete_id >= TRANSACTION_ID_START || self.delete_id == NOT_DELETED_ID;
+        let not_committed_deleted =
+            self.delete_id >= TRANSACTION_ID_START || self.delete_id == NOT_DELETED_ID;
         if committed_inserted && not_committed_deleted {
             sel_vector.sel.clear();
             for i in 0..max_count {

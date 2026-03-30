@@ -23,19 +23,19 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use parking_lot::Mutex;
-use crate::common::types::DataChunk;
-use crate::storage::storage_info::{StorageError, StorageResult};
 use super::append_state::TableAppendState;
 use super::column_data::{PersistentCollectionData, PersistentRowGroupData};
+use super::data_table_info::DataTableInfo;
 use super::persistent_table_data::PersistentTableData;
 use super::row_group::{RowGroup, RowGroupPointer, RowGroupWriteInfo};
 use super::scan_state::{CollectionScanState, ParallelCollectionScanState};
 use super::segment_base::SegmentBase;
 use super::segment_tree::SegmentTree;
-use super::data_table_info::DataTableInfo;
 use super::table_statistics::TableStatistics;
 use super::types::{Idx, LogicalType, MetaBlockPointer, RowId, TransactionData, TransactionId};
+use crate::common::types::DataChunk;
+use crate::storage::storage_info::{StorageError, StorageResult};
+use parking_lot::Mutex;
 
 /// Type alias for the row-group segment tree.
 pub type RowGroupSegmentTree = SegmentTree<RowGroup>;
@@ -107,10 +107,7 @@ impl RowGroupCollection {
     // ── Initialisation from persistent data ──────────────────
 
     /// Load collection from previously checkpointed data.
-    pub fn initialize(
-        self: &Arc<Self>,
-        data: PersistentCollectionData,
-    ) {
+    pub fn initialize(self: &Arc<Self>, data: PersistentCollectionData) {
         todo!("populate owned_row_groups from data.row_group_data")
     }
 
@@ -121,11 +118,8 @@ impl RowGroupCollection {
         drop(tree_guard);
         let mut seg_lock = tree.lock();
         for pointer in &data.row_group_pointers {
-            let row_group = RowGroup::from_pointer(
-                Arc::downgrade(self),
-                pointer.clone(),
-                self.types.len(),
-            );
+            let row_group =
+                RowGroup::from_pointer(Arc::downgrade(self), pointer.clone(), self.types.len());
             tree.append_segment(&mut seg_lock, row_group, pointer.row_start);
         }
         drop(seg_lock);
@@ -327,7 +321,9 @@ impl RowGroupCollection {
     }
 
     pub fn initialize_parallel_scan(&self, state: &mut ParallelCollectionScanState) {
-        state.current_row_group_index.store(0, std::sync::atomic::Ordering::Relaxed);
+        state
+            .current_row_group_index
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         state.max_row = self.total_rows();
     }
 
@@ -350,7 +346,10 @@ impl RowGroupCollection {
                 self.initialize_empty();
                 let tree = self.get_row_groups();
                 let lock = tree.lock();
-                let last = lock.0.last().expect("row group collection should have a root row group");
+                let last = lock
+                    .0
+                    .last()
+                    .expect("row group collection should have a root row group");
                 (last.arc(), last.index(), last.row_start())
             }
         };
@@ -387,10 +386,12 @@ impl RowGroupCollection {
 
         // Debug: 每10万行打印一次
         if state.total_append_count % 100000 < total_append_count {
-            println!("🔵 [APPEND] total={}, offset_in_rg={}, rg_size={}",
+            println!(
+                "🔵 [APPEND] total={}, offset_in_rg={}, rg_size={}",
                 state.total_append_count,
                 state.row_group_append_state.offset_in_row_group,
-                row_group_size);
+                row_group_size
+            );
         }
 
         loop {
@@ -403,15 +404,15 @@ impl RowGroupCollection {
                 let lock = tree.lock();
                 let node = match state.row_group_append_state.row_group_index {
                     Some(idx) => lock.0.get(idx),
-                    None      => lock.0.last(),
+                    None => lock.0.last(),
                 };
                 node.map(|n| n.arc())
                     .expect("no current row group during append")
             };
 
             // ── Compute how many rows fit in the current row group ─────────────
-            let space_in_rg = row_group_size
-                .saturating_sub(state.row_group_append_state.offset_in_row_group);
+            let space_in_rg =
+                row_group_size.saturating_sub(state.row_group_append_state.offset_in_row_group);
             let append_count = remaining.min(space_in_rg);
 
             if append_count > 0 {
@@ -439,13 +440,15 @@ impl RowGroupCollection {
 
             // ── Start a new row group ─────────────────────────────────────────
             new_row_group = true;
-            println!("🟢 [NEW ROW GROUP] Creating new row group! total_append={}, offset_in_rg={}, next_start={}",
+            println!(
+                "🟢 [NEW ROW GROUP] Creating new row group! total_append={}, offset_in_rg={}, next_start={}",
                 state.total_append_count,
                 state.row_group_append_state.offset_in_row_group,
-                state.row_group_start + state.row_group_append_state.offset_in_row_group);
+                state.row_group_start + state.row_group_append_state.offset_in_row_group
+            );
 
-            let next_start = state.row_group_start
-                + state.row_group_append_state.offset_in_row_group;
+            let next_start =
+                state.row_group_start + state.row_group_append_state.offset_in_row_group;
 
             let (new_rg, new_idx) = {
                 let tree = self.get_row_groups();
@@ -482,7 +485,8 @@ impl RowGroupCollection {
 
     /// Finalise the append (release append lock, update total_rows).
     pub fn finalize_append(&self, transaction: TransactionData, state: &mut TableAppendState) {
-        self.total_rows.fetch_add(state.total_append_count, Ordering::SeqCst);
+        self.total_rows
+            .fetch_add(state.total_append_count, Ordering::SeqCst);
         let _ = transaction;
     }
 
@@ -547,7 +551,8 @@ impl RowGroupCollection {
         }
 
         // Update total rows
-        self.total_rows.fetch_add(total_merged_rows, Ordering::SeqCst);
+        self.total_rows
+            .fetch_add(total_merged_rows, Ordering::SeqCst);
 
         // Merge statistics
         // TODO: Implement stats.MergeStats(source.stats)
@@ -580,15 +585,14 @@ impl RowGroupCollection {
 
         let tree = self.get_row_groups();
         let lock = tree.lock();
-        let Some((node_index, row_group_start, row_group_count, row_group)) = lock
-            .0
-            .iter()
-            .enumerate()
-            .find_map(|(idx, node)| {
+        let Some((node_index, row_group_start, row_group_count, row_group)) =
+            lock.0.iter().enumerate().find_map(|(idx, node)| {
                 let start = node.row_start();
                 let end = start + node.node().count();
-                (start_row >= start && start_row < end).then(|| (idx, start, node.node().count(), node.arc()))
-            }) else {
+                (start_row >= start && start_row < end)
+                    .then(|| (idx, start, node.node().count(), node.arc()))
+            })
+        else {
             state.row_group_index = None;
             state.max_row_group_row = 0;
             return;
@@ -612,12 +616,7 @@ impl RowGroupCollection {
 
     // ── Delete ────────────────────────────────────────────────
 
-    pub fn delete(
-        &self,
-        transaction: TransactionData,
-        ids: &mut [RowId],
-        count: Idx,
-    ) -> Idx {
+    pub fn delete(&self, transaction: TransactionData, ids: &mut [RowId], count: Idx) -> Idx {
         todo!("group row ids by row group, call row_group.delete on each")
     }
 
@@ -641,10 +640,7 @@ impl RowGroupCollection {
 
     // ── Schema evolution ──────────────────────────────────────
 
-    pub fn add_column(
-        self: &Arc<Self>,
-        new_type: LogicalType,
-    ) -> Arc<RowGroupCollection> {
+    pub fn add_column(self: &Arc<Self>, new_type: LogicalType) -> Arc<RowGroupCollection> {
         todo!("create new collection with extra column, copy row groups with AddColumn applied")
     }
 
@@ -675,7 +671,10 @@ impl RowGroupCollection {
     // ── Statistics ────────────────────────────────────────────
 
     /// Copy statistics for one column (C++: `CopyStats`).
-    pub fn copy_stats(&self, _column_id: Idx) -> Option<crate::storage::statistics::BaseStatistics> {
+    pub fn copy_stats(
+        &self,
+        _column_id: Idx,
+    ) -> Option<crate::storage::statistics::BaseStatistics> {
         // TODO: obtain stats from per-row-group statistics once TableStatistics is complete.
         None
     }

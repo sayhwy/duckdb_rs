@@ -14,13 +14,13 @@
 //   队列 1: ManagedBuffer × 6（需写临时文件，多队列分散竞争）
 //   队列 2: TinyBuffer（最后驱逐）
 
-use std::sync::{Arc, Weak};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use crossbeam_queue::SegQueue;
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 
+use super::block_handle::{BlockGuard, BlockHandle};
 use super::types::FileBufferType;
-use super::block_handle::{BlockHandle, BlockGuard};
 
 // ─── EvictionNode ─────────────────────────────────────────────
 /// 对应 C++ BufferEvictionNode
@@ -36,7 +36,10 @@ pub struct EvictionNode {
 
 impl EvictionNode {
     pub fn new(handle: Weak<BlockHandle>, sequence_number: usize) -> Self {
-        Self { handle, sequence_number }
+        Self {
+            handle,
+            sequence_number,
+        }
     }
 
     /// 对应 C++ CanUnload(BlockHandle &handle_p)
@@ -44,8 +47,7 @@ impl EvictionNode {
     /// 序列号匹配 && 块当前可被卸载（无 reader，状态 Loaded）。
     /// 注意：此方法不持锁，调用后应再次持锁确认（TOCTOU 无害，持锁后会再验证）。
     pub fn can_unload_no_lock(&self, handle: &BlockHandle) -> bool {
-        self.sequence_number == handle.eviction_seq_num()
-            && handle.can_unload_no_lock()
+        self.sequence_number == handle.eviction_seq_num() && handle.can_unload_no_lock()
     }
 
     /// 对应 C++ TryGetBlockHandle()
@@ -62,8 +64,7 @@ impl EvictionNode {
 
     /// 持锁后的二次确认（对应 C++ IterateUnloadableBlocks 中 lock 后的再次 CanUnload）
     pub fn can_unload_with_guard(&self, handle: &BlockHandle, guard: &BlockGuard<'_>) -> bool {
-        self.sequence_number == handle.eviction_seq_num()
-            && handle.can_unload_guarded(guard)
+        self.sequence_number == handle.eviction_seq_num() && handle.can_unload_guarded(guard)
     }
 }
 
@@ -176,7 +177,10 @@ impl EvictionQueue {
             }
 
             // early-out (2.2)：dead 比例已经下降到可接受范围
-            let dead = self.total_dead_nodes.load(Ordering::Relaxed).min(approx_size);
+            let dead = self
+                .total_dead_nodes
+                .load(Ordering::Relaxed)
+                .min(approx_size);
             let alive = approx_size - dead;
             if alive * (ALIVE_NODE_MULTIPLIER - 1) > dead {
                 break;

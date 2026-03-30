@@ -32,13 +32,13 @@
 
 use std::collections::HashMap;
 
+use super::dependency::LogicalDependencyList;
+use super::error::CatalogError;
 use super::standard_entry::StandardEntry;
 use super::types::{
-    CatalogType, ColumnDefinition, ColumnList, ConstraintType,
-    CreateInfo, CreateTableInfo, LogicalType, AlterInfo, AlterKind, Value,
+    AlterInfo, AlterKind, CatalogType, ColumnDefinition, ColumnList, ConstraintType, CreateInfo,
+    CreateTableInfo, LogicalType, Value,
 };
-use super::error::CatalogError;
-use super::dependency::LogicalDependencyList;
 
 // ─── 常量 ──────────────────────────────────────────────────────────────────────
 
@@ -130,7 +130,10 @@ pub struct VirtualColumn {
 
 impl VirtualColumn {
     pub fn new(name: impl Into<String>, logical_type: LogicalType) -> Self {
-        Self { name: name.into(), logical_type }
+        Self {
+            name: name.into(),
+            logical_type,
+        }
     }
 
     /// rowid 虚拟列（C++: `TableColumn("rowid", LogicalType::ROW_TYPE)`）。
@@ -238,7 +241,10 @@ impl TableCatalogEntry {
     }
 
     /// 按逻辑索引获取列定义（C++: `const ColumnDefinition& GetColumn(LogicalIndex idx) const`）。
-    pub fn get_column_by_index(&self, idx: LogicalIndex) -> Result<&ColumnDefinition, CatalogError> {
+    pub fn get_column_by_index(
+        &self,
+        idx: LogicalIndex,
+    ) -> Result<&ColumnDefinition, CatalogError> {
         self.columns
             .get_by_index(idx.0)
             .ok_or_else(|| CatalogError::other(format!("Column index {} out of range", idx.0)))
@@ -323,7 +329,13 @@ impl TableCatalogEntry {
     /// 若无主键，返回 `None`（C++: 返回 `nullptr`）。
     pub fn get_primary_key(&self) -> Option<&ConstraintType> {
         self.constraints.iter().find(|c| {
-            matches!(c, ConstraintType::Unique { is_primary: true, .. })
+            matches!(
+                c,
+                ConstraintType::Unique {
+                    is_primary: true,
+                    ..
+                }
+            )
         })
     }
 
@@ -385,11 +397,11 @@ impl TableCatalogEntry {
         let fields = self.base.fields();
         let mut base_info = CreateInfo::new(CatalogType::TableEntry);
         base_info.catalog = self.base.parent_catalog().to_string();
-        base_info.schema  = self.base.parent_schema().to_string();
+        base_info.schema = self.base.parent_schema().to_string();
         base_info.temporary = fields.temporary;
-        base_info.internal  = fields.internal;
-        base_info.comment   = fields.comment.clone();
-        base_info.tags      = fields.tags.clone();
+        base_info.internal = fields.internal;
+        base_info.comment = fields.comment.clone();
+        base_info.tags = fields.tags.clone();
 
         CreateTableInfo {
             base: base_info,
@@ -419,9 +431,10 @@ impl TableCatalogEntry {
     pub fn columns_to_sql(columns: &ColumnList, constraints: &[ConstraintType]) -> String {
         // 收集各类约束的列集合
         let mut not_null_cols: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        let mut unique_cols:   std::collections::HashSet<usize> = std::collections::HashSet::new();
-        let mut pk_cols:       std::collections::HashSet<usize> = std::collections::HashSet::new();
-        let mut multi_pk_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut unique_cols: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut pk_cols: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut multi_pk_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut extra_constraints: Vec<String> = Vec::new();
 
         for c in constraints {
@@ -431,12 +444,18 @@ impl TableCatalogEntry {
                         not_null_cols.insert(idx);
                     }
                 }
-                ConstraintType::Unique { columns: cols, is_primary } => {
+                ConstraintType::Unique {
+                    columns: cols,
+                    is_primary,
+                } => {
                     if cols.len() == 1 {
                         // 单列约束 → 内联到列定义
                         if let Some(idx) = columns.logical_index_of(&cols[0]) {
-                            if *is_primary { pk_cols.insert(idx); }
-                            else           { unique_cols.insert(idx); }
+                            if *is_primary {
+                                pk_cols.insert(idx);
+                            } else {
+                                unique_cols.insert(idx);
+                            }
                         }
                     } else {
                         // 多列约束 → 追加到末尾
@@ -460,7 +479,11 @@ impl TableCatalogEntry {
         let mut parts: Vec<String> = Vec::new();
 
         for (idx, col) in columns.columns.iter().enumerate() {
-            let mut s = format!("{} {}", quote_identifier(&col.name), col.logical_type.to_sql());
+            let mut s = format!(
+                "{} {}",
+                quote_identifier(&col.name),
+                col.logical_type.to_sql()
+            );
 
             // 生成列 / 默认值（互斥）
             if let Some(generated) = &col.generated_expression {
@@ -469,17 +492,21 @@ impl TableCatalogEntry {
                 s.push_str(&format!(" DEFAULT({})", def));
             }
 
-            let is_pk       = pk_cols.contains(&idx);
+            let is_pk = pk_cols.contains(&idx);
             let is_multi_pk = multi_pk_names.contains(&col.name);
-            let is_unique   = unique_cols.contains(&idx);
+            let is_unique = unique_cols.contains(&idx);
             let is_not_null = not_null_cols.contains(&idx);
 
             // NOT NULL：仅当不是主键列时内联输出
             if is_not_null && !is_pk && !is_multi_pk {
                 s.push_str(" NOT NULL");
             }
-            if is_pk    { s.push_str(" PRIMARY KEY"); }
-            if is_unique { s.push_str(" UNIQUE"); }
+            if is_pk {
+                s.push_str(" PRIMARY KEY");
+            }
+            if is_unique {
+                s.push_str(" UNIQUE");
+            }
 
             parts.push(s);
         }
@@ -522,66 +549,104 @@ impl TableCatalogEntry {
             }
 
             AlterKind::RenameColumn { old_name, new_name } => {
-                let col = new_entry.columns.get_by_name_mut(old_name)
-                    .ok_or_else(|| CatalogError::not_found(CatalogType::Invalid, old_name.as_str()))?;
+                let col = new_entry.columns.get_by_name_mut(old_name).ok_or_else(|| {
+                    CatalogError::not_found(CatalogType::Invalid, old_name.as_str())
+                })?;
                 col.name = new_name.clone();
             }
 
-            AlterKind::AddColumn { column, if_not_exists } => {
+            AlterKind::AddColumn {
+                column,
+                if_not_exists,
+            } => {
                 if new_entry.columns.column_exists(&column.name) {
                     if *if_not_exists {
                         return Ok(new_entry);
                     }
-                    return Err(CatalogError::already_exists(CatalogType::Invalid, &column.name));
+                    return Err(CatalogError::already_exists(
+                        CatalogType::Invalid,
+                        &column.name,
+                    ));
                 }
                 new_entry.columns.add_column(column.clone());
             }
 
-            AlterKind::RemoveColumn { column_name, if_exists, .. } => {
-                match new_entry.columns.logical_index_of(column_name) {
-                    None if *if_exists => {}
-                    None => return Err(CatalogError::not_found(CatalogType::Invalid, column_name.as_str())),
-                    Some(i) => { new_entry.columns.columns.remove(i); }
+            AlterKind::RemoveColumn {
+                column_name,
+                if_exists,
+                ..
+            } => match new_entry.columns.logical_index_of(column_name) {
+                None if *if_exists => {}
+                None => {
+                    return Err(CatalogError::not_found(
+                        CatalogType::Invalid,
+                        column_name.as_str(),
+                    ));
                 }
-            }
+                Some(i) => {
+                    new_entry.columns.columns.remove(i);
+                }
+            },
 
-            AlterKind::AlterColumnType { column_name, new_type, .. } => {
-                let col = new_entry.columns.get_by_name_mut(column_name)
-                    .ok_or_else(|| CatalogError::not_found(CatalogType::Invalid, column_name.as_str()))?;
+            AlterKind::AlterColumnType {
+                column_name,
+                new_type,
+                ..
+            } => {
+                let col = new_entry
+                    .columns
+                    .get_by_name_mut(column_name)
+                    .ok_or_else(|| {
+                        CatalogError::not_found(CatalogType::Invalid, column_name.as_str())
+                    })?;
                 col.logical_type = new_type.clone();
             }
 
-            AlterKind::SetDefault { column_name, default_value } => {
-                let col = new_entry.columns.get_by_name_mut(column_name)
-                    .ok_or_else(|| CatalogError::not_found(CatalogType::Invalid, column_name.as_str()))?;
+            AlterKind::SetDefault {
+                column_name,
+                default_value,
+            } => {
+                let col = new_entry
+                    .columns
+                    .get_by_name_mut(column_name)
+                    .ok_or_else(|| {
+                        CatalogError::not_found(CatalogType::Invalid, column_name.as_str())
+                    })?;
                 col.default_value = default_value.clone();
             }
 
             AlterKind::SetNotNull { column_name } => {
                 // 添加 NOT NULL 约束（若不存在）
-                let already = new_entry.constraints.iter().any(|c| {
-                    matches!(c, ConstraintType::NotNull { column } if column == column_name)
-                });
+                let already = new_entry.constraints.iter().any(
+                    |c| matches!(c, ConstraintType::NotNull { column } if column == column_name),
+                );
                 if !already {
-                    new_entry.constraints.push(
-                        ConstraintType::NotNull { column: column_name.clone() }
-                    );
+                    new_entry.constraints.push(ConstraintType::NotNull {
+                        column: column_name.clone(),
+                    });
                 }
             }
 
             AlterKind::DropNotNull { column_name } => {
-                new_entry.constraints.retain(|c| {
-                    !matches!(c, ConstraintType::NotNull { column } if column == column_name)
-                });
+                new_entry.constraints.retain(
+                    |c| !matches!(c, ConstraintType::NotNull { column } if column == column_name),
+                );
             }
 
             AlterKind::SetComment { new_comment } => {
                 new_entry.base.fields_mut().comment = new_comment.clone();
             }
 
-            AlterKind::SetColumnComment { column_name, comment } => {
-                let col = new_entry.columns.get_by_name_mut(column_name)
-                    .ok_or_else(|| CatalogError::not_found(CatalogType::Invalid, column_name.as_str()))?;
+            AlterKind::SetColumnComment {
+                column_name,
+                comment,
+            } => {
+                let col = new_entry
+                    .columns
+                    .get_by_name_mut(column_name)
+                    .ok_or_else(|| {
+                        CatalogError::not_found(CatalogType::Invalid, column_name.as_str())
+                    })?;
                 col.comment = comment.clone();
             }
 
@@ -593,17 +658,25 @@ impl TableCatalogEntry {
                 new_entry.constraints.push(constraint.clone());
             }
 
-            AlterKind::DropConstraint { constraint_name, .. } => {
+            AlterKind::DropConstraint {
+                constraint_name, ..
+            } => {
                 let before = new_entry.constraints.len();
-                new_entry.constraints.retain(|c| &c.to_sql() != constraint_name);
+                new_entry
+                    .constraints
+                    .retain(|c| &c.to_sql() != constraint_name);
                 if new_entry.constraints.len() == before {
-                    return Err(CatalogError::not_found(CatalogType::Invalid, constraint_name.as_str()));
+                    return Err(CatalogError::not_found(
+                        CatalogType::Invalid,
+                        constraint_name.as_str(),
+                    ));
                 }
             }
 
             other => {
                 return Err(CatalogError::invalid(format!(
-                    "AlterKind {:?} is not applicable to tables", other
+                    "AlterKind {:?} is not applicable to tables",
+                    other
                 )));
             }
         }
@@ -683,7 +756,11 @@ pub struct ScanFunctionBinding {
 /// 如果名称包含特殊字符或是保留字的简单检测：含大写字母、空格或特殊符号则加引号。
 fn quote_identifier(name: &str) -> String {
     let needs_quote = name.chars().any(|c| !c.is_alphanumeric() && c != '_')
-        || name.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+        || name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
         || is_reserved_keyword(name);
     if needs_quote {
         format!("\"{}\"", name.replace('"', "\"\""))
@@ -695,13 +772,53 @@ fn quote_identifier(name: &str) -> String {
 /// 简单保留关键字检测（C++: `KeywordHelper` 的子集）。
 fn is_reserved_keyword(word: &str) -> bool {
     const RESERVED: &[&str] = &[
-        "select", "from", "where", "table", "index", "view", "schema",
-        "create", "drop", "alter", "insert", "update", "delete",
-        "primary", "key", "unique", "foreign", "references", "check",
-        "not", "null", "default", "constraint", "column", "order",
-        "group", "by", "having", "limit", "offset", "join", "on",
-        "as", "and", "or", "in", "between", "like", "is", "case",
-        "when", "then", "else", "end", "union", "all", "distinct",
+        "select",
+        "from",
+        "where",
+        "table",
+        "index",
+        "view",
+        "schema",
+        "create",
+        "drop",
+        "alter",
+        "insert",
+        "update",
+        "delete",
+        "primary",
+        "key",
+        "unique",
+        "foreign",
+        "references",
+        "check",
+        "not",
+        "null",
+        "default",
+        "constraint",
+        "column",
+        "order",
+        "group",
+        "by",
+        "having",
+        "limit",
+        "offset",
+        "join",
+        "on",
+        "as",
+        "and",
+        "or",
+        "in",
+        "between",
+        "like",
+        "is",
+        "case",
+        "when",
+        "then",
+        "else",
+        "end",
+        "union",
+        "all",
+        "distinct",
     ];
     RESERVED.contains(&word.to_lowercase().as_str())
 }

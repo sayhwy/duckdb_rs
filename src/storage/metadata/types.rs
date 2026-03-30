@@ -36,9 +36,11 @@ impl MetaBlockPointer {
 
     /// 从 block_id + block_index + offset 构造
     pub fn new(block_id: BlockId, block_index: u8, offset: u32) -> Self {
-        let block_pointer = (block_id as u64 & !(0xFFu64 << 56))
-            | ((block_index as u64) << 56);
-        Self { block_pointer, offset }
+        let block_pointer = (block_id as u64 & !(0xFFu64 << 56)) | ((block_index as u64) << 56);
+        Self {
+            block_pointer,
+            offset,
+        }
     }
 
     /// 对应 C++ MetaBlockPointer::GetBlockId()
@@ -123,9 +125,9 @@ pub struct MetadataHandle {
 /// 对应 C++ MetadataBlockInfo（用于 GetMetadataInfo() 诊断输出）
 #[derive(Debug, Clone)]
 pub struct MetadataBlockInfo {
-    pub block_id:     BlockId,
+    pub block_id: BlockId,
     pub total_blocks: usize,
-    pub free_list:    Vec<u8>,
+    pub free_list: Vec<u8>,
 }
 
 // ─── ReadStream / WriteStream traits ─────────────────────────
@@ -138,7 +140,9 @@ pub trait ReadStream {
     fn read_data(&mut self, buf: &mut [u8]);
 
     /// 是否已到达数据末尾（用于优雅地终止解析）
-    fn is_eof(&self) -> bool { false }
+    fn is_eof(&self) -> bool {
+        false
+    }
 
     // ── 便捷泛型读取方法 ────────────────────────────────────
 

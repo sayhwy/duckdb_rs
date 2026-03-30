@@ -33,18 +33,28 @@ impl AppendInfo {
     ///
     /// 格式：`table_id(8B) | start_row(8B) | count(8B)`
     pub fn deserialize(bytes: &[u8]) -> Self {
-        assert!(bytes.len() >= Self::serialized_size(), "AppendInfo payload too short");
+        assert!(
+            bytes.len() >= Self::serialized_size(),
+            "AppendInfo payload too short"
+        );
 
         let table_id = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
         let start_row = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
         let count = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
 
-        Self { table_id, start_row, count }
+        Self {
+            table_id,
+            start_row,
+            count,
+        }
     }
 
     /// 序列化到 UndoBuffer 载荷字节。
     pub fn serialize(&self, out: &mut [u8]) {
-        assert!(out.len() >= Self::serialized_size(), "AppendInfo output buffer too short");
+        assert!(
+            out.len() >= Self::serialized_size(),
+            "AppendInfo output buffer too short"
+        );
 
         out[0..8].copy_from_slice(&self.table_id.to_le_bytes());
         out[8..16].copy_from_slice(&self.start_row.to_le_bytes());

@@ -24,9 +24,9 @@
 //! ```
 //! 扫描时从 newest 向 oldest 遍历，找到对当前事务可见的版本。
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use super::types::{TransactionId, Idx, SelT};
+use super::types::{Idx, SelT, TransactionId};
 use super::undo_buffer_allocator::UndoBufferPointer;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Update 操作的单版本记录（C++: `struct UpdateInfo`）。
 ///
@@ -99,7 +99,11 @@ impl UpdateInfo {
     }
 
     /// 此版本对给定事务是否可见。
-    pub fn applies_to_transaction(&self, start_time: TransactionId, transaction_id: TransactionId) -> bool {
+    pub fn applies_to_transaction(
+        &self,
+        start_time: TransactionId,
+        transaction_id: TransactionId,
+    ) -> bool {
         let v = self.version_number.load(Ordering::Acquire);
         v > start_time && v != transaction_id
     }
@@ -134,7 +138,10 @@ impl UpdateInfo {
         let prev_idx = u64::from_le_bytes(bytes[48..56].try_into().unwrap());
         let prev_pos = u64::from_le_bytes(bytes[56..64].try_into().unwrap());
         let prev = if prev_idx < u64::MAX {
-            UndoBufferPointer { slab_index: Some(prev_idx as usize), position: prev_pos as usize }
+            UndoBufferPointer {
+                slab_index: Some(prev_idx as usize),
+                position: prev_pos as usize,
+            }
         } else {
             UndoBufferPointer::null()
         };
@@ -142,7 +149,10 @@ impl UpdateInfo {
         let next_idx = u64::from_le_bytes(bytes[64..72].try_into().unwrap());
         let next_pos = u64::from_le_bytes(bytes[72..80].try_into().unwrap());
         let next = if next_idx < u64::MAX {
-            UndoBufferPointer { slab_index: Some(next_idx as usize), position: next_pos as usize }
+            UndoBufferPointer {
+                slab_index: Some(next_idx as usize),
+                position: next_pos as usize,
+            }
         } else {
             UndoBufferPointer::null()
         };
@@ -153,18 +163,26 @@ impl UpdateInfo {
         // 读取 tuples
         let tuples_start = fixed_size;
         let tuples_end = tuples_start + (n as usize) * 4;
-        assert!(bytes.len() >= tuples_end, "UpdateInfo tuples data too short");
+        assert!(
+            bytes.len() >= tuples_end,
+            "UpdateInfo tuples data too short"
+        );
 
         let mut tuples = Vec::with_capacity(n as usize);
         for i in 0..n as usize {
             let offset = tuples_start + i * 4;
-            tuples.push(u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()));
+            tuples.push(u32::from_le_bytes(
+                bytes[offset..offset + 4].try_into().unwrap(),
+            ));
         }
 
         // 读取 values
         let values_start = tuples_end;
         let values_end = values_start + (n as usize) * value_type_size;
-        assert!(bytes.len() >= values_end, "UpdateInfo values data too short");
+        assert!(
+            bytes.len() >= values_end,
+            "UpdateInfo values data too short"
+        );
 
         let values = bytes[values_start..values_end].to_vec();
 

@@ -15,9 +15,9 @@
 //! | `logical_index_map_t<logical_index_set_t> direct_dependencies` | `HashMap<usize, HashSet<usize>>` |
 //! | `logical_index_set_t deleted_columns` | `HashSet<usize>` |
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use super::types::ColumnList;
 use super::error::CatalogError;
+use super::types::ColumnList;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 // ─── ColumnDependencyManager ──────────────────────────────────────────────────
 
@@ -37,7 +37,9 @@ pub struct ColumnDependencyManager {
 }
 
 impl ColumnDependencyManager {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// 添加生成列及其依赖（C++: `AddGeneratedColumn(LogicalIndex, vector<LogicalIndex>, bool)`）。
     ///
@@ -46,25 +48,38 @@ impl ColumnDependencyManager {
     /// - `root`：是否为顶层调用（用于递归展开传递依赖时区分）。
     pub fn add_generated_column(&mut self, col_idx: usize, deps: Vec<usize>, root: bool) {
         // 记录直接依赖
-        self.direct_dependencies.entry(col_idx).or_default().extend(deps.iter().copied());
+        self.direct_dependencies
+            .entry(col_idx)
+            .or_default()
+            .extend(deps.iter().copied());
 
         // 更新传递依赖和被依赖
         for &dep in &deps {
             // col_idx 依赖 dep
-            self.dependencies_map.entry(col_idx).or_default().insert(dep);
+            self.dependencies_map
+                .entry(col_idx)
+                .or_default()
+                .insert(dep);
             // dep 被 col_idx 依赖
             self.dependents_map.entry(dep).or_default().insert(col_idx);
 
             // 传递：如果 dep 也依赖其他列，col_idx 也间接依赖那些列
-            let transitive: Vec<usize> = self.dependencies_map
+            let transitive: Vec<usize> = self
+                .dependencies_map
                 .get(&dep)
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
                 .collect();
             for t_dep in transitive {
-                self.dependencies_map.entry(col_idx).or_default().insert(t_dep);
-                self.dependents_map.entry(t_dep).or_default().insert(col_idx);
+                self.dependencies_map
+                    .entry(col_idx)
+                    .or_default()
+                    .insert(t_dep);
+                self.dependents_map
+                    .entry(t_dep)
+                    .or_default()
+                    .insert(col_idx);
             }
         }
     }
@@ -167,7 +182,8 @@ impl ColumnDependencyManager {
     /// 获取列的所有依赖（C++: `GetDependencies`）。
     pub fn get_dependencies(&self, col_idx: usize) -> &HashSet<usize> {
         static EMPTY: std::sync::OnceLock<HashSet<usize>> = std::sync::OnceLock::new();
-        self.dependencies_map.get(&col_idx)
+        self.dependencies_map
+            .get(&col_idx)
             .unwrap_or_else(|| EMPTY.get_or_init(HashSet::new))
     }
 
@@ -182,7 +198,8 @@ impl ColumnDependencyManager {
     /// 获取所有依赖该列的列（C++: `GetDependents`）。
     pub fn get_dependents(&self, col_idx: usize) -> &HashSet<usize> {
         static EMPTY: std::sync::OnceLock<HashSet<usize>> = std::sync::OnceLock::new();
-        self.dependents_map.get(&col_idx)
+        self.dependents_map
+            .get(&col_idx)
             .unwrap_or_else(|| EMPTY.get_or_init(HashSet::new))
     }
 
@@ -190,7 +207,9 @@ impl ColumnDependencyManager {
     pub fn verify_no_cycles(&self) -> Result<(), CatalogError> {
         // 检测图中是否存在环（DFS 着色）
         let mut color: HashMap<usize, u8> = HashMap::new();
-        let all_nodes: Vec<usize> = self.direct_dependencies.keys()
+        let all_nodes: Vec<usize> = self
+            .direct_dependencies
+            .keys()
             .chain(self.direct_dependencies.values().flatten())
             .copied()
             .collect::<HashSet<_>>()
@@ -202,19 +221,21 @@ impl ColumnDependencyManager {
             adj: &HashMap<usize, HashSet<usize>>,
             color: &mut HashMap<usize, u8>,
         ) -> bool {
-            color.insert(node, 1);  // 灰色（正在处理）
+            color.insert(node, 1); // 灰色（正在处理）
             if let Some(deps) = adj.get(&node) {
                 for &next in deps {
                     match color.get(&next) {
-                        Some(&1) => return true,  // 找到环
-                        Some(&2) => {}            // 已处理
+                        Some(&1) => return true, // 找到环
+                        Some(&2) => {}           // 已处理
                         _ => {
-                            if dfs(next, adj, color) { return true; }
+                            if dfs(next, adj, color) {
+                                return true;
+                            }
                         }
                     }
                 }
             }
-            color.insert(node, 2);  // 黑色（已完成）
+            color.insert(node, 2); // 黑色（已完成）
             false
         }
 
@@ -222,7 +243,7 @@ impl ColumnDependencyManager {
             if !color.contains_key(&node) {
                 if dfs(node, &self.direct_dependencies, &mut color) {
                     return Err(CatalogError::invalid(
-                        "Circular dependency detected among generated columns"
+                        "Circular dependency detected among generated columns",
                     ));
                 }
             }

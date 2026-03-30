@@ -21,19 +21,18 @@
 //   Rust 改为 BufferHandle::with_data(closure) 回调，
 //   在锁保护下提供数据访问。
 
-use std::sync::{Arc, Weak};
+use parking_lot::{Mutex, MutexGuard};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU8, AtomicUsize, Ordering};
-use parking_lot::{Mutex, MutexGuard};
+use std::sync::{Arc, Weak};
 
-use super::types::{
-    BlockId, BlockState, DestroyBufferUpon, FileBufferType,
-    MemoryTag, MAXIMUM_BLOCK, INVALID_INDEX,
-};
-use super::file_buffer::FileBuffer;
-use super::buffer_pool_reservation::BufferPoolReservation;
-use super::buffer_handle::BufferHandle;
 use super::block_manager::BlockManager;
+use super::buffer_handle::BufferHandle;
+use super::buffer_pool_reservation::BufferPoolReservation;
+use super::file_buffer::FileBuffer;
+use super::types::{
+    BlockId, BlockState, DestroyBufferUpon, FileBufferType, INVALID_INDEX, MAXIMUM_BLOCK, MemoryTag,
+};
 
 // ─── BlockGuard ───────────────────────────────────────────────
 /// 对应 C++ BlockLock (unique_lock<mutex>)
@@ -395,10 +394,7 @@ impl BlockHandle {
     /// 对应 C++ UnloadAndTakeBlock()
     ///
     /// 卸载 block 并取走 FileBuffer 所有权（供 EvictBlocks 重用）。
-    pub fn unload_and_take(
-        &self,
-        guard: &mut BlockGuard<'_>,
-    ) -> Option<Box<FileBuffer>> {
+    pub fn unload_and_take(&self, guard: &mut BlockGuard<'_>) -> Option<Box<FileBuffer>> {
         if guard.state == BlockState::Unloaded {
             return None;
         }
@@ -425,8 +421,7 @@ impl BlockHandle {
     /// 对应 C++ ChangeMemoryUsage()
     pub fn change_memory_usage(&self, guard: &mut BlockGuard<'_>, delta: i64) {
         debug_assert!(delta < 0, "change_memory_usage only supports shrinking");
-        let new_usage = (self.memory_usage.load(Ordering::Relaxed) as i64 + delta)
-            .max(0) as usize;
+        let new_usage = (self.memory_usage.load(Ordering::Relaxed) as i64 + delta).max(0) as usize;
         self.memory_usage.store(new_usage, Ordering::Relaxed);
         guard.memory_charge.resize(new_usage);
     }
@@ -446,8 +441,8 @@ impl BlockHandle {
         if let Some(buf) = guard.buffer.as_mut() {
             buf.resize(new_payload_size);
         }
-        let new_usage = (self.memory_usage.load(Ordering::Relaxed) as i64 + memory_delta)
-            .max(0) as usize;
+        let new_usage =
+            (self.memory_usage.load(Ordering::Relaxed) as i64 + memory_delta).max(0) as usize;
         self.memory_usage.store(new_usage, Ordering::Relaxed);
     }
 
@@ -484,7 +479,7 @@ impl BlockHandle {
             // 直接转移 size（不触发 tracker，因为总量不变）
             // 等价于：new_inner.memory_charge.size += guard.memory_charge.size; guard... = 0;
             let old_size = guard.memory_charge.size;
-            guard.memory_charge.size = 0;       // 阻止 Drop 归还
+            guard.memory_charge.size = 0; // 阻止 Drop 归还
             new_inner.memory_charge.size += old_size;
         }
 

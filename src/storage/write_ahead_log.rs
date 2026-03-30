@@ -36,9 +36,9 @@
 //! | `WriteAheadLogSerializer` (内部类) | `WalSerializer` |
 //! | `optional_idx checkpoint_iteration` | `Option<u64>` |
 
+use parking_lot::Mutex;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicU8, Ordering};
-use parking_lot::Mutex;
 
 use super::metadata::MetaBlockPointer;
 use super::storage_manager::StorageManager;
@@ -186,7 +186,10 @@ struct ChecksumWriter<'a> {
 
 impl<'a> ChecksumWriter<'a> {
     fn new(writer: &'a mut dyn WalWriter) -> Self {
-        Self { writer, buffer: Vec::new() }
+        Self {
+            writer,
+            buffer: Vec::new(),
+        }
     }
 
     /// 将缓冲内容连同长度+校验和写入底层 writer（C++: `ChecksumWriter::Flush()`）。
@@ -232,7 +235,9 @@ impl<'a> WalSerializer<'a> {
         let mut cw = ChecksumWriter::new(writer);
         // 写 wal_type（field_id=100, tag="wal_type"）
         write_field_u8(&mut cw, 100, wal_type as u8)?;
-        Ok(Self { checksum_writer: cw })
+        Ok(Self {
+            checksum_writer: cw,
+        })
     }
 
     /// 写 u64 字段（C++: `serializer.WriteProperty(field_id, tag, value)`）。
@@ -277,12 +282,24 @@ fn compute_checksum(data: &[u8]) -> u64 {
         let n = tail.len();
         let mut h: u64 = 0xe17a1465_u64 ^ (n as u64).wrapping_mul(M);
 
-        if n >= 7 { h ^= (tail[6] as u64) << 48; }
-        if n >= 6 { h ^= (tail[5] as u64) << 40; }
-        if n >= 5 { h ^= (tail[4] as u64) << 32; }
-        if n >= 4 { h ^= (tail[3] as u64) << 24; }
-        if n >= 3 { h ^= (tail[2] as u64) << 16; }
-        if n >= 2 { h ^= (tail[1] as u64) << 8; }
+        if n >= 7 {
+            h ^= (tail[6] as u64) << 48;
+        }
+        if n >= 6 {
+            h ^= (tail[5] as u64) << 40;
+        }
+        if n >= 5 {
+            h ^= (tail[4] as u64) << 32;
+        }
+        if n >= 4 {
+            h ^= (tail[3] as u64) << 24;
+        }
+        if n >= 3 {
+            h ^= (tail[2] as u64) << 16;
+        }
+        if n >= 2 {
+            h ^= (tail[1] as u64) << 8;
+        }
         if n >= 1 {
             h ^= tail[0] as u64;
             h = h.wrapping_mul(M);
@@ -379,7 +396,9 @@ impl WriteAheadLog {
         storage_manager.set_wal_size(wal_size);
         Self {
             storage_manager: unsafe {
-                std::mem::transmute::<&dyn StorageManager, &'static dyn StorageManager>(storage_manager)
+                std::mem::transmute::<&dyn StorageManager, &'static dyn StorageManager>(
+                    storage_manager,
+                )
             },
             wal_path,
             init_state: AtomicU8::new(init_state as u8),
@@ -447,7 +466,8 @@ impl WriteAheadLog {
                 self.storage_manager().set_wal_size(writer.file_size());
             }
             *writer_guard = Some(writer);
-            self.init_state.store(WalInitState::Initialized as u8, Ordering::Release);
+            self.init_state
+                .store(WalInitState::Initialized as u8, Ordering::Release);
         }
         Ok(())
     }
@@ -575,7 +595,11 @@ impl WriteAheadLog {
     ///
     /// `catalog_payload`：IndexCatalogEntry 序列化（field_id=101）。
     /// `index_storage`：索引数据块列表（field_id=102/103）。
-    pub fn write_create_index(&self, catalog_payload: &[u8], index_storage: &[u8]) -> io::Result<()> {
+    pub fn write_create_index(
+        &self,
+        catalog_payload: &[u8],
+        index_storage: &[u8],
+    ) -> io::Result<()> {
         self.write_entry(WalType::CreateIndex, |s| {
             s.write_bytes(101, catalog_payload)?;
             s.write_bytes(102, index_storage)
@@ -607,7 +631,11 @@ impl WriteAheadLog {
     ///
     /// `alter_payload`：AlterInfo 序列化（field_id=101）；
     /// `index_storage`：若 ALTER 包含 ADD PRIMARY KEY，附带索引数据（可为空）。
-    pub fn write_alter(&self, alter_payload: &[u8], index_storage: Option<&[u8]>) -> io::Result<()> {
+    pub fn write_alter(
+        &self,
+        alter_payload: &[u8],
+        index_storage: Option<&[u8]>,
+    ) -> io::Result<()> {
         self.write_entry(WalType::AlterInfo, |s| {
             s.write_bytes(101, alter_payload)?;
             if let Some(idx) = index_storage {
@@ -645,7 +673,11 @@ impl WriteAheadLog {
     ///
     /// `column_indexes_payload`：列路径（field_id=101）；
     /// `chunk_payload`：(更新值列, ROW_ID列)（field_id=102）。
-    pub fn write_update(&self, column_indexes_payload: &[u8], chunk_payload: &[u8]) -> io::Result<()> {
+    pub fn write_update(
+        &self,
+        column_indexes_payload: &[u8],
+        chunk_payload: &[u8],
+    ) -> io::Result<()> {
         self.write_entry(WalType::UpdateTuple, |s| {
             s.write_bytes(101, column_indexes_payload)?;
             s.write_bytes(102, chunk_payload)
@@ -699,8 +731,10 @@ impl WriteAheadLog {
             writer.truncate(size)?;
             self.storage_manager().set_wal_size(writer.file_size());
         } else {
-            self.init_state
-                .store(WalInitState::UninitializedRequiresTruncate as u8, Ordering::Release);
+            self.init_state.store(
+                WalInitState::UninitializedRequiresTruncate as u8,
+                Ordering::Release,
+            );
             self.storage_manager().set_wal_size(size);
         }
         Ok(())
@@ -714,7 +748,8 @@ impl WriteAheadLog {
         F: FnOnce(&mut WalSerializer<'_>) -> io::Result<()>,
     {
         let mut writer_guard = self.writer.lock();
-        let writer = writer_guard.as_mut()
+        let writer = writer_guard
+            .as_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "WAL not initialized"))?;
         let mut serializer = WalSerializer::begin(writer.as_mut(), wal_type)?;
         f(&mut serializer)?;

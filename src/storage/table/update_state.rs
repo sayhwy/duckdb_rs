@@ -19,6 +19,8 @@ pub struct TableUpdateState {
 
 impl TableUpdateState {
     pub fn new() -> Self {
-        Self { constraint_state: None }
+        Self {
+            constraint_state: None,
+        }
     }
 }

@@ -84,7 +84,8 @@ impl<'mgr> MetadataWriter<'mgr> {
         if self.offset >= self.capacity {
             self.next_block();
         }
-        self.manager.get_disk_pointer(&self.current_pointer, self.offset as u32)
+        self.manager
+            .get_disk_pointer(&self.current_pointer, self.offset as u32)
     }
 
     /// 对应 C++ MetadataWriter::GetBlockPointer()
@@ -108,7 +109,8 @@ impl<'mgr> MetadataWriter<'mgr> {
             let capacity = self.capacity;
             let pointer = self.current_pointer;
             self.write_to_current(|data| {
-                let sub_start = pointer.index as usize * data.len() / super::metadata_manager::METADATA_BLOCK_COUNT;
+                let sub_start = pointer.index as usize * data.len()
+                    / super::metadata_manager::METADATA_BLOCK_COUNT;
                 // capacity 是 metadata_block_size，data 是整个存储块 payload
                 // BasePtr = data + index * metadata_block_size
                 // 此处直接操作相对于 offset 的剩余区域
@@ -161,9 +163,7 @@ impl<'mgr> MetadataWriter<'mgr> {
             self.write_to_current(|data| {
                 let base = idx as usize * capacity;
                 if base + 8 <= data.len() {
-                    data[base..base + 8].copy_from_slice(
-                        &new_disk_ptr.block_pointer.to_le_bytes()
-                    );
+                    data[base..base + 8].copy_from_slice(&new_disk_ptr.block_pointer.to_le_bytes());
                 }
             });
         }

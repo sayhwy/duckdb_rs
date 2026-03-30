@@ -12,11 +12,11 @@
 //! `PartialBlockForCheckpoint` 实现 C++ `PartialBlock` 接口，
 //! 支持将多个 `ColumnSegment` 共享同一个物理 block 以节省空间。
 
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::sync::Arc;
 
-use super::types::{DataPointer, Idx};
 use super::column_data::ColumnData;
+use super::types::{DataPointer, Idx};
 
 // 使用统一的统计信息模块
 pub use crate::storage::statistics::BaseStatistics;

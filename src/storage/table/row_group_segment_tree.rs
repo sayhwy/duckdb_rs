@@ -18,9 +18,9 @@
 //! | `MetaBlockPointer root_pointer` | `root_pointer: MetaBlockPointer` |
 //! | `mutable idx_t current_row_group` | `current_row_group: AtomicU64` |
 
+use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::Mutex;
 
 use super::row_group::RowGroup;
 use super::segment_tree::SegmentTree;
@@ -73,7 +73,10 @@ impl RowGroupSegmentTree {
     ///
     /// 读取元数据，设置 `root_pointer` 和 `max_row_group`，
     /// 但不加载任何 RowGroup（懒加载）。
-    pub fn initialize(&mut self, persistent_data: &super::persistent_table_data::PersistentTableData) {
+    pub fn initialize(
+        &mut self,
+        persistent_data: &super::persistent_table_data::PersistentTableData,
+    ) {
         self.root_pointer = persistent_data.block_pointer;
         self.max_row_group = persistent_data.row_group_count;
         todo!("初始化 MetadataReader，设置 reader，不加载 RowGroup 数据")

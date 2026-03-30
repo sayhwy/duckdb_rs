@@ -11,10 +11,10 @@
 //! | `virtual unique_ptr<CatalogEntry> CreateDefaultEntry(...)` | `fn create_default_entry(...)` |
 //! | `atomic<bool> created_all_entries` | `created_all_entries: AtomicBool` |
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use super::entry::{CatalogEntryBase, CatalogEntryKind, CatalogEntryNode};
 use super::transaction::CatalogTransaction;
 use super::types::CatalogType;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ─── DefaultGenerator trait ────────────────────────────────────────────────────
 
@@ -54,12 +54,8 @@ pub struct DefaultSchemaGenerator {
 
 impl DefaultSchemaGenerator {
     /// DuckDB 内置 schema 名称。
-    pub const DEFAULT_SCHEMAS: &'static [&'static str] = &[
-        "main",
-        "pg_catalog",
-        "information_schema",
-        "temp",
-    ];
+    pub const DEFAULT_SCHEMAS: &'static [&'static str] =
+        &["main", "pg_catalog", "information_schema", "temp"];
 
     pub fn new(catalog_oid: u64, catalog_name: impl Into<String>) -> Self {
         Self {
@@ -72,11 +68,13 @@ impl DefaultSchemaGenerator {
     /// 判断是否为内置 schema（C++: `DefaultSchemaGenerator::IsDefaultSchema`）。
     pub fn is_default_schema(name: &str) -> bool {
         let lower = name.to_lowercase();
-        Self::DEFAULT_SCHEMAS.iter().any(|s| s.eq_ignore_ascii_case(&lower))
+        Self::DEFAULT_SCHEMAS
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(&lower))
     }
 
     fn make_schema_node(&self, name: &str, txn: &CatalogTransaction) -> CatalogEntryNode {
-        let oid = name.len() as u64 ^ self.catalog_oid;  // 简单的 OID 生成
+        let oid = name.len() as u64 ^ self.catalog_oid; // 简单的 OID 生成
         let mut base = CatalogEntryBase::new(
             oid,
             CatalogType::SchemaEntry,
@@ -85,7 +83,7 @@ impl DefaultSchemaGenerator {
             String::new(),
         );
         base.internal = true;
-        base.set_timestamp(0);  // 系统条目时间戳为 0（始终可见）
+        base.set_timestamp(0); // 系统条目时间戳为 0（始终可见）
         CatalogEntryNode::new(base, CatalogEntryKind::Schema)
     }
 }
@@ -104,7 +102,10 @@ impl DefaultGenerator for DefaultSchemaGenerator {
     }
 
     fn default_entry_names(&self) -> Vec<String> {
-        Self::DEFAULT_SCHEMAS.iter().map(|s| s.to_string()).collect()
+        Self::DEFAULT_SCHEMAS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 
     fn all_entries_created(&self) -> bool {
@@ -124,18 +125,32 @@ pub struct EmptyGenerator {
 }
 
 impl EmptyGenerator {
-    pub fn new() -> Self { Self { created_all: false } }
+    pub fn new() -> Self {
+        Self { created_all: false }
+    }
 }
 
 impl Default for EmptyGenerator {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DefaultGenerator for EmptyGenerator {
-    fn create_default_entry(&mut self, _txn: &CatalogTransaction, _name: &str) -> Option<CatalogEntryNode> {
+    fn create_default_entry(
+        &mut self,
+        _txn: &CatalogTransaction,
+        _name: &str,
+    ) -> Option<CatalogEntryNode> {
         None
     }
-    fn default_entry_names(&self) -> Vec<String> { Vec::new() }
-    fn all_entries_created(&self) -> bool { self.created_all }
-    fn mark_all_created(&mut self) { self.created_all = true; }
+    fn default_entry_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn all_entries_created(&self) -> bool {
+        self.created_all
+    }
+    fn mark_all_created(&mut self) {
+        self.created_all = true;
+    }
 }

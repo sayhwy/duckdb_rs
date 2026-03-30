@@ -50,11 +50,21 @@ pub use crate::common::types::LogicalType;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhysicalType {
     Bool,
-    Int8, Int16, Int32, Int64, Int128,
-    Uint8, Uint16, Uint32, Uint64,
-    Float, Double,
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    Int128,
+    Uint8,
+    Uint16,
+    Uint32,
+    Uint64,
+    Float,
+    Double,
     VarChar,
-    List, Struct, Array,
+    List,
+    Struct,
+    Array,
     Invalid,
 }
 
@@ -106,9 +116,20 @@ pub fn use_deleted_version(
 
 /// Returns `true` if the row is visible to `transaction` (combined insert + delete check).
 #[inline]
-pub fn is_row_visible(transaction: TransactionData, insert_id: TransactionId, delete_id: TransactionId) -> bool {
-    use_inserted_version(transaction.start_time, transaction.transaction_id, insert_id)
-        && use_deleted_version(transaction.start_time, transaction.transaction_id, delete_id)
+pub fn is_row_visible(
+    transaction: TransactionData,
+    insert_id: TransactionId,
+    delete_id: TransactionId,
+) -> bool {
+    use_inserted_version(
+        transaction.start_time,
+        transaction.transaction_id,
+        insert_id,
+    ) && use_deleted_version(
+        transaction.start_time,
+        transaction.transaction_id,
+        delete_id,
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

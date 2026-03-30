@@ -28,11 +28,17 @@ pub struct StandardColumnData {
 
 impl StandardColumnData {
     pub fn new(ctx: ColumnDataContext) -> Self {
-        StandardColumnData { ctx, validity: None }
+        StandardColumnData {
+            ctx,
+            validity: None,
+        }
     }
 
     pub fn with_validity(ctx: ColumnDataContext, validity: Arc<ValidityColumnData>) -> Self {
-        StandardColumnData { ctx, validity: Some(validity) }
+        StandardColumnData {
+            ctx,
+            validity: Some(validity),
+        }
     }
 
     /// Returns `true` if there are any NULL values.

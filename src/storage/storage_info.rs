@@ -108,97 +108,338 @@ struct SerializationVersionEntry {
 
 // 自动生成的存储版本表（对应 storage_info.cpp START OF STORAGE VERSION INFO）
 static STORAGE_VERSION_TABLE: &[StorageVersionEntry] = &[
-    StorageVersionEntry { name: "v0.0.4",  storage_version: 1  },
-    StorageVersionEntry { name: "v0.1.0",  storage_version: 1  },
-    StorageVersionEntry { name: "v0.1.1",  storage_version: 1  },
-    StorageVersionEntry { name: "v0.1.2",  storage_version: 1  },
-    StorageVersionEntry { name: "v0.1.3",  storage_version: 1  },
-    StorageVersionEntry { name: "v0.1.4",  storage_version: 1  },
-    StorageVersionEntry { name: "v0.1.5",  storage_version: 1  },
-    StorageVersionEntry { name: "v0.1.6",  storage_version: 1  },
-    StorageVersionEntry { name: "v0.1.7",  storage_version: 1  },
-    StorageVersionEntry { name: "v0.1.8",  storage_version: 1  },
-    StorageVersionEntry { name: "v0.1.9",  storage_version: 1  },
-    StorageVersionEntry { name: "v0.2.0",  storage_version: 1  },
-    StorageVersionEntry { name: "v0.2.1",  storage_version: 1  },
-    StorageVersionEntry { name: "v0.2.2",  storage_version: 4  },
-    StorageVersionEntry { name: "v0.2.3",  storage_version: 6  },
-    StorageVersionEntry { name: "v0.2.4",  storage_version: 11 },
-    StorageVersionEntry { name: "v0.2.5",  storage_version: 13 },
-    StorageVersionEntry { name: "v0.2.6",  storage_version: 15 },
-    StorageVersionEntry { name: "v0.2.7",  storage_version: 17 },
-    StorageVersionEntry { name: "v0.2.8",  storage_version: 18 },
-    StorageVersionEntry { name: "v0.2.9",  storage_version: 21 },
-    StorageVersionEntry { name: "v0.3.0",  storage_version: 25 },
-    StorageVersionEntry { name: "v0.3.1",  storage_version: 27 },
-    StorageVersionEntry { name: "v0.3.2",  storage_version: 31 },
-    StorageVersionEntry { name: "v0.3.3",  storage_version: 33 },
-    StorageVersionEntry { name: "v0.3.4",  storage_version: 33 },
-    StorageVersionEntry { name: "v0.3.5",  storage_version: 33 },
-    StorageVersionEntry { name: "v0.4.0",  storage_version: 33 },
-    StorageVersionEntry { name: "v0.5.0",  storage_version: 38 },
-    StorageVersionEntry { name: "v0.5.1",  storage_version: 38 },
-    StorageVersionEntry { name: "v0.6.0",  storage_version: 39 },
-    StorageVersionEntry { name: "v0.6.1",  storage_version: 39 },
-    StorageVersionEntry { name: "v0.7.0",  storage_version: 43 },
-    StorageVersionEntry { name: "v0.7.1",  storage_version: 43 },
-    StorageVersionEntry { name: "v0.8.0",  storage_version: 51 },
-    StorageVersionEntry { name: "v0.8.1",  storage_version: 51 },
-    StorageVersionEntry { name: "v0.9.0",  storage_version: 64 },
-    StorageVersionEntry { name: "v0.9.1",  storage_version: 64 },
-    StorageVersionEntry { name: "v0.9.2",  storage_version: 64 },
-    StorageVersionEntry { name: "v0.10.0", storage_version: 64 },
-    StorageVersionEntry { name: "v0.10.1", storage_version: 64 },
-    StorageVersionEntry { name: "v0.10.2", storage_version: 64 },
-    StorageVersionEntry { name: "v0.10.3", storage_version: 64 },
-    StorageVersionEntry { name: "v1.0.0",  storage_version: 64 },
-    StorageVersionEntry { name: "v1.1.0",  storage_version: 64 },
-    StorageVersionEntry { name: "v1.1.1",  storage_version: 64 },
-    StorageVersionEntry { name: "v1.1.2",  storage_version: 64 },
-    StorageVersionEntry { name: "v1.1.3",  storage_version: 64 },
-    StorageVersionEntry { name: "v1.2.0",  storage_version: 65 },
-    StorageVersionEntry { name: "v1.2.1",  storage_version: 65 },
-    StorageVersionEntry { name: "v1.2.2",  storage_version: 65 },
-    StorageVersionEntry { name: "v1.3.0",  storage_version: 66 },
-    StorageVersionEntry { name: "v1.3.1",  storage_version: 66 },
-    StorageVersionEntry { name: "v1.3.2",  storage_version: 66 },
-    StorageVersionEntry { name: "v1.4.0",  storage_version: 67 },
-    StorageVersionEntry { name: "v1.4.1",  storage_version: 67 },
-    StorageVersionEntry { name: "v1.4.2",  storage_version: 67 },
-    StorageVersionEntry { name: "v1.4.3",  storage_version: 67 },
-    StorageVersionEntry { name: "v1.5.0",  storage_version: 67 },
+    StorageVersionEntry {
+        name: "v0.0.4",
+        storage_version: 1,
+    },
+    StorageVersionEntry {
+        name: "v0.1.0",
+        storage_version: 1,
+    },
+    StorageVersionEntry {
+        name: "v0.1.1",
+        storage_version: 1,
+    },
+    StorageVersionEntry {
+        name: "v0.1.2",
+        storage_version: 1,
+    },
+    StorageVersionEntry {
+        name: "v0.1.3",
+        storage_version: 1,
+    },
+    StorageVersionEntry {
+        name: "v0.1.4",
+        storage_version: 1,
+    },
+    StorageVersionEntry {
+        name: "v0.1.5",
+        storage_version: 1,
+    },
+    StorageVersionEntry {
+        name: "v0.1.6",
+        storage_version: 1,
+    },
+    StorageVersionEntry {
+        name: "v0.1.7",
+        storage_version: 1,
+    },
+    StorageVersionEntry {
+        name: "v0.1.8",
+        storage_version: 1,
+    },
+    StorageVersionEntry {
+        name: "v0.1.9",
+        storage_version: 1,
+    },
+    StorageVersionEntry {
+        name: "v0.2.0",
+        storage_version: 1,
+    },
+    StorageVersionEntry {
+        name: "v0.2.1",
+        storage_version: 1,
+    },
+    StorageVersionEntry {
+        name: "v0.2.2",
+        storage_version: 4,
+    },
+    StorageVersionEntry {
+        name: "v0.2.3",
+        storage_version: 6,
+    },
+    StorageVersionEntry {
+        name: "v0.2.4",
+        storage_version: 11,
+    },
+    StorageVersionEntry {
+        name: "v0.2.5",
+        storage_version: 13,
+    },
+    StorageVersionEntry {
+        name: "v0.2.6",
+        storage_version: 15,
+    },
+    StorageVersionEntry {
+        name: "v0.2.7",
+        storage_version: 17,
+    },
+    StorageVersionEntry {
+        name: "v0.2.8",
+        storage_version: 18,
+    },
+    StorageVersionEntry {
+        name: "v0.2.9",
+        storage_version: 21,
+    },
+    StorageVersionEntry {
+        name: "v0.3.0",
+        storage_version: 25,
+    },
+    StorageVersionEntry {
+        name: "v0.3.1",
+        storage_version: 27,
+    },
+    StorageVersionEntry {
+        name: "v0.3.2",
+        storage_version: 31,
+    },
+    StorageVersionEntry {
+        name: "v0.3.3",
+        storage_version: 33,
+    },
+    StorageVersionEntry {
+        name: "v0.3.4",
+        storage_version: 33,
+    },
+    StorageVersionEntry {
+        name: "v0.3.5",
+        storage_version: 33,
+    },
+    StorageVersionEntry {
+        name: "v0.4.0",
+        storage_version: 33,
+    },
+    StorageVersionEntry {
+        name: "v0.5.0",
+        storage_version: 38,
+    },
+    StorageVersionEntry {
+        name: "v0.5.1",
+        storage_version: 38,
+    },
+    StorageVersionEntry {
+        name: "v0.6.0",
+        storage_version: 39,
+    },
+    StorageVersionEntry {
+        name: "v0.6.1",
+        storage_version: 39,
+    },
+    StorageVersionEntry {
+        name: "v0.7.0",
+        storage_version: 43,
+    },
+    StorageVersionEntry {
+        name: "v0.7.1",
+        storage_version: 43,
+    },
+    StorageVersionEntry {
+        name: "v0.8.0",
+        storage_version: 51,
+    },
+    StorageVersionEntry {
+        name: "v0.8.1",
+        storage_version: 51,
+    },
+    StorageVersionEntry {
+        name: "v0.9.0",
+        storage_version: 64,
+    },
+    StorageVersionEntry {
+        name: "v0.9.1",
+        storage_version: 64,
+    },
+    StorageVersionEntry {
+        name: "v0.9.2",
+        storage_version: 64,
+    },
+    StorageVersionEntry {
+        name: "v0.10.0",
+        storage_version: 64,
+    },
+    StorageVersionEntry {
+        name: "v0.10.1",
+        storage_version: 64,
+    },
+    StorageVersionEntry {
+        name: "v0.10.2",
+        storage_version: 64,
+    },
+    StorageVersionEntry {
+        name: "v0.10.3",
+        storage_version: 64,
+    },
+    StorageVersionEntry {
+        name: "v1.0.0",
+        storage_version: 64,
+    },
+    StorageVersionEntry {
+        name: "v1.1.0",
+        storage_version: 64,
+    },
+    StorageVersionEntry {
+        name: "v1.1.1",
+        storage_version: 64,
+    },
+    StorageVersionEntry {
+        name: "v1.1.2",
+        storage_version: 64,
+    },
+    StorageVersionEntry {
+        name: "v1.1.3",
+        storage_version: 64,
+    },
+    StorageVersionEntry {
+        name: "v1.2.0",
+        storage_version: 65,
+    },
+    StorageVersionEntry {
+        name: "v1.2.1",
+        storage_version: 65,
+    },
+    StorageVersionEntry {
+        name: "v1.2.2",
+        storage_version: 65,
+    },
+    StorageVersionEntry {
+        name: "v1.3.0",
+        storage_version: 66,
+    },
+    StorageVersionEntry {
+        name: "v1.3.1",
+        storage_version: 66,
+    },
+    StorageVersionEntry {
+        name: "v1.3.2",
+        storage_version: 66,
+    },
+    StorageVersionEntry {
+        name: "v1.4.0",
+        storage_version: 67,
+    },
+    StorageVersionEntry {
+        name: "v1.4.1",
+        storage_version: 67,
+    },
+    StorageVersionEntry {
+        name: "v1.4.2",
+        storage_version: 67,
+    },
+    StorageVersionEntry {
+        name: "v1.4.3",
+        storage_version: 67,
+    },
+    StorageVersionEntry {
+        name: "v1.5.0",
+        storage_version: 67,
+    },
 ];
 
 // 自动生成的序列化版本表（对应 storage_info.cpp START OF SERIALIZATION VERSION INFO）
 static SERIALIZATION_VERSION_TABLE: &[SerializationVersionEntry] = &[
-    SerializationVersionEntry { name: "v0.10.0", serialization_version: 1 },
-    SerializationVersionEntry { name: "v0.10.1", serialization_version: 1 },
-    SerializationVersionEntry { name: "v0.10.2", serialization_version: 1 },
-    SerializationVersionEntry { name: "v0.10.3", serialization_version: 2 },
-    SerializationVersionEntry { name: "v1.0.0",  serialization_version: 2 },
-    SerializationVersionEntry { name: "v1.1.0",  serialization_version: 3 },
-    SerializationVersionEntry { name: "v1.1.1",  serialization_version: 3 },
-    SerializationVersionEntry { name: "v1.1.2",  serialization_version: 3 },
-    SerializationVersionEntry { name: "v1.1.3",  serialization_version: 3 },
-    SerializationVersionEntry { name: "v1.2.0",  serialization_version: 4 },
-    SerializationVersionEntry { name: "v1.2.1",  serialization_version: 4 },
-    SerializationVersionEntry { name: "v1.2.2",  serialization_version: 4 },
-    SerializationVersionEntry { name: "v1.3.0",  serialization_version: 5 },
-    SerializationVersionEntry { name: "v1.3.1",  serialization_version: 5 },
-    SerializationVersionEntry { name: "v1.3.2",  serialization_version: 5 },
-    SerializationVersionEntry { name: "v1.4.0",  serialization_version: 6 },
-    SerializationVersionEntry { name: "v1.4.1",  serialization_version: 6 },
-    SerializationVersionEntry { name: "v1.4.2",  serialization_version: 6 },
-    SerializationVersionEntry { name: "v1.4.3",  serialization_version: 6 },
-    SerializationVersionEntry { name: "v1.5.0",  serialization_version: 7 },
-    SerializationVersionEntry { name: "latest",  serialization_version: 7 },
+    SerializationVersionEntry {
+        name: "v0.10.0",
+        serialization_version: 1,
+    },
+    SerializationVersionEntry {
+        name: "v0.10.1",
+        serialization_version: 1,
+    },
+    SerializationVersionEntry {
+        name: "v0.10.2",
+        serialization_version: 1,
+    },
+    SerializationVersionEntry {
+        name: "v0.10.3",
+        serialization_version: 2,
+    },
+    SerializationVersionEntry {
+        name: "v1.0.0",
+        serialization_version: 2,
+    },
+    SerializationVersionEntry {
+        name: "v1.1.0",
+        serialization_version: 3,
+    },
+    SerializationVersionEntry {
+        name: "v1.1.1",
+        serialization_version: 3,
+    },
+    SerializationVersionEntry {
+        name: "v1.1.2",
+        serialization_version: 3,
+    },
+    SerializationVersionEntry {
+        name: "v1.1.3",
+        serialization_version: 3,
+    },
+    SerializationVersionEntry {
+        name: "v1.2.0",
+        serialization_version: 4,
+    },
+    SerializationVersionEntry {
+        name: "v1.2.1",
+        serialization_version: 4,
+    },
+    SerializationVersionEntry {
+        name: "v1.2.2",
+        serialization_version: 4,
+    },
+    SerializationVersionEntry {
+        name: "v1.3.0",
+        serialization_version: 5,
+    },
+    SerializationVersionEntry {
+        name: "v1.3.1",
+        serialization_version: 5,
+    },
+    SerializationVersionEntry {
+        name: "v1.3.2",
+        serialization_version: 5,
+    },
+    SerializationVersionEntry {
+        name: "v1.4.0",
+        serialization_version: 6,
+    },
+    SerializationVersionEntry {
+        name: "v1.4.1",
+        serialization_version: 6,
+    },
+    SerializationVersionEntry {
+        name: "v1.4.2",
+        serialization_version: 6,
+    },
+    SerializationVersionEntry {
+        name: "v1.4.3",
+        serialization_version: 6,
+    },
+    SerializationVersionEntry {
+        name: "v1.5.0",
+        serialization_version: 7,
+    },
+    SerializationVersionEntry {
+        name: "latest",
+        serialization_version: 7,
+    },
 ];
 
 /// 按版本字符串查找存储版本号（C++: `GetStorageVersion(version_string)`）。
 ///
 /// 返回 `None` 如果版本字符串未知。
 pub fn get_storage_version(version_string: &str) -> Option<u64> {
-    STORAGE_VERSION_TABLE.iter()
+    STORAGE_VERSION_TABLE
+        .iter()
         .find(|e| e.name == version_string)
         .map(|e| e.storage_version)
 }
@@ -207,7 +448,8 @@ pub fn get_storage_version(version_string: &str) -> Option<u64> {
 ///
 /// 支持 `"latest"` 字符串。
 pub fn get_serialization_version(version_string: &str) -> Option<u64> {
-    SERIALIZATION_VERSION_TABLE.iter()
+    SERIALIZATION_VERSION_TABLE
+        .iter()
         .find(|e| e.name == version_string)
         .map(|e| e.serialization_version)
 }
@@ -216,7 +458,8 @@ pub fn get_serialization_version(version_string: &str) -> Option<u64> {
 ///
 /// 返回格式如 `"v0.9.0, v0.9.1 or v1.0.0"`。若无匹配返回空字符串。
 pub fn get_duckdb_versions(version_number: u64) -> String {
-    let versions: Vec<&str> = STORAGE_VERSION_TABLE.iter()
+    let versions: Vec<&str> = STORAGE_VERSION_TABLE
+        .iter()
         .filter(|e| e.storage_version == version_number)
         .map(|e| e.name)
         .collect();
@@ -228,8 +471,11 @@ pub fn get_duckdb_versions(version_number: u64) -> String {
             let mut result = String::new();
             for (i, v) in versions.iter().enumerate() {
                 if i > 0 {
-                    if i + 1 == n { result.push_str(" or "); }
-                    else          { result.push_str(", "); }
+                    if i + 1 == n {
+                        result.push_str(" or ");
+                    } else {
+                        result.push_str(", ");
+                    }
                 }
                 result.push_str(v);
             }
@@ -246,23 +492,26 @@ pub fn get_storage_version_name(serialization_version: u64, add_suffix: bool) ->
     if serialization_version < 4 {
         return "v1.0.0+".to_string();
     }
-    let first = SERIALIZATION_VERSION_TABLE.iter()
+    let first = SERIALIZATION_VERSION_TABLE
+        .iter()
         .filter(|e| e.name != "latest")
         .find(|e| e.serialization_version == serialization_version);
 
     match first {
         None => "--UNKNOWN--".to_string(),
         Some(e) => {
-            if add_suffix { format!("{}+", e.name) } else { e.name.to_string() }
+            if add_suffix {
+                format!("{}+", e.name)
+            } else {
+                e.name.to_string()
+            }
         }
     }
 }
 
 /// 返回所有序列化版本的候选名称列表（C++: `GetSerializationCandidates()`）。
 pub fn get_serialization_candidates() -> Vec<&'static str> {
-    SERIALIZATION_VERSION_TABLE.iter()
-        .map(|e| e.name)
-        .collect()
+    SERIALIZATION_VERSION_TABLE.iter().map(|e| e.name).collect()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -380,13 +629,13 @@ impl DatabaseHeader {
     pub fn deserialize(buf: &[u8]) -> Self {
         debug_assert!(buf.len() >= Self::SERIALIZED_SIZE);
         Self {
-            iteration:                  u64::from_le_bytes(buf[0..8].try_into().unwrap()),
-            meta_block:                 i64::from_le_bytes(buf[8..16].try_into().unwrap()),
-            free_list:                  i64::from_le_bytes(buf[16..24].try_into().unwrap()),
-            block_count:                u64::from_le_bytes(buf[24..32].try_into().unwrap()),
-            block_alloc_size:           u64::from_le_bytes(buf[32..40].try_into().unwrap()),
-            vector_size:                u64::from_le_bytes(buf[40..48].try_into().unwrap()),
-            serialization_compatibility:u64::from_le_bytes(buf[48..56].try_into().unwrap()),
+            iteration: u64::from_le_bytes(buf[0..8].try_into().unwrap()),
+            meta_block: i64::from_le_bytes(buf[8..16].try_into().unwrap()),
+            free_list: i64::from_le_bytes(buf[16..24].try_into().unwrap()),
+            block_count: u64::from_le_bytes(buf[24..32].try_into().unwrap()),
+            block_alloc_size: u64::from_le_bytes(buf[32..40].try_into().unwrap()),
+            vector_size: u64::from_le_bytes(buf[40..48].try_into().unwrap()),
+            serialization_compatibility: u64::from_le_bytes(buf[48..56].try_into().unwrap()),
         }
     }
 }
@@ -606,7 +855,11 @@ impl MainHeader {
     ///
     /// 用于在两个头部槽中选取最新有效的那个。
     pub fn active_header_idx(headers: &[DatabaseHeader; 2]) -> usize {
-        if headers[1].iteration > headers[0].iteration { 1 } else { 0 }
+        if headers[1].iteration > headers[0].iteration {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -689,11 +942,11 @@ pub enum StorageError {
 impl std::fmt::Display for StorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(e)             => write!(f, "IO error: {e}"),
-            Self::Corrupt { msg }   => write!(f, "Storage corrupt: {msg}"),
-            Self::ReadOnly          => write!(f, "Storage is read-only"),
+            Self::Io(e) => write!(f, "IO error: {e}"),
+            Self::Corrupt { msg } => write!(f, "Storage corrupt: {msg}"),
+            Self::ReadOnly => write!(f, "Storage is read-only"),
             Self::NotFound { path } => write!(f, "File not found: {path}"),
-            Self::Other(msg)        => write!(f, "Storage error: {msg}"),
+            Self::Other(msg) => write!(f, "Storage error: {msg}"),
         }
     }
 }
@@ -777,11 +1030,11 @@ pub trait FileSystem: Send + Sync {
 pub struct FileOpenFlags(pub u32);
 
 impl FileOpenFlags {
-    pub const READ:       Self = Self(0x01);
-    pub const WRITE:      Self = Self(0x02);
-    pub const CREATE:     Self = Self(0x04);
-    pub const DIRECT_IO:  Self = Self(0x08);
-    pub const TRUNCATE:   Self = Self(0x10);
+    pub const READ: Self = Self(0x01);
+    pub const WRITE: Self = Self(0x02);
+    pub const CREATE: Self = Self(0x04);
+    pub const DIRECT_IO: Self = Self(0x08);
+    pub const TRUNCATE: Self = Self(0x10);
     pub const READ_WRITE: Self = Self(0x03); // READ | WRITE
 
     /// 是否包含指定标志位。
@@ -792,11 +1045,15 @@ impl FileOpenFlags {
 
 impl std::ops::BitOr for FileOpenFlags {
     type Output = Self;
-    fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) }
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
 }
 
 impl std::ops::BitOrAssign for FileOpenFlags {
-    fn bitor_assign(&mut self, rhs: Self) { self.0 |= rhs.0; }
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -859,7 +1116,10 @@ mod tests {
 
     #[test]
     fn get_serialization_version_latest() {
-        assert_eq!(get_serialization_version("latest"), Some(LATEST_SERIALIZATION_VERSION));
+        assert_eq!(
+            get_serialization_version("latest"),
+            Some(LATEST_SERIALIZATION_VERSION)
+        );
         assert_eq!(get_serialization_version("v1.5.0"), Some(7));
     }
 

@@ -7,9 +7,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use super::storage_info::{
-    FileHandle, FileOpenFlags, FileSystem, StorageError, StorageResult,
-};
+use super::storage_info::{FileHandle, FileOpenFlags, FileSystem, StorageError, StorageResult};
 
 // ── LocalFileHandle ───────────────────────────────────────────
 
@@ -70,7 +68,9 @@ impl FileSystem for LocalFileSystem {
             .open(path)
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    StorageError::NotFound { path: path.to_string() }
+                    StorageError::NotFound {
+                        path: path.to_string(),
+                    }
                 } else {
                     StorageError::Io(e)
                 }
@@ -121,7 +121,11 @@ impl FileSystem for LocalFileSystem {
         if base.is_empty() {
             return name.to_string();
         }
-        let sep = if base.ends_with('/') || base.ends_with('\\') { "" } else { "/" };
+        let sep = if base.ends_with('/') || base.ends_with('\\') {
+            ""
+        } else {
+            "/"
+        };
         format!("{base}{sep}{name}")
     }
 }

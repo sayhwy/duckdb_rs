@@ -107,11 +107,12 @@ impl<'mgr> MetadataReader<'mgr> {
     }
 
     /// 对应 C++ MetadataReader(MetadataManager&, BlockPointer)
-    pub fn from_block_pointer(manager: &'mgr MetadataManager, pointer: super::types::BlockPointer) -> Self {
-        let meta_pointer = MetadataManager::from_block_pointer(
-            pointer,
-            manager.get_metadata_block_size(),
-        );
+    pub fn from_block_pointer(
+        manager: &'mgr MetadataManager,
+        pointer: super::types::BlockPointer,
+    ) -> Self {
+        let meta_pointer =
+            MetadataManager::from_block_pointer(pointer, manager.get_metadata_block_size());
         Self::new(manager, meta_pointer, None, BlockReaderType::ExistingBlocks)
     }
 
@@ -119,7 +120,10 @@ impl<'mgr> MetadataReader<'mgr> {
 
     /// 对应 C++ MetadataReader::GetMetaBlockPointer()
     pub fn get_meta_block_pointer(&self) -> MetaBlockPointer {
-        assert!(self.capacity > 0, "GetMetaBlockPointer called before first read");
+        assert!(
+            self.capacity > 0,
+            "GetMetaBlockPointer called before first read"
+        );
         self.manager.get_disk_pointer(
             &self.current_handle.as_ref().unwrap().pointer,
             self.offset as u32,
@@ -130,14 +134,10 @@ impl<'mgr> MetadataReader<'mgr> {
     ///
     /// 消耗剩余所有块，返回它们的 MetaBlockPointer 列表。
     /// 若指定 last_block（is_valid()），到达该块时停止。
-    pub fn get_remaining_blocks(
-        &mut self,
-        last_block: MetaBlockPointer,
-    ) -> Vec<MetaBlockPointer> {
+    pub fn get_remaining_blocks(&mut self, last_block: MetaBlockPointer) -> Vec<MetaBlockPointer> {
         let mut result = Vec::new();
         while self.has_next_block {
-            if last_block.is_valid()
-                && self.next_pointer.block_pointer == last_block.block_pointer
+            if last_block.is_valid() && self.next_pointer.block_pointer == last_block.block_pointer
             {
                 break;
             }
@@ -150,7 +150,10 @@ impl<'mgr> MetadataReader<'mgr> {
     // ─── 私有：块切换 ─────────────────────────────────────────
 
     /// 将 next_pointer 解析为内存 MetadataPointer（根据 reader_type 选择注册方式）
-    fn from_disk_pointer_internal(&self, pointer: MetaBlockPointer) -> super::types::MetadataPointer {
+    fn from_disk_pointer_internal(
+        &self,
+        pointer: MetaBlockPointer,
+    ) -> super::types::MetadataPointer {
         match self.reader_type {
             BlockReaderType::ExistingBlocks => self.manager.from_disk_pointer(pointer),
             BlockReaderType::RegisterBlocks => self.manager.register_disk_pointer(pointer),
@@ -176,15 +179,18 @@ impl<'mgr> MetadataReader<'mgr> {
 
         // 从 BufferHandle 拷贝当前子块数据
         // 对应 C++: BasePtr() = handle.Ptr() + index * metadata_block_size
-        let data_slice: Vec<u8> = handle.handle.with_data(|payload| {
-            let start = sub_index * metadata_block_size;
-            let end = (start + metadata_block_size).min(payload.len());
-            if start < payload.len() {
-                payload[start..end].to_vec()
-            } else {
-                Vec::new()
-            }
-        }).unwrap_or_default();
+        let data_slice: Vec<u8> = handle
+            .handle
+            .with_data(|payload| {
+                let start = sub_index * metadata_block_size;
+                let end = (start + metadata_block_size).min(payload.len());
+                if start < payload.len() {
+                    payload[start..end].to_vec()
+                } else {
+                    Vec::new()
+                }
+            })
+            .unwrap_or_default();
 
         // 解析 next-pointer（前 8 字节）
         // 对应 C++: idx_t next_block = Load<idx_t>(BasePtr())

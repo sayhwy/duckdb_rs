@@ -20,20 +20,19 @@
 //! | `optional_ptr<CatalogSet> set` | 去除，由 CatalogSet 管理 |
 //! | `atomic<transaction_t> timestamp` | `timestamp: AtomicU64` |
 
+use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::collections::HashMap;
-use parking_lot::RwLock;
 
-use super::types::{
-    CatalogType, Value, LogicalType, ColumnList, ConstraintType,
-    CreateInfo, CreateTableInfo, CreateViewInfo, CreateSequenceInfo,
-    CreateTypeInfo, CreateIndexInfo, CreateFunctionInfo, CreateSchemaInfo,
-    CreateCollationInfo, AlterInfo, AlterKind, IndexConstraintType,
-};
-use super::error::CatalogError;
 use super::dependency::LogicalDependencyList;
+use super::error::CatalogError;
 use super::transaction::CatalogTransaction;
+use super::types::{
+    AlterInfo, AlterKind, CatalogType, ColumnList, ConstraintType, CreateCollationInfo,
+    CreateFunctionInfo, CreateIndexInfo, CreateInfo, CreateSchemaInfo, CreateSequenceInfo,
+    CreateTableInfo, CreateTypeInfo, CreateViewInfo, IndexConstraintType, LogicalType, Value,
+};
 
 // ─── CatalogEntryBase ──────────────────────────────────────────────────────────
 
@@ -90,8 +89,12 @@ impl CatalogEntryBase {
         }
     }
 
-    pub fn get_timestamp(&self) -> u64 { self.timestamp.load(Ordering::SeqCst) }
-    pub fn set_timestamp(&self, ts: u64) { self.timestamp.store(ts, Ordering::SeqCst); }
+    pub fn get_timestamp(&self) -> u64 {
+        self.timestamp.load(Ordering::SeqCst)
+    }
+    pub fn set_timestamp(&self, ts: u64) {
+        self.timestamp.store(ts, Ordering::SeqCst);
+    }
 }
 
 impl Clone for CatalogEntryBase {
@@ -141,13 +144,12 @@ pub enum CatalogEntryKind {
 impl CatalogEntryKind {
     pub fn to_sql(&self, base: &CatalogEntryBase) -> String {
         match self {
-            CatalogEntryKind::Schema =>
-                format!("CREATE SCHEMA {};", base.name),
+            CatalogEntryKind::Schema => format!("CREATE SCHEMA {};", base.name),
             CatalogEntryKind::Table(d) => d.to_sql(base),
-            CatalogEntryKind::View(d)  => d.to_sql(base),
+            CatalogEntryKind::View(d) => d.to_sql(base),
             CatalogEntryKind::Sequence(d) => d.to_sql(base),
             CatalogEntryKind::Index(d) => d.to_sql(base),
-            CatalogEntryKind::Type(d)  => d.to_sql(base),
+            CatalogEntryKind::Type(d) => d.to_sql(base),
             CatalogEntryKind::Function(d) => d.to_sql(base),
             CatalogEntryKind::DependencyRelation(_) => String::new(),
             CatalogEntryKind::Generic { sql } => sql.clone(),
@@ -179,20 +181,36 @@ pub struct TableEntryData {
 
 impl TableEntryData {
     pub fn new(columns: ColumnList, constraints: Vec<ConstraintType>) -> Self {
-        Self { columns, constraints, storage_oid: None }
+        Self {
+            columns,
+            constraints,
+            storage_oid: None,
+        }
     }
 
     pub fn to_sql(&self, base: &CatalogEntryBase) -> String {
-        let schema = if base.schema_name.is_empty() { "main" } else { &base.schema_name };
+        let schema = if base.schema_name.is_empty() {
+            "main"
+        } else {
+            &base.schema_name
+        };
         let mut parts: Vec<String> = self.columns.columns.iter().map(|c| c.to_sql()).collect();
         for c in &self.constraints {
             parts.push(c.to_sql());
         }
-        format!("CREATE TABLE {}.{} (\n    {}\n);",
-            schema, base.name, parts.join(",\n    "))
+        format!(
+            "CREATE TABLE {}.{} (\n    {}\n);",
+            schema,
+            base.name,
+            parts.join(",\n    ")
+        )
     }
 
-    pub fn apply_alter(&self, base: &CatalogEntryBase, info: &AlterInfo) -> Result<(CatalogEntryBase, CatalogEntryKind), CatalogError> {
+    pub fn apply_alter(
+        &self,
+        base: &CatalogEntryBase,
+        info: &AlterInfo,
+    ) -> Result<(CatalogEntryBase, CatalogEntryKind), CatalogError> {
         let mut new_base = base.clone();
         let mut new_data = self.clone();
 
@@ -201,51 +219,87 @@ impl TableEntryData {
                 new_base.name = new_name.clone();
             }
             AlterKind::RenameColumn { old_name, new_name } => {
-                let col = new_data.columns.get_by_name_mut(old_name)
+                let col = new_data
+                    .columns
+                    .get_by_name_mut(old_name)
                     .ok_or_else(|| CatalogError::not_found(CatalogType::Invalid, old_name))?;
                 col.name = new_name.clone();
             }
-            AlterKind::AddColumn { column, if_not_exists } => {
+            AlterKind::AddColumn {
+                column,
+                if_not_exists,
+            } => {
                 if new_data.columns.column_exists(&column.name) {
                     if *if_not_exists {
                         return Ok((new_base, CatalogEntryKind::Table(new_data)));
                     }
-                    return Err(CatalogError::already_exists(CatalogType::Invalid, &column.name));
+                    return Err(CatalogError::already_exists(
+                        CatalogType::Invalid,
+                        &column.name,
+                    ));
                 }
                 new_data.columns.add_column(column.clone());
             }
-            AlterKind::RemoveColumn { column_name, if_exists, cascade: _ } => {
+            AlterKind::RemoveColumn {
+                column_name,
+                if_exists,
+                cascade: _,
+            } => {
                 let idx = new_data.columns.logical_index_of(column_name);
                 match idx {
                     None if *if_exists => {}
                     None => return Err(CatalogError::not_found(CatalogType::Invalid, column_name)),
-                    Some(i) => { new_data.columns.columns.remove(i); }
+                    Some(i) => {
+                        new_data.columns.columns.remove(i);
+                    }
                 }
             }
-            AlterKind::AlterColumnType { column_name, new_type, .. } => {
-                let col = new_data.columns.get_by_name_mut(column_name)
+            AlterKind::AlterColumnType {
+                column_name,
+                new_type,
+                ..
+            } => {
+                let col = new_data
+                    .columns
+                    .get_by_name_mut(column_name)
                     .ok_or_else(|| CatalogError::not_found(CatalogType::Invalid, column_name))?;
                 col.logical_type = new_type.clone();
             }
-            AlterKind::SetDefault { column_name, default_value } => {
-                let col = new_data.columns.get_by_name_mut(column_name)
+            AlterKind::SetDefault {
+                column_name,
+                default_value,
+            } => {
+                let col = new_data
+                    .columns
+                    .get_by_name_mut(column_name)
                     .ok_or_else(|| CatalogError::not_found(CatalogType::Invalid, column_name))?;
                 col.default_value = default_value.clone();
             }
             AlterKind::SetNotNull { column_name } => {
                 // 添加 NOT NULL 约束
-                if !new_data.constraints.iter().any(|c| matches!(c, ConstraintType::NotNull { column } if column == column_name)) {
-                    new_data.constraints.push(ConstraintType::NotNull { column: column_name.clone() });
+                if !new_data.constraints.iter().any(
+                    |c| matches!(c, ConstraintType::NotNull { column } if column == column_name),
+                ) {
+                    new_data.constraints.push(ConstraintType::NotNull {
+                        column: column_name.clone(),
+                    });
                 }
             }
             AlterKind::DropNotNull { column_name } => {
-                new_data.constraints.retain(|c| !matches!(c, ConstraintType::NotNull { column } if column == column_name));
+                new_data.constraints.retain(
+                    |c| !matches!(c, ConstraintType::NotNull { column } if column == column_name),
+                );
             }
             AlterKind::SetComment { new_comment } => {
                 new_base.comment = new_comment.clone();
             }
-            AlterKind::SetColumnComment { column_name, comment } => {
-                let col = new_data.columns.get_by_name_mut(column_name)
+            AlterKind::SetColumnComment {
+                column_name,
+                comment,
+            } => {
+                let col = new_data
+                    .columns
+                    .get_by_name_mut(column_name)
                     .ok_or_else(|| CatalogError::not_found(CatalogType::Invalid, column_name))?;
                 col.comment = comment.clone();
             }
@@ -255,13 +309,18 @@ impl TableEntryData {
             AlterKind::AddForeignKey { constraint } => {
                 new_data.constraints.push(constraint.clone());
             }
-            AlterKind::DropConstraint { constraint_name, .. } => {
+            AlterKind::DropConstraint {
+                constraint_name, ..
+            } => {
                 // 简化：按名称匹配约束（C++ 中有更精细的匹配逻辑）
-                new_data.constraints.retain(|c| c.to_sql() != *constraint_name);
+                new_data
+                    .constraints
+                    .retain(|c| c.to_sql() != *constraint_name);
             }
             _ => {
                 return Err(CatalogError::invalid(format!(
-                    "Alter kind {:?} is not applicable to tables", info.kind
+                    "Alter kind {:?} is not applicable to tables",
+                    info.kind
                 )));
             }
         }
@@ -293,15 +352,26 @@ impl ViewEntryData {
     }
 
     pub fn to_sql(&self, base: &CatalogEntryBase) -> String {
-        let schema = if base.schema_name.is_empty() { "main" } else { &base.schema_name };
+        let schema = if base.schema_name.is_empty() {
+            "main"
+        } else {
+            &base.schema_name
+        };
         let mut cols = String::new();
         if !self.column_names.is_empty() {
             cols = format!(" ({})", self.column_names.join(", "));
         }
-        format!("CREATE VIEW {}.{}{} AS {};", schema, base.name, cols, self.query)
+        format!(
+            "CREATE VIEW {}.{}{} AS {};",
+            schema, base.name, cols, self.query
+        )
     }
 
-    pub fn apply_alter(&self, base: &CatalogEntryBase, info: &AlterInfo) -> Result<(CatalogEntryBase, CatalogEntryKind), CatalogError> {
+    pub fn apply_alter(
+        &self,
+        base: &CatalogEntryBase,
+        info: &AlterInfo,
+    ) -> Result<(CatalogEntryBase, CatalogEntryKind), CatalogError> {
         let mut new_base = base.clone();
         let new_data = self.clone();
         match &info.kind {
@@ -323,31 +393,33 @@ impl ViewEntryData {
 #[derive(Debug, Clone)]
 pub struct SequenceEntryData {
     pub usage_count: u64,
-    pub counter:     i64,
-    pub last_value:  i64,
-    pub increment:   i64,
+    pub counter: i64,
+    pub last_value: i64,
+    pub increment: i64,
     pub start_value: i64,
-    pub min_value:   i64,
-    pub max_value:   i64,
-    pub cycle:       bool,
+    pub min_value: i64,
+    pub max_value: i64,
+    pub cycle: bool,
 }
 
 impl SequenceEntryData {
     pub fn from_create_info(info: &CreateSequenceInfo) -> Self {
         Self {
             usage_count: info.usage_count,
-            counter:     info.start_value,
-            last_value:  info.start_value - info.increment,
-            increment:   info.increment,
+            counter: info.start_value,
+            last_value: info.start_value - info.increment,
+            increment: info.increment,
             start_value: info.start_value,
-            min_value:   info.min_value,
-            max_value:   info.max_value,
-            cycle:       info.cycle,
+            min_value: info.min_value,
+            max_value: info.max_value,
+            cycle: info.cycle,
         }
     }
 
     /// 获取当前值（不推进序列）（C++: `CurrentValue`）。
-    pub fn current_value(&self) -> i64 { self.last_value }
+    pub fn current_value(&self) -> i64 {
+        self.last_value
+    }
 
     /// 推进序列并返回下一个值（C++: `NextValue`）。
     ///
@@ -356,10 +428,14 @@ impl SequenceEntryData {
         let next = self.counter;
         // 检查溢出
         if self.increment > 0 && next > self.max_value {
-            if !self.cycle { return None; }
+            if !self.cycle {
+                return None;
+            }
             self.counter = self.min_value;
         } else if self.increment < 0 && next < self.min_value {
-            if !self.cycle { return None; }
+            if !self.cycle {
+                return None;
+            }
             self.counter = self.max_value;
         }
         self.last_value = self.counter;
@@ -371,17 +447,20 @@ impl SequenceEntryData {
     /// 回放序列值（从 WAL 恢复）（C++: `ReplayValue`）。
     pub fn replay_value(&mut self, usage_count: u64, last_value: i64) {
         self.usage_count = usage_count;
-        self.last_value  = last_value;
-        self.counter     = last_value + self.increment;
+        self.last_value = last_value;
+        self.counter = last_value + self.increment;
     }
 
     pub fn to_sql(&self, base: &CatalogEntryBase) -> String {
-        let schema = if base.schema_name.is_empty() { "main" } else { &base.schema_name };
+        let schema = if base.schema_name.is_empty() {
+            "main"
+        } else {
+            &base.schema_name
+        };
         let cycle_str = if self.cycle { " CYCLE" } else { " NO CYCLE" };
         format!(
             "CREATE SEQUENCE {}.{} INCREMENT BY {} MINVALUE {} MAXVALUE {} START {};",
-            schema, base.name,
-            self.increment, self.min_value, self.max_value, self.start_value
+            schema, base.name, self.increment, self.min_value, self.max_value, self.start_value
         )
     }
 }
@@ -402,19 +481,31 @@ pub struct IndexEntryData {
 }
 
 impl IndexEntryData {
-    pub fn is_unique(&self) -> bool { self.constraint_type.is_unique() }
-    pub fn is_primary(&self) -> bool { self.constraint_type.is_primary() }
+    pub fn is_unique(&self) -> bool {
+        self.constraint_type.is_unique()
+    }
+    pub fn is_primary(&self) -> bool {
+        self.constraint_type.is_primary()
+    }
 
     pub fn to_sql(&self, base: &CatalogEntryBase) -> String {
         if !self.sql.is_empty() {
             return self.sql.clone();
         }
         let unique_str = if self.is_unique() { "UNIQUE " } else { "" };
-        let schema = if base.schema_name.is_empty() { "main" } else { &base.schema_name };
-        format!("CREATE {}INDEX {} ON {}.{} ({});",
-            unique_str, base.name,
-            schema, self.table_name,
-            self.expressions.join(", "))
+        let schema = if base.schema_name.is_empty() {
+            "main"
+        } else {
+            &base.schema_name
+        };
+        format!(
+            "CREATE {}INDEX {} ON {}.{} ({});",
+            unique_str,
+            base.name,
+            schema,
+            self.table_name,
+            self.expressions.join(", ")
+        )
     }
 }
 
@@ -427,12 +518,22 @@ pub struct TypeEntryData {
 }
 
 impl TypeEntryData {
-    pub fn new(user_type: LogicalType) -> Self { Self { user_type } }
+    pub fn new(user_type: LogicalType) -> Self {
+        Self { user_type }
+    }
 
     pub fn to_sql(&self, base: &CatalogEntryBase) -> String {
-        let schema = if base.schema_name.is_empty() { "main" } else { &base.schema_name };
-        format!("CREATE TYPE {}.{} AS {};",
-            schema, base.name, self.user_type.to_sql())
+        let schema = if base.schema_name.is_empty() {
+            "main"
+        } else {
+            &base.schema_name
+        };
+        format!(
+            "CREATE TYPE {}.{} AS {};",
+            schema,
+            base.name,
+            self.user_type.to_sql()
+        )
     }
 }
 
@@ -461,12 +562,21 @@ pub struct FunctionOverload {
 
 impl FunctionEntryData {
     pub fn new(function_type: CatalogType) -> Self {
-        Self { function_type, overloads: Vec::new(), alias_of: String::new(), descriptions: Vec::new() }
+        Self {
+            function_type,
+            overloads: Vec::new(),
+            alias_of: String::new(),
+            descriptions: Vec::new(),
+        }
     }
 
     pub fn to_sql(&self, base: &CatalogEntryBase) -> String {
         // 函数的 DDL 取决于函数类型；此处仅生成占位 SQL
-        let schema = if base.schema_name.is_empty() { "main" } else { &base.schema_name };
+        let schema = if base.schema_name.is_empty() {
+            "main"
+        } else {
+            &base.schema_name
+        };
         format!("-- {} {}.{}", base.entry_type, schema, base.name)
     }
 }
@@ -479,8 +589,8 @@ impl FunctionEntryData {
 #[derive(Debug, Clone)]
 pub struct DependencyRelationData {
     /// 被依赖方（Subject）或依赖方（Dependent）的信息。
-    pub entry_info:      super::dependency::CatalogEntryInfo,
-    pub subject_flags:   super::dependency::DependencySubjectFlags,
+    pub entry_info: super::dependency::CatalogEntryInfo,
+    pub subject_flags: super::dependency::DependencySubjectFlags,
     pub dependent_flags: super::dependency::DependencyDependentFlags,
 }
 
@@ -501,19 +611,35 @@ pub struct CatalogEntryNode {
 
 impl CatalogEntryNode {
     pub fn new(base: CatalogEntryBase, kind: CatalogEntryKind) -> Self {
-        Self { base, kind, older: None }
+        Self {
+            base,
+            kind,
+            older: None,
+        }
     }
 
     /// 创建已删除的墓碑节点（C++: 用于 DropEntry 时创建的删除标记）。
-    pub fn tombstone(oid: u64, name: String, catalog_name: String, schema_name: String, entry_type: CatalogType) -> Self {
+    pub fn tombstone(
+        oid: u64,
+        name: String,
+        catalog_name: String,
+        schema_name: String,
+        entry_type: CatalogType,
+    ) -> Self {
         let mut base = CatalogEntryBase::new(oid, entry_type, name, catalog_name, schema_name);
         base.deleted = true;
-        Self { base, kind: CatalogEntryKind::Generic { sql: String::new() }, older: None }
+        Self {
+            base,
+            kind: CatalogEntryKind::Generic { sql: String::new() },
+            older: None,
+        }
     }
 
     /// 生成 SQL 字符串（C++: `virtual string ToSQL() const`）。
     pub fn to_sql(&self) -> String {
-        if self.base.deleted { return String::new(); }
+        if self.base.deleted {
+            return String::new();
+        }
         self.kind.to_sql(&self.base)
     }
 
@@ -525,8 +651,8 @@ impl CatalogEntryNode {
     /// 应用 Alter 操作，返回新版本节点（C++: `virtual AlterEntry`）。
     pub fn alter(&self, info: &AlterInfo) -> Result<CatalogEntryNode, CatalogError> {
         let (new_base, new_kind) = match &self.kind {
-            CatalogEntryKind::Table(d)    => d.apply_alter(&self.base, info)?,
-            CatalogEntryKind::View(d)     => d.apply_alter(&self.base, info)?,
+            CatalogEntryKind::Table(d) => d.apply_alter(&self.base, info)?,
+            CatalogEntryKind::View(d) => d.apply_alter(&self.base, info)?,
             CatalogEntryKind::Sequence(_) => {
                 if let AlterKind::SetComment { new_comment } = &info.kind {
                     let mut b = self.base.clone();
@@ -536,9 +662,12 @@ impl CatalogEntryNode {
                     return Err(CatalogError::invalid("Alter not supported on sequences"));
                 }
             }
-            _ => return Err(CatalogError::invalid(
-                format!("Alter not supported on {}", self.base.entry_type)
-            )),
+            _ => {
+                return Err(CatalogError::invalid(format!(
+                    "Alter not supported on {}",
+                    self.base.entry_type
+                )));
+            }
         };
         Ok(CatalogEntryNode::new(new_base, new_kind))
     }

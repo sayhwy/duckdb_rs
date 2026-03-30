@@ -26,9 +26,8 @@
 //
 //   当前实现选择方案 A，适合初始骨架。
 
-use std::sync::Arc;
 use super::block_handle::BlockHandle;
-
+use std::sync::Arc;
 
 /// 对应 C++ BufferHandle
 ///
@@ -49,7 +48,9 @@ impl BufferHandle {
     /// 对应 C++ BufferHandle(shared_ptr<BlockHandle> handle, optional_ptr<FileBuffer> node)
     /// 由 BlockHandle::load() 调用，此时 block 已处于 Loaded 状态。
     pub fn new(handle: Arc<BlockHandle>) -> Self {
-        Self { handle: Some(handle) }
+        Self {
+            handle: Some(handle),
+        }
     }
 
     // ─── 状态查询 ─────────────────────────────────────────────
@@ -115,10 +116,7 @@ impl BufferHandle {
 
     /// 获取 payload 数据大小（不持锁的快速路径：通过 memory_usage 估算）
     pub fn alloc_size(&self) -> usize {
-        self.handle
-            .as_ref()
-            .map(|h| h.memory_usage())
-            .unwrap_or(0)
+        self.handle.as_ref().map(|h| h.memory_usage()).unwrap_or(0)
     }
 
     // ─── 显式释放 ─────────────────────────────────────────────

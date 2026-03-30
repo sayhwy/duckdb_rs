@@ -3,16 +3,16 @@
 //! 对应 DuckDB C++: `duckdb/main/connection.hpp` / `connection.cpp`
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
+use crate::catalog::TableCatalogEntry;
 use crate::common::types::{DataChunk, LogicalType, STANDARD_VECTOR_SIZE};
 use crate::storage::data_table::DataTable;
 use crate::storage::storage_manager::StorageManager;
 use crate::transaction::duck_transaction_manager::{DuckTransactionManager, DuckTxnHandle};
-use crate::catalog::TableCatalogEntry;
 use crate::transaction::transaction_context::TransactionContext;
 
 // ─── ConnectionId ──────────────────────────────────────────────────────────────
@@ -73,11 +73,7 @@ impl ClientContext {
         let transaction_manager = db.transaction_manager.clone();
         let db_weak = Arc::downgrade(&db);
         Self {
-            transaction: TransactionContext::new(
-                db_id,
-                transaction_manager,
-                db_weak,
-            ),
+            transaction: TransactionContext::new(db_id, transaction_manager, db_weak),
             db,
             connection_id: next_connection_id(),
             interrupted: std::sync::atomic::AtomicBool::new(false),
@@ -106,7 +102,9 @@ impl ClientContext {
     }
 
     /// 开始事务（C++: 通过 `Query("BEGIN TRANSACTION")` 实现）。
-    pub fn begin_transaction(&self) -> Result<(), crate::transaction::transaction_context::TransactionError> {
+    pub fn begin_transaction(
+        &self,
+    ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
         self.transaction.begin_transaction()
     }
 
@@ -125,7 +123,9 @@ impl ClientContext {
     }
 
     /// 回滚事务。
-    pub fn rollback(&self) -> Result<(), crate::transaction::transaction_context::TransactionError> {
+    pub fn rollback(
+        &self,
+    ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
         // Discard pending local append states on rollback.
         self.append_states.lock().clear();
         self.transaction.rollback()
@@ -307,7 +307,9 @@ impl Connection {
     ///     }
     /// }
     /// ```
-    pub fn begin_transaction(&self) -> Result<(), crate::transaction::transaction_context::TransactionError> {
+    pub fn begin_transaction(
+        &self,
+    ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
         let context = self.context.lock();
         context.begin_transaction()
     }
@@ -339,7 +341,9 @@ impl Connection {
     ///     }
     /// }
     /// ```
-    pub fn rollback(&self) -> Result<(), crate::transaction::transaction_context::TransactionError> {
+    pub fn rollback(
+        &self,
+    ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
         let context = self.context.lock();
         context.rollback()
     }
@@ -380,14 +384,11 @@ impl Connection {
     ///
     /// # 返回
     /// 成功返回 `Ok(())`，失败返回错误信息。
-    pub fn insert_chunk(
-        &self,
-        table_name: &str,
-        chunk: &mut DataChunk,
-    ) -> Result<(), String> {
+    pub fn insert_chunk(&self, table_name: &str, chunk: &mut DataChunk) -> Result<(), String> {
         // 获取表
         let tables = self.db.tables.lock();
-        let table = tables.get(&table_name.to_ascii_lowercase())
+        let table = tables
+            .get(&table_name.to_ascii_lowercase())
             .ok_or_else(|| format!("Table '{}' not found", table_name))?
             .clone();
         drop(tables);
@@ -443,8 +444,7 @@ impl Connection {
         // 如果是自动提交模式，立即提交
         if auto_commit {
             let context_guard = self.context.lock();
-            context_guard.commit()
-                .map_err(|e| e.to_string())?;
+            context_guard.commit().map_err(|e| e.to_string())?;
         }
 
         Ok(())
@@ -457,18 +457,25 @@ impl Connection {
         column_ids: Option<Vec<u64>>,
     ) -> Result<Vec<DataChunk>, String> {
         let tables = self.db.tables.lock();
-        let table = tables.get(&table_name.to_ascii_lowercase())
+        let table = tables
+            .get(&table_name.to_ascii_lowercase())
             .ok_or_else(|| format!("Table '{}' not found", table_name))?;
         let table = table.clone();
         drop(tables);
 
         let column_ids = column_ids.unwrap_or_else(|| {
-            (0..table.storage.column_count()).map(|idx| idx as u64).collect()
+            (0..table.storage.column_count())
+                .map(|idx| idx as u64)
+                .collect()
         });
 
         let result_types: Vec<LogicalType> = column_ids
             .iter()
-            .map(|idx| table.storage.column_definitions[*idx as usize].logical_type.clone())
+            .map(|idx| {
+                table.storage.column_definitions[*idx as usize]
+                    .logical_type
+                    .clone()
+            })
             .collect();
 
         let mut state = table.storage.begin_scan_state(column_ids.clone());
@@ -512,7 +519,9 @@ impl Connection {
     }
 
     /// 获取存储管理器引用。
-    pub fn storage_manager(&self) -> &Arc<crate::storage::storage_manager::SingleFileStorageManager> {
+    pub fn storage_manager(
+        &self,
+    ) -> &Arc<crate::storage::storage_manager::SingleFileStorageManager> {
         &self.db.storage_manager
     }
 }

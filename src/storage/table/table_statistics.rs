@@ -2,8 +2,8 @@
 //!
 //! Mirrors `duckdb/storage/table/table_statistics.hpp`.
 
-use std::sync::Arc;
 use parking_lot::{Mutex, MutexGuard};
+use std::sync::Arc;
 
 use super::types::LogicalType;
 
@@ -66,7 +66,9 @@ impl TableStatistics {
         // Copy parent stats
         inner.column_stats = parent_inner.column_stats.clone();
         // Add new column
-        inner.column_stats.push(ColumnStatistics::create_empty(new_type.clone()));
+        inner
+            .column_stats
+            .push(ColumnStatistics::create_empty(new_type.clone()));
     }
 
     /// Initialise with one column removed.
@@ -179,6 +181,8 @@ impl Default for TableStatistics {
 
 impl Clone for TableStatistics {
     fn clone(&self) -> Self {
-        TableStatistics { inner: Arc::clone(&self.inner) }
+        TableStatistics {
+            inner: Arc::clone(&self.inner),
+        }
     }
 }

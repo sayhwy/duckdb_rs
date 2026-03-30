@@ -30,7 +30,9 @@ impl ErrorData {
         None
     }
     pub fn new(msg: impl Into<String>) -> Self {
-        Self { message: msg.into() }
+        Self {
+            message: msg.into(),
+        }
     }
 }
 

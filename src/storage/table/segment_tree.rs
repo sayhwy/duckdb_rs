@@ -46,7 +46,11 @@ pub struct SegmentNode<T> {
 
 impl<T> SegmentNode<T> {
     pub fn new(row_start: Idx, node: Arc<T>, index: usize) -> Self {
-        SegmentNode { row_start, node, index }
+        SegmentNode {
+            row_start,
+            node,
+            index,
+        }
     }
 
     pub fn row_start(&self) -> Idx {
@@ -178,7 +182,9 @@ impl<T: Send + Sync> SegmentTree<T> {
         if index < 0 {
             self.load_all_segments_inner(&mut *self.nodes.lock());
             let pos = nodes.len() as i64 + index;
-            if pos < 0 { return None; }
+            if pos < 0 {
+                return None;
+            }
             nodes.get(pos as usize)
         } else {
             // lazy-load until we have enough segments
@@ -226,7 +232,12 @@ impl<T: Send + Sync> SegmentTree<T> {
     }
 
     /// Appends using the computed `row_start` (end of last segment).
-    pub fn append_segment_auto(&self, lock: &mut SegmentLock<'_, T>, segment: Arc<T>, count_of: impl Fn(&T) -> Idx) {
+    pub fn append_segment_auto(
+        &self,
+        lock: &mut SegmentLock<'_, T>,
+        segment: Arc<T>,
+        count_of: impl Fn(&T) -> Idx,
+    ) {
         let row_start = {
             let nodes = &*lock.0;
             if nodes.is_empty() {
@@ -270,7 +281,10 @@ impl<T: Send + Sync> SegmentTree<T> {
                 } else {
                     // T must expose its count somehow; here we use a sentinel
                     // TODO: require T: SegmentBase and use .count()
-                    nodes.last().map(|n| n.row_start).unwrap_or(self.base_row_id)
+                    nodes
+                        .last()
+                        .map(|n| n.row_start)
+                        .unwrap_or(self.base_row_id)
                 };
                 let idx = nodes.len();
                 nodes.push(SegmentNode::new(row_start, seg, idx));
@@ -295,17 +309,26 @@ impl<T: Send + Sync> SegmentTree<T> {
         // (requires knowing segment counts — TODO with SegmentBase trait)
         while nodes.is_empty() || {
             // Approximate: load if row_number >= last node's row_start
-            nodes.last().map(|n| row_number >= n.row_start).unwrap_or(true)
+            nodes
+                .last()
+                .map(|n| row_number >= n.row_start)
+                .unwrap_or(true)
         } {
-            if !self.load_next_segment_inner(nodes) { break; }
+            if !self.load_next_segment_inner(nodes) {
+                break;
+            }
         }
-        if nodes.is_empty() { return None; }
+        if nodes.is_empty() {
+            return None;
+        }
         let (mut lo, mut hi) = (0usize, nodes.len() - 1);
         while lo <= hi {
             let mid = (lo + hi) / 2;
             let n = &nodes[mid];
             if row_number < n.row_start {
-                if mid == 0 { return None; }
+                if mid == 0 {
+                    return None;
+                }
                 hi = mid - 1;
             } else {
                 // TODO: compare with row_end once SegmentBase::count is available

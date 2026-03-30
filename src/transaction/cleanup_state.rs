@@ -15,10 +15,10 @@
 //!
 //! Cleanup 在 `DuckTransactionManager::RemoveTransaction()` 后异步执行（通过 cleanup_queue）。
 
-use super::types::{TransactionId, UndoFlags, ActiveTransactionState};
-use super::commit_state::{IndexDataRemover, IndexRemovalType};
 use super::append_info::AppendInfo;
+use super::commit_state::{IndexDataRemover, IndexRemovalType};
 use super::delete_info::DeleteInfo;
+use super::types::{ActiveTransactionState, TransactionId, UndoFlags};
 
 // ─── CleanupState ──────────────────────────────────────────────────────────────
 
@@ -49,9 +49,9 @@ impl CleanupState {
     pub fn cleanup_entry(&mut self, flags: UndoFlags, payload: &[u8]) {
         match flags {
             UndoFlags::CatalogEntry => self.cleanup_catalog_entry(payload),
-            UndoFlags::DeleteTuple  => self.cleanup_delete(payload),
-            UndoFlags::UpdateTuple  => self.cleanup_update(payload),
-            UndoFlags::Append       => self.cleanup_append(payload),
+            UndoFlags::DeleteTuple => self.cleanup_delete(payload),
+            UndoFlags::UpdateTuple => self.cleanup_update(payload),
+            UndoFlags::Append => self.cleanup_append(payload),
             UndoFlags::SequenceValue | UndoFlags::Attach | UndoFlags::Empty => {}
             _ => {}
         }

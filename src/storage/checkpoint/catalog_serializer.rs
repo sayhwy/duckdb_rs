@@ -3,9 +3,9 @@
 // 对应 C++: duckdb/storage/checkpoint_manager.cpp
 // ============================================================
 
+use super::binary_serializer::BinarySerializer;
 use crate::catalog::{ColumnDefinition, LogicalType, TableCatalogEntry};
 use crate::storage::metadata::{MetaBlockPointer, WriteStream};
-use super::binary_serializer::BinarySerializer;
 
 // ─── DuckDB 枚举值（与 C++ 源码一致）────────────────────────
 
@@ -115,7 +115,11 @@ pub fn write_catalog<W: WriteStream>(
 
 /// 写入 SchemaCatalogEntry
 /// 对应 C++ CheckpointWriter::WriteSchema
-fn write_schema_entry(serializer: &mut BinarySerializer<'_>, catalog_name: &str, schema_name: &str) {
+fn write_schema_entry(
+    serializer: &mut BinarySerializer<'_>,
+    catalog_name: &str,
+    schema_name: &str,
+) {
     // 字段 99: catalog_type (u8)
     serializer.write_u8(99, catalog_type::SCHEMA_ENTRY);
 
@@ -130,17 +134,21 @@ fn write_schema_entry(serializer: &mut BinarySerializer<'_>, catalog_name: &str,
     //       OnObjectEnd() -> write terminator
     //     OnNullableEnd() -> nothing
     //   OnPropertyEnd() -> nothing
-    serializer.begin_nullable_object(100);  // OnPropertyBegin + OnNullableBegin
-    write_create_schema_info(serializer, catalog_name, schema_name);  // OnObjectBegin + Serialize
-    serializer.end_object();  // OnObjectEnd - terminator for CreateSchemaInfo
-    serializer.end_nullable_object();  // OnNullableEnd - nothing
+    serializer.begin_nullable_object(100); // OnPropertyBegin + OnNullableBegin
+    write_create_schema_info(serializer, catalog_name, schema_name); // OnObjectBegin + Serialize
+    serializer.end_object(); // OnObjectEnd - terminator for CreateSchemaInfo
+    serializer.end_nullable_object(); // OnNullableEnd - nothing
 
     // 注意：终止符由 list_write_object 写入（结束整个 schema entry）
 }
 
 /// 写入 CreateSchemaInfo
 /// 对应 C++ CreateSchemaInfo::Serialize (不写终止符)
-fn write_create_schema_info(serializer: &mut BinarySerializer<'_>, catalog_name: &str, schema_name: &str) {
+fn write_create_schema_info(
+    serializer: &mut BinarySerializer<'_>,
+    catalog_name: &str,
+    schema_name: &str,
+) {
     // 对应 C++ OnObjectBegin（BinarySerializer 中不写任何东西）
     serializer.begin_root_object();
 
@@ -300,11 +308,14 @@ fn write_column_definition(serializer: &mut BinarySerializer<'_>, col: &ColumnDe
     // 字段 102: expression - 跳过（生成列表达式，可选）
 
     // 字段 103: category (TableColumnType)
-    serializer.write_u8(103, if col.is_generated() {
-        table_column_type::GENERATED
-    } else {
-        table_column_type::STANDARD
-    });
+    serializer.write_u8(
+        103,
+        if col.is_generated() {
+            table_column_type::GENERATED
+        } else {
+            table_column_type::STANDARD
+        },
+    );
 
     // 字段 104: compression_type
     // DuckDB 在 ColumnDefinition checkpoint 中会显式写出该字段。
@@ -371,7 +382,7 @@ fn write_table_storage_info(
     //   WriteValue(pointer) -> OnObjectBegin (nothing) + Serialize + OnObjectEnd (terminator)
     serializer.write_field_id(101);
     write_meta_block_pointer(serializer, &table_pointer);
-    serializer.write_terminator();  // OnObjectEnd
+    serializer.write_terminator(); // OnObjectEnd
 
     // 字段 102: total_rows
     serializer.write_varint(102, total_rows);

@@ -82,7 +82,11 @@ fn format_bytes(bytes: u64) -> String {
 
 fn print_progress(current: usize, total: usize, elapsed_secs: f64) {
     let pct = current as f64 / total as f64 * 100.0;
-    let rate = if elapsed_secs > 0.0 { current as f64 / elapsed_secs } else { 0.0 };
+    let rate = if elapsed_secs > 0.0 {
+        current as f64 / elapsed_secs
+    } else {
+        0.0
+    };
     let bar_len = 40;
     let filled = (pct / 100.0 * bar_len as f64) as usize;
     let bar: String = "#".repeat(filled) + &".".repeat(bar_len - filled);
@@ -145,7 +149,10 @@ fn main() {
     println!();
 
     // ─── 步骤 2：开启连接，按批次事务插入 100 万条记录 ───────────────────────
-    println!("══ 步骤 2：单连接 + 事务批量插入 {} 条学生记录 ═══════════", TOTAL_STUDENTS);
+    println!(
+        "══ 步骤 2：单连接 + 事务批量插入 {} 条学生记录 ═══════════",
+        TOTAL_STUDENTS
+    );
     let t2 = Instant::now();
 
     // 只创建一个连接，整个写入过程复用
@@ -197,10 +204,20 @@ fn main() {
     // ─── 步骤 3：内存数据验证 ─────────────────────────────────────────────────
     println!("══ 步骤 3：内存数据验证 ══════════════════════════════════════════");
     let t3 = Instant::now();
-    let chunks = db.scan_chunks_silent("students", None).expect("内存扫描失败");
+    let chunks = db
+        .scan_chunks_silent("students", None)
+        .expect("内存扫描失败");
     let total_rows: usize = chunks.iter().map(|c| c.size()).sum();
-    println!("  ✓ 内存读取完成: {} 行，{} 个 Chunk", total_rows, chunks.len());
-    assert_eq!(total_rows, TOTAL_STUDENTS, "行数不匹配！预期 {} 实际 {}", TOTAL_STUDENTS, total_rows);
+    println!(
+        "  ✓ 内存读取完成: {} 行，{} 个 Chunk",
+        total_rows,
+        chunks.len()
+    );
+    assert_eq!(
+        total_rows, TOTAL_STUDENTS,
+        "行数不匹配！预期 {} 实际 {}",
+        TOTAL_STUDENTS, total_rows
+    );
 
     // 边界验证
     let mut all_ids: Vec<i32> = Vec::with_capacity(TOTAL_STUDENTS);
@@ -209,8 +226,17 @@ fn main() {
     }
     all_ids.sort_unstable();
     assert_eq!(all_ids[0], 1, "最小 id 应为 1");
-    assert_eq!(all_ids[TOTAL_STUDENTS - 1], TOTAL_STUDENTS as i32, "最大 id 应为 {}", TOTAL_STUDENTS);
-    println!("  ✓ 边界验证通过: id 范围 [{}, {}]", all_ids[0], all_ids[TOTAL_STUDENTS - 1]);
+    assert_eq!(
+        all_ids[TOTAL_STUDENTS - 1],
+        TOTAL_STUDENTS as i32,
+        "最大 id 应为 {}",
+        TOTAL_STUDENTS
+    );
+    println!(
+        "  ✓ 边界验证通过: id 范围 [{}, {}]",
+        all_ids[0],
+        all_ids[TOTAL_STUDENTS - 1]
+    );
     println!("  ✓ 耗时: {:.3}s", t3.elapsed().as_secs_f64());
     println!();
 
@@ -221,12 +247,20 @@ fn main() {
     db.checkpoint().expect("Checkpoint 失败");
     let db_size_after = std::fs::metadata(DB_PATH).map(|m| m.len()).unwrap_or(0);
     let wal_size_after = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
-    println!("  ✓ Checkpoint 完成! 耗时: {:.3}s", t4.elapsed().as_secs_f64());
-    println!("  .db 文件大小:  {} (增长 {})",
+    println!(
+        "  ✓ Checkpoint 完成! 耗时: {:.3}s",
+        t4.elapsed().as_secs_f64()
+    );
+    println!(
+        "  .db 文件大小:  {} (增长 {})",
         format_bytes(db_size_after),
-        format_bytes(db_size_after.saturating_sub(db_size_before)));
+        format_bytes(db_size_after.saturating_sub(db_size_before))
+    );
     println!("  .wal 文件大小: {}", format_bytes(wal_size_after));
-    assert!(db_size_after > db_size_before, ".db 文件应在 Checkpoint 后增大");
+    assert!(
+        db_size_after > db_size_before,
+        ".db 文件应在 Checkpoint 后增大"
+    );
     println!("  ✓ 数据已持久化到磁盘");
     println!();
 
@@ -243,15 +277,29 @@ fn main() {
     println!();
 
     // ─── 步骤 6：从磁盘完整验证 100 万条记录 ─────────────────────────────────
-    println!("══ 步骤 6：从磁盘完整验证 {} 条记录 ══════════════════════", TOTAL_STUDENTS);
+    println!(
+        "══ 步骤 6：从磁盘完整验证 {} 条记录 ══════════════════════",
+        TOTAL_STUDENTS
+    );
     let t6 = Instant::now();
-    let chunks2 = db2.scan_chunks_silent("students", None).expect("磁盘扫描失败");
+    let chunks2 = db2
+        .scan_chunks_silent("students", None)
+        .expect("磁盘扫描失败");
     let total_after: usize = chunks2.iter().map(|c| c.size()).sum();
     let scan_elapsed = t6.elapsed().as_secs_f64();
-    println!("  ✓ 读取完成: {} 行，{} 个 Chunk，耗时 {:.3}s ({:.0} rows/s)",
-        total_after, chunks2.len(), scan_elapsed, total_after as f64 / scan_elapsed);
+    println!(
+        "  ✓ 读取完成: {} 行，{} 个 Chunk，耗时 {:.3}s ({:.0} rows/s)",
+        total_after,
+        chunks2.len(),
+        scan_elapsed,
+        total_after as f64 / scan_elapsed
+    );
 
-    assert_eq!(total_after, TOTAL_STUDENTS, "磁盘行数不匹配！预期 {} 实际 {}", TOTAL_STUDENTS, total_after);
+    assert_eq!(
+        total_after, TOTAL_STUDENTS,
+        "磁盘行数不匹配！预期 {} 实际 {}",
+        TOTAL_STUDENTS, total_after
+    );
 
     // 数据内容验证
     let mut read_ids: Vec<i32> = Vec::with_capacity(TOTAL_STUDENTS);
@@ -263,7 +311,8 @@ fn main() {
         read_scores.extend(read_i32_column(chunk, 2));
     }
 
-    let mut records: Vec<(i32, i32, i32)> = read_ids.iter()
+    let mut records: Vec<(i32, i32, i32)> = read_ids
+        .iter()
         .zip(read_ages.iter())
         .zip(read_scores.iter())
         .map(|((&id, &age), &score)| (id, age, score))
@@ -277,7 +326,13 @@ fn main() {
         let expected_score = 50 + (expected_id % 50);
         if id != expected_id || age != expected_age || score != expected_score {
             if errors < 5 {
-                eprintln!("  ✗ 数据错误 [行{}]: id={} age={} score={}", idx + 1, id, age, score);
+                eprintln!(
+                    "  ✗ 数据错误 [行{}]: id={} age={} score={}",
+                    idx + 1,
+                    id,
+                    age,
+                    score
+                );
             }
             errors += 1;
         }
@@ -298,8 +353,14 @@ fn main() {
     println!("║  学生记录总数:    {:<42} ║", TOTAL_STUDENTS);
     println!("║  提交事务总数:    {:<42} ║", committed_txns);
     println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║  插入耗时:        {:<42} ║", format!("{:.3}s ({:.0} rows/s)", insert_elapsed, insert_rate));
-    println!("║  总耗时:          {:<42} ║", format!("{:.3}s", total_elapsed));
+    println!(
+        "║  插入耗时:        {:<42} ║",
+        format!("{:.3}s ({:.0} rows/s)", insert_elapsed, insert_rate)
+    );
+    println!(
+        "║  总耗时:          {:<42} ║",
+        format!("{:.3}s", total_elapsed)
+    );
     println!("╠══════════════════════════════════════════════════════════════╣");
     println!("║  ✓ 步骤1: 创建数据库和表              [通过]                ║");
     println!("║  ✓ 步骤2: 单连接事务批量插入 100 万行  [通过]                ║");

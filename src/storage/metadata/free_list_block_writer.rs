@@ -39,10 +39,7 @@ pub struct FreeListBlockWriter<'mgr> {
 
 impl<'mgr> FreeListBlockWriter<'mgr> {
     /// 对应 C++ FreeListBlockWriter(MetadataManager &manager, vector<MetadataHandle> free_list_blocks_p)
-    pub fn new(
-        manager: &'mgr MetadataManager,
-        free_list_blocks: Vec<MetadataHandle>,
-    ) -> Self {
+    pub fn new(manager: &'mgr MetadataManager, free_list_blocks: Vec<MetadataHandle>) -> Self {
         Self {
             manager,
             free_list_blocks,
@@ -59,7 +56,8 @@ impl<'mgr> FreeListBlockWriter<'mgr> {
         if self.offset >= self.capacity {
             self.next_block();
         }
-        self.manager.get_disk_pointer(&self.current_pointer, self.offset as u32)
+        self.manager
+            .get_disk_pointer(&self.current_pointer, self.offset as u32)
     }
 
     /// Flush 当前块
@@ -113,9 +111,7 @@ impl<'mgr> FreeListBlockWriter<'mgr> {
             self.write_to_current(|data| {
                 let base = idx as usize * capacity;
                 if base + 8 <= data.len() {
-                    data[base..base + 8].copy_from_slice(
-                        &new_disk_ptr.block_pointer.to_le_bytes()
-                    );
+                    data[base..base + 8].copy_from_slice(&new_disk_ptr.block_pointer.to_le_bytes());
                 }
             });
         }

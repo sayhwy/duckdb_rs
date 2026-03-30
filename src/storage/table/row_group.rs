@@ -27,24 +27,26 @@ use std::sync::{
 
 use parking_lot::Mutex;
 
-use crate::common::types::{DataChunk, Vector};
-use crate::storage::checkpoint::binary_metadata_deserializer::{
-    BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID,
-};
-use crate::storage::table::column_segment::ColumnSegment;
 use super::append_state::{ColumnAppendState, RowGroupAppendState};
 use super::chunk_info::SelectionVector;
 use super::column_checkpoint_state::PartialBlockManager;
-use super::column_data::{ColumnData, ColumnDataKind, ColumnKindData, PersistentColumnData, PersistentRowGroupData};
+use super::column_data::{
+    ColumnData, ColumnDataKind, ColumnKindData, PersistentColumnData, PersistentRowGroupData,
+};
 use super::column_segment::{SegmentStatistics, UnifiedVectorFormat};
 use super::row_version_manager::RowVersionManager;
 use super::scan_state::{CollectionScanState, ScanFilterInfo};
 use super::segment_base::SegmentBase;
 use super::table_statistics::TableStatistics;
 use super::types::{
-    CompressionType, Idx, LogicalType, MetaBlockPointer, PhysicalType, RowId,
-    TransactionData, TransactionId, STANDARD_VECTOR_SIZE,
+    CompressionType, Idx, LogicalType, MetaBlockPointer, PhysicalType, RowId, STANDARD_VECTOR_SIZE,
+    TransactionData, TransactionId,
 };
+use crate::common::types::{DataChunk, Vector};
+use crate::storage::checkpoint::binary_metadata_deserializer::{
+    BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID,
+};
+use crate::storage::table::column_segment::ColumnSegment;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RowGroupWriteInfo
@@ -263,7 +265,10 @@ impl RowGroup {
                     block_handle,
                 );
                 let segment = Arc::new(segment);
-                column.ctx.data.append_segment(&mut lock, segment, row_start);
+                column
+                    .ctx
+                    .data
+                    .append_segment(&mut lock, segment, row_start);
                 row_start += pointer.tuple_count;
             }
             column.ctx.count.store(row_start, Ordering::Relaxed);
@@ -519,10 +524,9 @@ impl RowGroup {
                 // Fast path: no deletions, no filters — scan the full vector.
                 for (i, &col_id) in column_ids.iter().enumerate() {
                     let col = self.get_column(col_id as usize);
-                    if let (Some(scan), Some(vec)) = (
-                        state.column_scans.get_mut(i),
-                        result.data.get_mut(i),
-                    ) {
+                    if let (Some(scan), Some(vec)) =
+                        (state.column_scans.get_mut(i), result.data.get_mut(i))
+                    {
                         col.scan(transaction, state.vector_index, scan, vec);
                     }
                 }
@@ -538,10 +542,9 @@ impl RowGroup {
                 //    TableFilter down into the column scan here.
                 for (i, &col_id) in column_ids.iter().enumerate() {
                     let col = self.get_column(col_id as usize);
-                    if let (Some(scan), Some(vec)) = (
-                        state.column_scans.get_mut(i),
-                        result.data.get_mut(i),
-                    ) {
+                    if let (Some(scan), Some(vec)) =
+                        (state.column_scans.get_mut(i), result.data.get_mut(i))
+                    {
                         col.scan(transaction, state.vector_index, scan, vec);
 
                         // Apply the MVCC visibility selection: compact out invisible rows.
@@ -608,7 +611,9 @@ impl RowGroup {
         let col_count = self.get_column_count();
 
         // Resize (or truncate) the per-column cursor vector to match.
-        state.states.resize_with(col_count, ColumnAppendState::default);
+        state
+            .states
+            .resize_with(col_count, ColumnAppendState::default);
 
         // Initialise each column's append cursor.
         //
@@ -674,8 +679,12 @@ impl RowGroup {
     }
 
     pub fn append_version_info(&self, transaction: TransactionData, count: Idx) {
-        self.get_or_create_version_info()
-            .append_version_info(transaction, count, self.row_start, self.row_end());
+        self.get_or_create_version_info().append_version_info(
+            transaction,
+            count,
+            self.row_start,
+            self.row_end(),
+        );
         self.has_changes.store(true, Ordering::Relaxed);
     }
 
@@ -686,7 +695,8 @@ impl RowGroup {
     }
 
     pub fn revert_append(&self, new_count: Idx) {
-        self.count.store(new_count - self.row_start, Ordering::SeqCst);
+        self.count
+            .store(new_count - self.row_start, Ordering::SeqCst);
         if let Some(vi) = self.get_version_info() {
             vi.revert_append(new_count - self.row_start);
         }
@@ -847,8 +857,7 @@ impl RowGroup {
         // Build the result row group with checkpointed columns and shared version info.
         // C++: `result_row_group->columns = std::move(result_columns);`
         //      `result_row_group->version_info = row_group.version_info.load();`
-        let is_loaded: Vec<AtomicBool> =
-            (0..col_count).map(|_| AtomicBool::new(true)).collect();
+        let is_loaded: Vec<AtomicBool> = (0..col_count).map(|_| AtomicBool::new(true)).collect();
 
         let result_rg = Arc::new(RowGroup {
             count: AtomicU64::new(self.count()),
@@ -946,21 +955,21 @@ impl RowGroup {
 fn logical_type_id_to_physical(id: crate::common::types::LogicalTypeId) -> PhysicalType {
     use crate::common::types::LogicalTypeId::*;
     match id {
-        Boolean  => PhysicalType::Bool,
-        TinyInt  => PhysicalType::Int8,
+        Boolean => PhysicalType::Bool,
+        TinyInt => PhysicalType::Int8,
         SmallInt => PhysicalType::Int16,
-        Integer  => PhysicalType::Int32,
+        Integer => PhysicalType::Int32,
         // BigInt, Date (days since epoch as i64), Time (μs as i64), Timestamp (μs as i64)
         BigInt | Date | Time | Timestamp => PhysicalType::Int64,
-        HugeInt  => PhysicalType::Int128,
-        Float    => PhysicalType::Float,
-        Double   => PhysicalType::Double,
-        Varchar  => PhysicalType::VarChar,
-        List     => PhysicalType::List,
+        HugeInt => PhysicalType::Int128,
+        Float => PhysicalType::Float,
+        Double => PhysicalType::Double,
+        Varchar => PhysicalType::VarChar,
+        List => PhysicalType::List,
         Struct | Map => PhysicalType::Struct,
         // Validity bitmask columns are stored as arrays of uint8.
         Validity => PhysicalType::Uint8,
-        _        => PhysicalType::Invalid,
+        _ => PhysicalType::Invalid,
     }
 }
 
@@ -995,24 +1004,33 @@ fn serialize_column_to_persistent(
             // Validity columns are leaf nodes — no children.
             vec![]
         }
-        ColumnKindData::List { validity, child_column } => {
+        ColumnKindData::List {
+            validity,
+            child_column,
+        } => {
             // List<T>: [validity, child_data]
             vec![
                 serialize_column_to_persistent(validity, &validity_type),
                 serialize_column_to_persistent(child_column, logical_type),
             ]
         }
-        ColumnKindData::Array { validity, child_column, .. } => {
+        ColumnKindData::Array {
+            validity,
+            child_column,
+            ..
+        } => {
             // Array<T, N>: [validity, child_data]
             vec![
                 serialize_column_to_persistent(validity, &validity_type),
                 serialize_column_to_persistent(child_column, logical_type),
             ]
         }
-        ColumnKindData::Struct { validity, sub_columns } => {
+        ColumnKindData::Struct {
+            validity,
+            sub_columns,
+        } => {
             // Struct(a T1, b T2, …): [validity, field_0, field_1, …]
-            let mut children =
-                vec![serialize_column_to_persistent(validity, &validity_type)];
+            let mut children = vec![serialize_column_to_persistent(validity, &validity_type)];
             children.extend(
                 sub_columns
                     .iter()
@@ -1020,7 +1038,10 @@ fn serialize_column_to_persistent(
             );
             children
         }
-        ColumnKindData::Variant { validity, sub_columns } => {
+        ColumnKindData::Variant {
+            validity,
+            sub_columns,
+        } => {
             // Variant / semi-structured: [validity?, unshredded, shredded?]
             let mut children = validity
                 .as_ref()

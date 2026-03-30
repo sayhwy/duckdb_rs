@@ -38,7 +38,8 @@ use super::scan_state::ColumnScanState;
 use super::segment_base::SegmentBase;
 use super::table_statistics::TableStatistics;
 use super::types::{
-    CompressionType, DataPointer, Idx, LogicalType, PhysicalType, TransactionData, STANDARD_VECTOR_SIZE,
+    CompressionType, DataPointer, Idx, LogicalType, PhysicalType, STANDARD_VECTOR_SIZE,
+    TransactionData,
 };
 use super::update_segment::UpdateSegment;
 use crate::common::types::{LogicalTypeId, Vector};
@@ -313,8 +314,9 @@ impl ColumnDataContext {
         if !state.initialized {
             let (seg_arc, row_start) = {
                 let lock = self.data.lock();
-                let idx = state.current_segment_index
-                    .expect("begin_scan_vector_internal: state not initialised via initialize_scan");
+                let idx = state.current_segment_index.expect(
+                    "begin_scan_vector_internal: state not initialised via initialize_scan",
+                );
                 let node = &lock.0[idx];
                 (node.arc(), node.row_start())
             };
@@ -435,10 +437,12 @@ impl ColumnDataContext {
                 state.offset_in_column >= current_start
                     && state.offset_in_column <= current_start + current_count,
                 "offset {} outside segment [{}, {})",
-                state.offset_in_column, current_start, current_start + current_count
+                state.offset_in_column,
+                current_start,
+                current_start + current_count
             );
 
-            let scan_count   = remaining.min(current_start + current_count - state.offset_in_column);
+            let scan_count = remaining.min(current_start + current_count - state.offset_in_column);
             let result_offset = base_result_offset + (initial_remaining - remaining);
 
             if scan_count > 0 {
@@ -454,7 +458,11 @@ impl ColumnDataContext {
                     let curr_idx = state.current_segment_index.unwrap();
                     let next_idx = curr_idx + 1;
                     if next_idx < lock.0.len() {
-                        Some((lock.0[next_idx].index(), lock.0[next_idx].row_start(), lock.0[next_idx].arc()))
+                        Some((
+                            lock.0[next_idx].index(),
+                            lock.0[next_idx].row_start(),
+                            lock.0[next_idx].arc(),
+                        ))
                     } else {
                         None
                     }
@@ -537,7 +545,8 @@ impl ColumnDataContext {
             segment_size,
             compression,
         ));
-        self.allocation_size.fetch_add(segment_size, Ordering::Relaxed);
+        self.allocation_size
+            .fetch_add(segment_size, Ordering::Relaxed);
         let mut lock = self.data.lock();
         self.data.append_segment(&mut lock, seg, start_row);
     }
@@ -616,10 +625,10 @@ impl ColumnDataContext {
             // C++: `auto &append_segment = state.current->GetNode();`
             let seg_arc = {
                 let lock = self.data.lock();
-                let idx = state
-                    .current_segment_index
-                    .expect("append_data: ColumnAppendState not initialised; \
-                             call initialize_append() first");
+                let idx = state.current_segment_index.expect(
+                    "append_data: ColumnAppendState not initialised; \
+                             call initialize_append() first",
+                );
                 lock.0[idx].arc()
             };
 
@@ -672,7 +681,10 @@ impl ColumnDataContext {
             let new_seg_arc = {
                 let lock = self.data.lock();
                 // C++: state.current = data.GetLastSegment(l);
-                let last = lock.0.last().expect("segment list must be non-empty after append");
+                let last = lock
+                    .0
+                    .last()
+                    .expect("segment list must be non-empty after append");
                 state.current_segment_index = Some(last.index());
                 last.arc()
             };
@@ -681,7 +693,7 @@ impl ColumnDataContext {
             new_seg_arc.initialize_append(state);
 
             // Advance input cursor.
-            offset    += copied_elements;
+            offset += copied_elements;
             remaining -= copied_elements;
         }
     }
@@ -703,9 +715,10 @@ impl ColumnDataContext {
     /// C++: `ColumnData::HasChanges` / `HasAnyChanges`.
     pub fn has_any_changes(&self) -> bool {
         let lock = self.data.lock();
-        let transient = lock.0.iter().any(|n| {
-            n.node().segment_type == ColumnSegmentType::Transient
-        });
+        let transient = lock
+            .0
+            .iter()
+            .any(|n| n.node().segment_type == ColumnSegmentType::Transient);
         transient || self.updates.lock().is_some()
     }
 
@@ -724,7 +737,9 @@ impl ColumnDataContext {
     /// C++: `ColumnData::IsPersistent`.
     pub fn is_persistent(&self) -> bool {
         let lock = self.data.lock();
-        lock.0.iter().all(|n| n.node().segment_type == ColumnSegmentType::Persistent)
+        lock.0
+            .iter()
+            .all(|n| n.node().segment_type == ColumnSegmentType::Persistent)
     }
 
     /// Collect `DataPointer`s for all column segments.
@@ -733,17 +748,20 @@ impl ColumnDataContext {
     pub fn get_data_pointers(&self) -> Vec<DataPointer> {
         let lock = self.data.lock();
         let mut row_start = 0u64;
-        lock.0.iter().map(|n| {
-            let seg = n.node();
-            let dp = DataPointer {
-                block_id: seg.block_id,
-                offset: seg.block_offset as u32, // C++: block_pointer.offset (u32)
-                row_start,
-                tuple_count: seg.count(),
-            };
-            row_start += seg.count();
-            dp
-        }).collect()
+        lock.0
+            .iter()
+            .map(|n| {
+                let seg = n.node();
+                let dp = DataPointer {
+                    block_id: seg.block_id,
+                    offset: seg.block_offset as u32, // C++: block_pointer.offset (u32)
+                    row_start,
+                    tuple_count: seg.count(),
+                };
+                row_start += seg.count();
+                dp
+            })
+            .collect()
     }
 
     /// Visits every segment in order together with its row start.
@@ -846,7 +864,9 @@ impl ColumnDataKind {
 
         Arc::new(ColumnDataKind {
             ctx: ColumnDataContext::new(info, column_index, logical_type, data_type, has_parent),
-            kind: ColumnKindData::Standard { validity: Some(validity) },
+            kind: ColumnKindData::Standard {
+                validity: Some(validity),
+            },
         })
     }
 
@@ -860,7 +880,9 @@ impl ColumnDataKind {
             ctx: ColumnDataContext::new(
                 info,
                 column_index,
-                LogicalType { id: LogicalTypeId::Validity },
+                LogicalType {
+                    id: LogicalTypeId::Validity,
+                },
                 data_type,
                 true, // validity columns always have a parent
             ),
@@ -944,21 +966,31 @@ impl ColumnDataKind {
                     v.initialize_append(&mut state.child_appends[0]);
                 }
             }
-            ColumnKindData::List { child_column, validity } => {
+            ColumnKindData::List {
+                child_column,
+                validity,
+            } => {
                 while state.child_appends.len() < 2 {
                     state.child_appends.push(ColumnAppendState::default());
                 }
                 validity.initialize_append(&mut state.child_appends[0]);
                 child_column.initialize_append(&mut state.child_appends[1]);
             }
-            ColumnKindData::Array { child_column, validity, .. } => {
+            ColumnKindData::Array {
+                child_column,
+                validity,
+                ..
+            } => {
                 while state.child_appends.len() < 2 {
                     state.child_appends.push(ColumnAppendState::default());
                 }
                 validity.initialize_append(&mut state.child_appends[0]);
                 child_column.initialize_append(&mut state.child_appends[1]);
             }
-            ColumnKindData::Struct { sub_columns, validity } => {
+            ColumnKindData::Struct {
+                sub_columns,
+                validity,
+            } => {
                 let n = sub_columns.len() + 1;
                 while state.child_appends.len() < n {
                     state.child_appends.push(ColumnAppendState::default());
@@ -968,7 +1000,10 @@ impl ColumnDataKind {
                     col.initialize_append(&mut state.child_appends[i + 1]);
                 }
             }
-            ColumnKindData::Variant { sub_columns, validity } => {
+            ColumnKindData::Variant {
+                sub_columns,
+                validity,
+            } => {
                 let n = sub_columns.len() + validity.is_some() as usize;
                 while state.child_appends.len() < n {
                     state.child_appends.push(ColumnAppendState::default());
@@ -1001,50 +1036,109 @@ impl ColumnDataKind {
         append_count: Idx,
     ) {
         // Append to main column
-        self.ctx.append_data(append_stats, state, vdata, append_count);
+        self.ctx
+            .append_data(append_stats, state, vdata, append_count);
 
         // Append to child columns (validity, etc.)
         match &self.kind {
             ColumnKindData::Standard { validity } => {
                 if let Some(v) = validity {
                     if !state.child_appends.is_empty() {
-                        v.append(append_stats, &mut state.child_appends[0], vdata, append_count);
+                        v.append(
+                            append_stats,
+                            &mut state.child_appends[0],
+                            vdata,
+                            append_count,
+                        );
                     }
                 }
             }
-            ColumnKindData::List { child_column, validity } => {
+            ColumnKindData::List {
+                child_column,
+                validity,
+            } => {
                 if state.child_appends.len() >= 2 {
-                    validity.append(append_stats, &mut state.child_appends[0], vdata, append_count);
-                    child_column.append(append_stats, &mut state.child_appends[1], vdata, append_count);
+                    validity.append(
+                        append_stats,
+                        &mut state.child_appends[0],
+                        vdata,
+                        append_count,
+                    );
+                    child_column.append(
+                        append_stats,
+                        &mut state.child_appends[1],
+                        vdata,
+                        append_count,
+                    );
                 }
             }
-            ColumnKindData::Array { child_column, validity, .. } => {
+            ColumnKindData::Array {
+                child_column,
+                validity,
+                ..
+            } => {
                 if state.child_appends.len() >= 2 {
-                    validity.append(append_stats, &mut state.child_appends[0], vdata, append_count);
-                    child_column.append(append_stats, &mut state.child_appends[1], vdata, append_count);
+                    validity.append(
+                        append_stats,
+                        &mut state.child_appends[0],
+                        vdata,
+                        append_count,
+                    );
+                    child_column.append(
+                        append_stats,
+                        &mut state.child_appends[1],
+                        vdata,
+                        append_count,
+                    );
                 }
             }
-            ColumnKindData::Struct { sub_columns, validity } => {
+            ColumnKindData::Struct {
+                sub_columns,
+                validity,
+            } => {
                 if !state.child_appends.is_empty() {
-                    validity.append(append_stats, &mut state.child_appends[0], vdata, append_count);
+                    validity.append(
+                        append_stats,
+                        &mut state.child_appends[0],
+                        vdata,
+                        append_count,
+                    );
                     for (i, col) in sub_columns.iter().enumerate() {
                         if i + 1 < state.child_appends.len() {
-                            col.append(append_stats, &mut state.child_appends[i + 1], vdata, append_count);
+                            col.append(
+                                append_stats,
+                                &mut state.child_appends[i + 1],
+                                vdata,
+                                append_count,
+                            );
                         }
                     }
                 }
             }
-            ColumnKindData::Variant { sub_columns, validity } => {
+            ColumnKindData::Variant {
+                sub_columns,
+                validity,
+            } => {
                 let mut idx = 0;
                 if let Some(v) = validity {
                     if idx < state.child_appends.len() {
-                        v.append(append_stats, &mut state.child_appends[idx], vdata, append_count);
+                        v.append(
+                            append_stats,
+                            &mut state.child_appends[idx],
+                            vdata,
+                            append_count,
+                        );
                     }
                     idx += 1;
                 }
                 for col in sub_columns {
                     if idx < state.child_appends.len() {
-                        col.append(append_stats, &mut state.child_appends[idx], vdata, append_count);
+                        col.append(
+                            append_stats,
+                            &mut state.child_appends[idx],
+                            vdata,
+                            append_count,
+                        );
                     }
                     idx += 1;
                 }
@@ -1081,7 +1175,8 @@ impl ColumnDataKind {
         let target_count = self.ctx.get_vector_count(vector_index);
         // Determine scan type based on whether we need to scan across segments
         let scan_type = self.ctx.get_vector_scan_type(state, target_count);
-        self.ctx.scan_vector(state, result, target_count, scan_type, 0)
+        self.ctx
+            .scan_vector(state, result, target_count, scan_type, 0)
     }
 
     /// Advance the scan cursor by one vector without producing output.
@@ -1207,7 +1302,9 @@ pub struct PersistentCollectionData {
 
 impl PersistentCollectionData {
     pub fn new() -> Self {
-        PersistentCollectionData { row_group_data: Vec::new() }
+        PersistentCollectionData {
+            row_group_data: Vec::new(),
+        }
     }
 
     /// `true` if any row group has uncommitted updates.

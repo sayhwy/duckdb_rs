@@ -41,10 +41,10 @@
 //! ```
 
 // ── 基础层 ────────────────────────────────────────────────────────────────────
-pub mod types;
 pub mod segment_base;
 pub mod segment_lock;
 pub mod segment_tree;
+pub mod types;
 
 // ── 列段层 ────────────────────────────────────────────────────────────────────
 pub mod chunk_info;
@@ -53,13 +53,13 @@ pub mod column_segment_tree;
 pub mod update_segment;
 
 // ── 列数据层 ──────────────────────────────────────────────────────────────────
-pub mod column_data;
-pub mod standard_column_data;
-pub mod validity_column_data;
-pub mod list_column_data;
-pub mod struct_column_data;
 pub mod array_column_data;
+pub mod column_data;
+pub mod list_column_data;
 pub mod row_id_column_data;
+pub mod standard_column_data;
+pub mod struct_column_data;
+pub mod validity_column_data;
 pub mod variant_column_data;
 
 // ── Checkpoint 层 ─────────────────────────────────────────────────────────────
@@ -68,24 +68,24 @@ pub mod column_data_checkpointer;
 pub mod persistent_table_data;
 
 // ── 索引 / 元数据层 ───────────────────────────────────────────────────────────
-pub mod table_index_list;
 pub mod data_table_info;
+pub mod table_index_list;
 
 // ── MVCC 层 ───────────────────────────────────────────────────────────────────
 pub mod row_version_manager;
 pub mod table_statistics;
 
 // ── 操作状态层 ────────────────────────────────────────────────────────────────
-pub mod delete_state;
-pub mod update_state;
-pub mod scan_state;
 pub mod append_state;
+pub mod delete_state;
+pub mod scan_state;
+pub mod update_state;
 
 // ── RowGroup 层 ───────────────────────────────────────────────────────────────
-pub mod row_group_segment_tree;
-pub mod row_group_reorderer;
 pub mod row_group;
 pub mod row_group_collection;
+pub mod row_group_reorderer;
+pub mod row_group_segment_tree;
 
 // ── Checkpoint 高层 ───────────────────────────────────────────────────────────
 pub mod in_memory_checkpoint;

@@ -27,19 +27,19 @@
 //
 // ============================================================
 
+use parking_lot::{Mutex, MutexGuard};
 use std::collections::HashMap;
 use std::sync::{Arc, atomic::Ordering};
-use parking_lot::{Mutex, MutexGuard};
 
 use crate::storage::buffer::{
-    BlockHandle, BlockId, BufferHandle, MemoryTag, INVALID_BLOCK, MAXIMUM_BLOCK,
+    BlockHandle, BlockId, BufferHandle, INVALID_BLOCK, MAXIMUM_BLOCK, MemoryTag,
 };
 use crate::storage::buffer::{BlockManager, BufferManager};
 
 use super::metadata_block::MetadataBlock;
 use super::types::{
-    BlockPointer, MetaBlockPointer, MetadataBlockInfo, MetadataHandle, MetadataPointer,
-    ReadStream, WriteStream,
+    BlockPointer, MetaBlockPointer, MetadataBlockInfo, MetadataHandle, MetadataPointer, ReadStream,
+    WriteStream,
 };
 
 // ─── MetadataManager 常量 ─────────────────────────────────────
@@ -126,7 +126,9 @@ impl MetadataManager {
         // Phase 1：找有空闲子块的块
         let free_block_id: Option<BlockId> = {
             let guard = self.inner.lock();
-            guard.blocks.iter()
+            guard
+                .blocks
+                .iter()
                 .find(|(_, b)| !b.free_blocks.is_empty())
                 .map(|(&id, _)| id)
         };
@@ -154,7 +156,9 @@ impl MetadataManager {
         // 磁盘块转换只在从现有文件加载时需要
 
         let mut guard = self.inner.lock();
-        let block = guard.blocks.get_mut(&block_id)
+        let block = guard
+            .blocks
+            .get_mut(&block_id)
             .expect("MetadataBlock not found after allocation");
         block.dirty.store(true, Ordering::Relaxed);
         debug_assert!(!block.free_blocks.is_empty());
@@ -169,11 +173,15 @@ impl MetadataManager {
 
         let block_handle: Arc<BlockHandle> = {
             let guard = self.inner.lock();
-            let block = guard.blocks.get(&(pointer.block_index as BlockId))
-                .unwrap_or_else(|| panic!(
-                    "MetadataManager::pin: block {} not found",
-                    pointer.block_index
-                ));
+            let block = guard
+                .blocks
+                .get(&(pointer.block_index as BlockId))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "MetadataManager::pin: block {} not found",
+                        pointer.block_index
+                    )
+                });
             // debug: verify not in free list
             #[cfg(debug_assertions)]
             {
@@ -201,9 +209,12 @@ impl MetadataManager {
     /// 将内存 MetadataPointer + byte offset 编码为磁盘 MetaBlockPointer。
     pub fn get_disk_pointer(&self, pointer: &MetadataPointer, offset: u32) -> MetaBlockPointer {
         // block_pointer = block_index(56位) | (sub_index(8位) << 56)
-        let block_pointer = (pointer.block_index & !(0xFFu64 << 56))
-            | ((pointer.index as u64) << 56);
-        MetaBlockPointer { block_pointer, offset }
+        let block_pointer =
+            (pointer.block_index & !(0xFFu64 << 56)) | ((pointer.index as u64) << 56);
+        MetaBlockPointer {
+            block_pointer,
+            offset,
+        }
     }
 
     /// 对应 C++ MetadataManager::FromDiskPointer(MetaBlockPointer)
@@ -245,7 +256,10 @@ impl MetadataManager {
     // ─── BlockPointer ↔ MetaBlockPointer 转换（静态方法）──────
 
     /// 对应 C++ MetadataManager::ToBlockPointer(MetaBlockPointer, idx_t metadata_block_size)
-    pub fn to_block_pointer(meta_pointer: MetaBlockPointer, metadata_block_size: usize) -> BlockPointer {
+    pub fn to_block_pointer(
+        meta_pointer: MetaBlockPointer,
+        metadata_block_size: usize,
+    ) -> BlockPointer {
         let block_id = meta_pointer.get_block_id();
         let block_index = meta_pointer.get_block_index() as u32;
         let offset = block_index * metadata_block_size as u32 + meta_pointer.offset;
@@ -279,8 +293,10 @@ impl MetadataManager {
 
     /// 对应 C++ MetadataManager::GetBlocks()
     pub fn get_blocks(&self) -> Vec<Arc<BlockHandle>> {
-        self.inner.lock()
-            .blocks.values()
+        self.inner
+            .lock()
+            .blocks
+            .values()
             .filter_map(|b| b.block.clone())
             .collect()
     }
@@ -288,15 +304,19 @@ impl MetadataManager {
     /// 对应 C++ MetadataManager::GetMetadataInfo()
     pub fn get_metadata_info(&self) -> Vec<MetadataBlockInfo> {
         let guard = self.inner.lock();
-        let mut result: Vec<MetadataBlockInfo> = guard.blocks.values().map(|b| {
-            let mut free_list = b.free_blocks.clone();
-            free_list.sort_unstable();
-            MetadataBlockInfo {
-                block_id:     b.block_id,
-                total_blocks: METADATA_BLOCK_COUNT,
-                free_list,
-            }
-        }).collect();
+        let mut result: Vec<MetadataBlockInfo> = guard
+            .blocks
+            .values()
+            .map(|b| {
+                let mut free_list = b.free_blocks.clone();
+                free_list.sort_unstable();
+                MetadataBlockInfo {
+                    block_id: b.block_id,
+                    total_blocks: METADATA_BLOCK_COUNT,
+                    free_list,
+                }
+            })
+            .collect();
         result.sort_by_key(|info| info.block_id);
         result
     }
@@ -348,7 +368,9 @@ impl MetadataManager {
         // 快照所有需要 flush 的块（不持锁执行 I/O）
         let to_flush: Vec<(BlockId, Arc<BlockHandle>)> = {
             let guard = self.inner.lock();
-            guard.blocks.iter()
+            guard
+                .blocks
+                .iter()
                 .filter(|(_, b)| b.dirty.load(Ordering::Relaxed))
                 .filter_map(|(&id, b)| b.block.clone().map(|h| (id, h)))
                 .collect()
@@ -368,7 +390,9 @@ impl MetadataManager {
 
             if block_handle.block_id >= MAXIMUM_BLOCK {
                 // 临时块 → 转换为持久化块
-                let new_block = self.block_manager.convert_to_persistent(block_id, Arc::clone(&block_handle));
+                let new_block = self
+                    .block_manager
+                    .convert_to_persistent(block_id, Arc::clone(&block_handle));
                 let mut guard = self.inner.lock();
                 if let Some(entry) = guard.blocks.get_mut(&block_id) {
                     entry.block = Some(new_block);
@@ -401,7 +425,8 @@ impl MetadataManager {
     pub fn mark_blocks_as_modified(&self) {
         let mut guard = self.inner.lock();
 
-        let modified: Vec<(BlockId, u64)> = guard.modified_blocks
+        let modified: Vec<(BlockId, u64)> = guard
+            .modified_blocks
             .iter()
             .map(|(&id, &mask)| (id, mask))
             .collect();
@@ -427,7 +452,9 @@ impl MetadataManager {
         guard.modified_blocks.clear();
 
         // 重新快照当前"已占用"位图
-        let occupied: Vec<(BlockId, u64)> = guard.blocks.iter()
+        let occupied: Vec<(BlockId, u64)> = guard
+            .blocks
+            .iter()
             .map(|(&id, b)| (id, !b.free_blocks_to_integer()))
             .collect();
         for (id, mask) in occupied {
@@ -446,10 +473,9 @@ impl MetadataManager {
         for ptr in pointers {
             let block_id = ptr.get_block_id();
             let block_index = ptr.get_block_index() as u64;
-            let entry = guard.modified_blocks.get_mut(&block_id)
-                .unwrap_or_else(|| panic!(
-                    "ClearModifiedBlocks: block {block_id} not in modified_blocks"
-                ));
+            let entry = guard.modified_blocks.get_mut(&block_id).unwrap_or_else(|| {
+                panic!("ClearModifiedBlocks: block {block_id} not in modified_blocks")
+            });
             *entry &= !(1u64 << block_index);
         }
     }
@@ -459,10 +485,9 @@ impl MetadataManager {
         let guard = self.inner.lock();
         let block_id = ptr.get_block_id();
         let block_index = ptr.get_block_index() as u64;
-        let &modified_list = guard.modified_blocks.get(&block_id)
-            .unwrap_or_else(|| panic!(
-                "BlockHasBeenCleared: block {block_id} not in modified_blocks"
-            ));
+        let &modified_list = guard.modified_blocks.get(&block_id).unwrap_or_else(|| {
+            panic!("BlockHasBeenCleared: block {block_id} not in modified_blocks")
+        });
         (modified_list & (1u64 << block_index)) == 0
     }
 
@@ -485,11 +510,9 @@ impl MetadataManager {
         let new_block_id = self.get_next_block_id();
 
         // 分配临时内存块（不持锁）
-        let block_handle = self.buffer_manager.allocate_memory(
-            MemoryTag::Metadata,
-            None,
-            false,
-        );
+        let block_handle = self
+            .buffer_manager
+            .allocate_memory(MemoryTag::Metadata, None, false);
 
         // 零初始化（对应 C++ memset(handle.Ptr(), 0, block_manager.GetBlockSize())）
         let bh = self.buffer_manager.pin(Arc::clone(&block_handle));
@@ -534,8 +557,14 @@ impl MetadataManager {
     ///     本方法内部自行 lock/unlock，完成后调用方重新 lock。
     ///   因此本方法不接受 guard 参数，使用内部锁。
     fn add_and_register_block(&self, mut block: MetadataBlock) {
-        assert!(block.block.is_none(), "add_and_register_block: block already has a handle");
-        assert!(block.block_id < MAXIMUM_BLOCK, "add_and_register_block: transient block_id");
+        assert!(
+            block.block.is_none(),
+            "add_and_register_block: block already has a handle"
+        );
+        assert!(
+            block.block_id < MAXIMUM_BLOCK,
+            "add_and_register_block: transient block_id"
+        );
 
         let block_id = block.block_id;
         // 不持锁执行 I/O（对应 C++ 中 block_lock.unlock()）
@@ -557,7 +586,9 @@ impl MetadataManager {
     fn convert_to_transient(&self, block_id: BlockId) {
         let old_block_handle: Arc<BlockHandle> = {
             let guard = self.inner.lock();
-            guard.blocks.get(&block_id)
+            guard
+                .blocks
+                .get(&block_id)
                 .and_then(|b| b.block.clone())
                 .unwrap_or_else(|| panic!("convert_to_transient: block {block_id} not found"))
         }; // guard 释放
@@ -566,11 +597,9 @@ impl MetadataManager {
         let old_buf: BufferHandle = self.buffer_manager.pin(Arc::clone(&old_block_handle));
 
         // 分配新临时内存块
-        let new_handle: Arc<BlockHandle> = self.buffer_manager.allocate_memory(
-            MemoryTag::Metadata,
-            None,
-            false,
-        );
+        let new_handle: Arc<BlockHandle> =
+            self.buffer_manager
+                .allocate_memory(MemoryTag::Metadata, None, false);
         let new_buf: BufferHandle = self.buffer_manager.pin(Arc::clone(&new_handle));
 
         // 拷贝数据

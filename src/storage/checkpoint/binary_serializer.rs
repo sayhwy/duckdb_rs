@@ -87,7 +87,7 @@ impl<'a> BinarySerializer<'a> {
     /// 对应 C++ BinarySerializer::WriteValue(uint8_t) -> VarIntEncode
     pub fn write_u8(&mut self, field_id: u16, value: u8) {
         self.write_field_id(field_id);
-        self.write_varint_raw(value as u64);  // DuckDB uses varint for u8!
+        self.write_varint_raw(value as u64); // DuckDB uses varint for u8!
     }
 
     /// 写入 varint 属性

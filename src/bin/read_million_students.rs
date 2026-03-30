@@ -74,7 +74,11 @@ fn main() {
 
     // 验证边界值
     assert_eq!(*all_ids.first().unwrap(), 1, "最小 id 应该是 1");
-    assert_eq!(*all_ids.last().unwrap(), 1_000_000, "最大 id 应该是 1,000,000");
+    assert_eq!(
+        *all_ids.last().unwrap(),
+        1_000_000,
+        "最大 id 应该是 1,000,000"
+    );
     assert_eq!(all_ids.len(), 1_000_000, "应该有 1,000,000 行数据");
     println!("  ✓ id 列验证通过");
 
@@ -83,9 +87,19 @@ fn main() {
     for chunk in &chunks {
         all_ages.extend(read_i32_column(chunk, 1));
     }
-    println!("  age 列范围: {} - {}", all_ages.iter().min().unwrap_or(&0), all_ages.iter().max().unwrap_or(&0));
-    assert!(*all_ages.iter().min().unwrap() >= 18, "age 最小值应该 >= 18");
-    assert!(*all_ages.iter().max().unwrap() <= 27, "age 最大值应该 <= 27");
+    println!(
+        "  age 列范围: {} - {}",
+        all_ages.iter().min().unwrap_or(&0),
+        all_ages.iter().max().unwrap_or(&0)
+    );
+    assert!(
+        *all_ages.iter().min().unwrap() >= 18,
+        "age 最小值应该 >= 18"
+    );
+    assert!(
+        *all_ages.iter().max().unwrap() <= 27,
+        "age 最大值应该 <= 27"
+    );
     println!("  ✓ age 列验证通过");
 
     // 验证 score 列 (50 + id % 50)
@@ -93,15 +107,27 @@ fn main() {
     for chunk in &chunks {
         all_scores.extend(read_i32_column(chunk, 2));
     }
-    println!("  score 列范围: {} - {}", all_scores.iter().min().unwrap_or(&0), all_scores.iter().max().unwrap_or(&0));
-    assert!(*all_scores.iter().min().unwrap() >= 50, "score 最小值应该 >= 50");
-    assert!(*all_scores.iter().max().unwrap() <= 99, "score 最大值应该 <= 99");
+    println!(
+        "  score 列范围: {} - {}",
+        all_scores.iter().min().unwrap_or(&0),
+        all_scores.iter().max().unwrap_or(&0)
+    );
+    assert!(
+        *all_scores.iter().min().unwrap() >= 50,
+        "score 最小值应该 >= 50"
+    );
+    assert!(
+        *all_scores.iter().max().unwrap() <= 99,
+        "score 最大值应该 <= 99"
+    );
     println!("  ✓ score 列验证通过");
     println!();
 
     // ─── 步骤 5：只读取指定列 ─────────────────────────────────────────────────
     println!("步骤 5：只读取 id 和 score 列");
-    let chunks_partial = db.scan_chunks_silent("students", Some(vec![0, 2])).expect("scan_chunks 失败");
+    let chunks_partial = db
+        .scan_chunks_silent("students", Some(vec![0, 2]))
+        .expect("scan_chunks 失败");
 
     let partial_rows: usize = chunks_partial.iter().map(|c| c.size()).sum();
     println!("  读取到 {} 行 (只包含 id 和 score)", partial_rows);
@@ -113,7 +139,11 @@ fn main() {
         partial_ids.extend(read_i32_column(chunk, 0));
         partial_scores.extend(read_i32_column(chunk, 1)); // 注意：这里是索引1，因为只选择了2列
     }
-    assert_eq!(partial_ids.len(), 1_000_000, "部分列读取应该也有 1,000,000 行");
+    assert_eq!(
+        partial_ids.len(),
+        1_000_000,
+        "部分列读取应该也有 1,000,000 行"
+    );
     assert_eq!(partial_scores.len(), 1_000_000, "score 列数量应该匹配");
     println!("  ✓ 部分列读取验证通过");
     println!();

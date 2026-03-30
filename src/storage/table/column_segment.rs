@@ -335,10 +335,8 @@ impl ColumnSegment {
             ColumnSegmentType::Persistent => {
                 // Pin through BufferManager so the memory reservation and
                 // reader lifecycle match DuckDB's block pool behavior.
-                state.pinned_buffer = self
-                    .block_handle
-                    .as_ref()
-                    .map(|handle: &Arc<BlockHandle>| {
+                state.pinned_buffer =
+                    self.block_handle.as_ref().map(|handle: &Arc<BlockHandle>| {
                         handle.block_manager.buffer_manager().pin(handle.clone())
                     });
             }
@@ -377,24 +375,21 @@ impl ColumnSegment {
     /// - **Transient**: copies `scan_count * type_size` bytes from `self.buffer`.
     /// - **Persistent**: copies from `state.pinned_buffer` (the pinned block
     ///   payload), starting at `self.block_offset + position_in_segment * type_size`.
-    fn scan_vector_internal(
-        &self,
-        state: &ColumnScanState,
-        scan_count: Idx,
-        result: &mut Vector,
-    ) {
+    fn scan_vector_internal(&self, state: &ColumnScanState, scan_count: Idx, result: &mut Vector) {
         let type_size = self.type_size as usize;
-        if type_size == 0 { return; }
+        if type_size == 0 {
+            return;
+        }
 
         let start = state.position_in_segment() as usize;
-        let len   = scan_count as usize * type_size;
+        let len = scan_count as usize * type_size;
 
         result.vector_type = VectorType::Flat;
 
         match self.segment_type {
             ColumnSegmentType::Transient => {
                 let buf = self.buffer.lock();
-                let src = &buf[start * type_size .. start * type_size + len];
+                let src = &buf[start * type_size..start * type_size + len];
                 result.raw_data_mut()[..len].copy_from_slice(src);
             }
             ColumnSegmentType::Persistent => {
@@ -402,14 +397,14 @@ impl ColumnSegment {
                 // block_offset is the byte offset into the block's payload where
                 // this segment's data starts.
                 let dst = result.raw_data_mut();
-                let read_ok = state.pinned_buffer.as_ref().and_then(|handle: &crate::storage::buffer::BufferHandle| {
-                    handle.with_data(|block_data| {
-                        let src_start = self.block_offset as usize + start * type_size;
-                        dst[..len].copy_from_slice(
-                            &block_data[src_start .. src_start + len],
-                        );
-                    })
-                });
+                let read_ok = state.pinned_buffer.as_ref().and_then(
+                    |handle: &crate::storage::buffer::BufferHandle| {
+                        handle.with_data(|block_data| {
+                            let src_start = self.block_offset as usize + start * type_size;
+                            dst[..len].copy_from_slice(&block_data[src_start..src_start + len]);
+                        })
+                    },
+                );
                 if read_ok.is_none() {
                     // Defensive: block not pinned (initialize_scan was not called or
                     // block_handle is missing). Zero-fill so callers get defined data.
@@ -431,12 +426,14 @@ impl ColumnSegment {
         result_offset: Idx,
     ) {
         let type_size = self.type_size as usize;
-        if type_size == 0 { return; }
+        if type_size == 0 {
+            return;
+        }
 
-        let start   = state.position_in_segment() as usize;
+        let start = state.position_in_segment() as usize;
         let src_row_off = start * type_size;
         let dst_off = result_offset as usize * type_size;
-        let len     = scan_count as usize * type_size;
+        let len = scan_count as usize * type_size;
 
         result.vector_type = VectorType::Flat;
 
@@ -444,20 +441,21 @@ impl ColumnSegment {
             ColumnSegmentType::Transient => {
                 let buf = self.buffer.lock();
                 let dst = result.raw_data_mut();
-                dst[dst_off .. dst_off + len]
-                    .copy_from_slice(&buf[src_row_off .. src_row_off + len]);
+                dst[dst_off..dst_off + len].copy_from_slice(&buf[src_row_off..src_row_off + len]);
             }
             ColumnSegmentType::Persistent => {
                 let dst = result.raw_data_mut();
-                let read_ok = state.pinned_buffer.as_ref().and_then(|handle: &crate::storage::buffer::BufferHandle| {
-                    handle.with_data(|block_data| {
-                        let src_start = self.block_offset as usize + src_row_off;
-                        dst[dst_off .. dst_off + len]
-                            .copy_from_slice(&block_data[src_start .. src_start + len]);
-                    })
-                });
+                let read_ok = state.pinned_buffer.as_ref().and_then(
+                    |handle: &crate::storage::buffer::BufferHandle| {
+                        handle.with_data(|block_data| {
+                            let src_start = self.block_offset as usize + src_row_off;
+                            dst[dst_off..dst_off + len]
+                                .copy_from_slice(&block_data[src_start..src_start + len]);
+                        })
+                    },
+                );
                 if read_ok.is_none() {
-                    result.raw_data_mut()[dst_off .. dst_off + len].fill(0);
+                    result.raw_data_mut()[dst_off..dst_off + len].fill(0);
                 }
             }
         }
@@ -487,8 +485,11 @@ impl ColumnSegment {
     /// → `FixedSizeInitAppend`: pins the block buffer, stores handle in
     ///   `state.append_state`.  In Rust `buffer` is already allocated.
     pub fn initialize_append(&self, _state: &mut ColumnAppendState) {
-        debug_assert_eq!(self.segment_type, ColumnSegmentType::Transient,
-            "initialize_append called on a persistent segment");
+        debug_assert_eq!(
+            self.segment_type,
+            ColumnSegmentType::Transient,
+            "initialize_append called on a persistent segment"
+        );
         // Uncompressed: buffer already allocated; nothing else to do.
     }
 
@@ -511,7 +512,10 @@ impl ColumnSegment {
     ) -> Idx {
         match self.compression {
             CompressionType::Uncompressed => self.fixed_size_append(vdata, offset, append_count),
-            other => panic!("compression {:?} not yet implemented for ColumnSegment::append", other),
+            other => panic!(
+                "compression {:?} not yet implemented for ColumnSegment::append",
+                other
+            ),
         }
     }
 
@@ -539,34 +543,39 @@ impl ColumnSegment {
         append_count: Idx,
     ) -> Idx {
         let type_size = self.type_size as usize;
-        if type_size == 0 { return 0; }
+        if type_size == 0 {
+            return 0;
+        }
 
         let current_count = self.count() as usize;
-        let max_count     = self.segment_size as usize / type_size;
-        let copy_count    = (append_count as usize).min(max_count.saturating_sub(current_count));
-        if copy_count == 0 { return 0; }
+        let max_count = self.segment_size as usize / type_size;
+        let copy_count = (append_count as usize).min(max_count.saturating_sub(current_count));
+        if copy_count == 0 {
+            return 0;
+        }
 
-        let mut buf   = self.buffer.lock();
+        let mut buf = self.buffer.lock();
         let mut stats = self.stats.lock();
         let all_valid = vdata.validity.is_all_valid();
 
         for i in 0..copy_count {
-            let source_idx = vdata.sel
+            let source_idx = vdata
+                .sel
                 .map(|s| s.get_index(offset as usize + i))
                 .unwrap_or(offset as usize + i);
             let target_idx = current_count + i;
-            let src_byte   = source_idx * type_size;
-            let dst_byte   = target_idx * type_size;
+            let src_byte = source_idx * type_size;
+            let dst_byte = target_idx * type_size;
 
             if all_valid || vdata.validity.row_is_valid(source_idx) {
                 stats.set_has_no_null();
                 if src_byte + type_size <= vdata.data.len() {
-                    buf[dst_byte .. dst_byte + type_size]
-                        .copy_from_slice(&vdata.data[src_byte .. src_byte + type_size]);
+                    buf[dst_byte..dst_byte + type_size]
+                        .copy_from_slice(&vdata.data[src_byte..src_byte + type_size]);
                 }
             } else {
                 stats.set_has_null();
-                buf[dst_byte .. dst_byte + type_size].fill(0); // NullValue<T>() = 0
+                buf[dst_byte..dst_byte + type_size].fill(0); // NullValue<T>() = 0
             }
         }
 

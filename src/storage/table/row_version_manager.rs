@@ -70,7 +70,10 @@ impl RowVersionManager {
         max_count: Idx,
     ) -> Idx {
         let inner = self.inner.lock();
-        let info = inner.vector_info.get(vector_idx as usize).and_then(|v| v.as_ref());
+        let info = inner
+            .vector_info
+            .get(vector_idx as usize)
+            .and_then(|v| v.as_ref());
         match info {
             None => {
                 // no version info → all rows visible
@@ -166,7 +169,11 @@ impl RowVersionManager {
 
     // ── Internal ──────────────────────────────────────────────
 
-    fn get_or_create_vector_info<'a>(&self, inner: &'a mut RvmInner, vector_idx: Idx) -> &'a mut ChunkInfo {
+    fn get_or_create_vector_info<'a>(
+        &self,
+        inner: &'a mut RvmInner,
+        vector_idx: Idx,
+    ) -> &'a mut ChunkInfo {
         let idx = vector_idx as usize;
         while inner.vector_info.len() <= idx {
             inner.vector_info.push(None);

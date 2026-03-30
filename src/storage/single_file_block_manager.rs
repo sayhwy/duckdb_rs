@@ -17,28 +17,24 @@
 //
 // ============================================================
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, OnceLock, Weak};
-use parking_lot::Mutex;
 
 use crate::storage::buffer::{
-    BlockHandle,
-    BlockManager, BufferManager,
-    BufferPool,
-    FileBuffer, FileBufferType,
-    BlockId, MemoryTag, INVALID_BLOCK,
+    BlockHandle, BlockId, BlockManager, BufferManager, BufferPool, FileBuffer, FileBufferType,
+    INVALID_BLOCK, MemoryTag,
 };
 
-use super::storage_info::{
-    DatabaseHeader, FileHandle, FileOpenFlags, FileSystem, MainHeader, StorageManagerOptions,
-    StorageResult, FILE_HEADER_SIZE, DEFAULT_BLOCK_ALLOC_SIZE, BLOCK_HEADER_SIZE, MAGIC_BYTES,
-    DEFAULT_BLOCK_HEADER_STORAGE_SIZE,
-};
 use super::checksum::checksum;
 use super::metadata::{
-    MetadataManager, MetadataHandle, WriteStream,
-    free_list_block_writer::FreeListBlockWriter,
+    MetadataHandle, MetadataManager, WriteStream, free_list_block_writer::FreeListBlockWriter,
+};
+use super::storage_info::{
+    BLOCK_HEADER_SIZE, DEFAULT_BLOCK_ALLOC_SIZE, DEFAULT_BLOCK_HEADER_STORAGE_SIZE, DatabaseHeader,
+    FILE_HEADER_SIZE, FileHandle, FileOpenFlags, FileSystem, MAGIC_BYTES, MainHeader,
+    StorageManagerOptions, StorageResult,
 };
 
 // ─── BlockListState（受 Mutex 保护）──────────────────────────
@@ -121,7 +117,9 @@ struct BlockMap {
 
 impl BlockMap {
     fn new() -> Self {
-        Self { blocks: HashMap::new() }
+        Self {
+            blocks: HashMap::new(),
+        }
     }
 }
 
@@ -179,8 +177,16 @@ impl SingleFileBlockManager {
             block_map: Mutex::new(BlockMap::new()),
             headers: Mutex::new([DatabaseHeader::default(), DatabaseHeader::default()]),
             header_buffers: Mutex::new([
-                Box::new(FileBuffer::new(FileBufferType::ManagedBuffer, FILE_HEADER_SIZE, BLOCK_HEADER_SIZE)),
-                Box::new(FileBuffer::new(FileBufferType::ManagedBuffer, FILE_HEADER_SIZE, BLOCK_HEADER_SIZE)),
+                Box::new(FileBuffer::new(
+                    FileBufferType::ManagedBuffer,
+                    FILE_HEADER_SIZE,
+                    BLOCK_HEADER_SIZE,
+                )),
+                Box::new(FileBuffer::new(
+                    FileBufferType::ManagedBuffer,
+                    FILE_HEADER_SIZE,
+                    BLOCK_HEADER_SIZE,
+                )),
             ]),
             metadata_manager: OnceLock::new(),
             block_header_size: BLOCK_HEADER_SIZE,
@@ -207,7 +213,8 @@ impl SingleFileBlockManager {
     pub fn block_offset(&self, block_id: BlockId) -> u64 {
         debug_assert!(block_id >= 0);
         // 数据块从 3 个文件头之后开始
-        3 * super::storage_info::FILE_HEADER_SIZE as u64 + block_id as u64 * self.block_alloc_size as u64
+        3 * super::storage_info::FILE_HEADER_SIZE as u64
+            + block_id as u64 * self.block_alloc_size as u64
     }
 
     // ─── 初始化 ───────────────────────────────────────────────
@@ -273,10 +280,16 @@ impl SingleFileBlockManager {
 
         let checksum_val = checksum(hdr_bufs[1].payload());
         hdr_bufs[1].raw_mut()[0..8].copy_from_slice(&checksum_val.to_le_bytes());
-        file.write_at(hdr_bufs[1].raw(), super::storage_info::FILE_HEADER_SIZE as u64)?;
+        file.write_at(
+            hdr_bufs[1].raw(),
+            super::storage_info::FILE_HEADER_SIZE as u64,
+        )?;
 
         // Second DatabaseHeader at 2*FILE_HEADER_SIZE
-        file.write_at(hdr_bufs[1].raw(), 2 * super::storage_info::FILE_HEADER_SIZE as u64)?;
+        file.write_at(
+            hdr_bufs[1].raw(),
+            2 * super::storage_info::FILE_HEADER_SIZE as u64,
+        )?;
 
         file.sync()
     }
@@ -288,20 +301,33 @@ impl SingleFileBlockManager {
         file.read_at(hdr_bufs[0].raw_mut(), 0)?;
 
         // Read DatabaseHeader 0 at offset FILE_HEADER_SIZE
-        file.read_at(hdr_bufs[1].raw_mut(), super::storage_info::FILE_HEADER_SIZE as u64)?;
+        file.read_at(
+            hdr_bufs[1].raw_mut(),
+            super::storage_info::FILE_HEADER_SIZE as u64,
+        )?;
 
         // Verify MainHeader magic bytes
-        MainHeader::deserialize(&hdr_bufs[0].raw()[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + MainHeader::SERIALIZED_SIZE])
-            .or_else(|| MainHeader::deserialize(&hdr_bufs[1].raw()[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + MainHeader::SERIALIZED_SIZE]))
-            .ok_or_else(|| super::storage_info::StorageError::Corrupt {
-                msg: "Invalid magic bytes — not a DuckDB file".into(),
-            })?;
+        MainHeader::deserialize(
+            &hdr_bufs[0].raw()[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + MainHeader::SERIALIZED_SIZE],
+        )
+        .or_else(|| {
+            MainHeader::deserialize(
+                &hdr_bufs[1].raw()
+                    [BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + MainHeader::SERIALIZED_SIZE],
+            )
+        })
+        .ok_or_else(|| super::storage_info::StorageError::Corrupt {
+            msg: "Invalid magic bytes — not a DuckDB file".into(),
+        })?;
 
         // Read DatabaseHeader 0
         let h0 = DatabaseHeader::deserialize(&hdr_bufs[1].raw()[BLOCK_HEADER_SIZE..]);
 
         // Read DatabaseHeader 1 at offset 2*FILE_HEADER_SIZE
-        file.read_at(hdr_bufs[1].raw_mut(), 2 * super::storage_info::FILE_HEADER_SIZE as u64)?;
+        file.read_at(
+            hdr_bufs[1].raw_mut(),
+            2 * super::storage_info::FILE_HEADER_SIZE as u64,
+        )?;
         let h1 = DatabaseHeader::deserialize(&hdr_bufs[1].raw()[BLOCK_HEADER_SIZE..]);
 
         let mut headers = self.headers.lock();
@@ -341,7 +367,7 @@ impl SingleFileBlockManager {
 
         loop {
             // 解包 MetaBlockPointer
-            let block_id  = current_packed & 0x00FFFFFFFFFFFFFF;
+            let block_id = current_packed & 0x00FFFFFFFFFFFFFF;
             let block_index = (current_packed >> 56) as usize;
 
             // 计算子块在文件中的偏移：
@@ -379,9 +405,7 @@ impl SingleFileBlockManager {
                 }
             }
 
-            if next_packed == -1
-                || total_count.map_or(true, |c| free_ids.len() >= c)
-            {
+            if next_packed == -1 || total_count.map_or(true, |c| free_ids.len() >= c) {
                 break;
             }
             current_packed = next_packed as u64;
@@ -521,17 +545,19 @@ impl SingleFileBlockManager {
             };
 
             // 1. free_list: count(u64) + block_ids(u64 each)
-            let free_list_size = std::mem::size_of::<u64>()
-                + std::mem::size_of::<BlockId>() * all_free_count;
+            let free_list_size =
+                std::mem::size_of::<u64>() + std::mem::size_of::<BlockId>() * all_free_count;
 
             // 2. multi_use_blocks: count(u64) + (block_id: u64, ref_count: u32) pairs
             let multi_use_blocks_size = std::mem::size_of::<u64>()
-                + (std::mem::size_of::<BlockId>() + std::mem::size_of::<u32>()) * multi_use_blocks_len;
+                + (std::mem::size_of::<BlockId>() + std::mem::size_of::<u32>())
+                    * multi_use_blocks_len;
 
             // 3. metadata blocks: count(u64) + (block_id: u64, free_mask: u64) pairs
             // current_block_count 包含本轮已分配的 free_list_blocks
             let metadata_blocks_size = std::mem::size_of::<u64>()
-                + (std::mem::size_of::<BlockId>() + std::mem::size_of::<u64>()) * current_block_count;
+                + (std::mem::size_of::<BlockId>() + std::mem::size_of::<u64>())
+                    * current_block_count;
 
             let total_size = free_list_size + multi_use_blocks_size + metadata_blocks_size;
             let already_allocated = free_list_blocks.len() * block_capacity;
@@ -686,10 +712,10 @@ impl BlockManager for SingleFileBlockManager {
         }
         // 创建新的未加载 BlockHandle
         use crate::storage::buffer::{BufferPoolReservation, MemoryTracker};
-        let tracker = Arc::clone(&self.buffer_manager.get_buffer_pool())
-            as Arc<dyn MemoryTracker>;
+        let tracker = Arc::clone(&self.buffer_manager.get_buffer_pool()) as Arc<dyn MemoryTracker>;
         let reservation = BufferPoolReservation::new(MemoryTag::BaseTable, tracker);
-        let block_manager = self.self_ref
+        let block_manager = self
+            .self_ref
             .get()
             .and_then(|weak| weak.upgrade())
             .expect("SingleFileBlockManager self reference not initialized");
@@ -730,7 +756,11 @@ impl BlockManager for SingleFileBlockManager {
 
     // ─── Block 创建/读/写 ─────────────────────────────────────
 
-    fn create_block(&self, _block_id: BlockId, reusable: Option<Box<FileBuffer>>) -> Box<FileBuffer> {
+    fn create_block(
+        &self,
+        _block_id: BlockId,
+        reusable: Option<Box<FileBuffer>>,
+    ) -> Box<FileBuffer> {
         let payload_size = self.block_alloc_size - self.block_header_size;
         if let Some(mut fb) = reusable {
             if fb.alloc_size() != self.block_alloc_size {
@@ -738,7 +768,11 @@ impl BlockManager for SingleFileBlockManager {
             }
             fb
         } else {
-            Box::new(FileBuffer::new(FileBufferType::Block, self.block_alloc_size, self.block_header_size))
+            Box::new(FileBuffer::new(
+                FileBufferType::Block,
+                self.block_alloc_size,
+                self.block_header_size,
+            ))
         }
     }
 
@@ -767,7 +801,8 @@ impl BlockManager for SingleFileBlockManager {
             .fs
             .open_file(&self.path, FileOpenFlags::READ_WRITE)
             .expect("Failed to open db file for writing");
-        file.write_at(&write_buf, offset).expect("Failed to write block");
+        file.write_at(&write_buf, offset)
+            .expect("Failed to write block");
     }
 
     // ─── 转换 ─────────────────────────────────────────────────
@@ -786,7 +821,11 @@ impl BlockManager for SingleFileBlockManager {
     }
 
     /// 对应 C++ ConvertToPersistent(QueryContext, block_id_t, Arc<BlockHandle>)
-    fn convert_to_persistent(&self, block_id: BlockId, old_block: Arc<BlockHandle>) -> Arc<BlockHandle> {
+    fn convert_to_persistent(
+        &self,
+        block_id: BlockId,
+        old_block: Arc<BlockHandle>,
+    ) -> Arc<BlockHandle> {
         // 将内存临时块写入磁盘（分配一个真正的 block_id）
         {
             let guard = old_block.lock();
@@ -837,18 +876,40 @@ impl BlockManager for SingleFileBlockManager {
 fn panic_block_manager() -> Arc<dyn BlockManager> {
     struct Placeholder;
     impl BlockManager for Placeholder {
-        fn buffer_manager(&self) -> Arc<dyn BufferManager> { unimplemented!() }
-        fn get_block_alloc_size(&self) -> usize { unimplemented!() }
-        fn get_block_header_size(&self) -> usize { unimplemented!() }
-        fn register_block(&self, _: BlockId) -> Arc<BlockHandle> { unimplemented!() }
+        fn buffer_manager(&self) -> Arc<dyn BufferManager> {
+            unimplemented!()
+        }
+        fn get_block_alloc_size(&self) -> usize {
+            unimplemented!()
+        }
+        fn get_block_header_size(&self) -> usize {
+            unimplemented!()
+        }
+        fn register_block(&self, _: BlockId) -> Arc<BlockHandle> {
+            unimplemented!()
+        }
         fn unregister_block(&self, _: BlockId) {}
-        fn block_is_registered(&self, _: BlockId) -> bool { false }
-        fn create_block(&self, _: BlockId, _: Option<Box<FileBuffer>>) -> Box<FileBuffer> { unimplemented!() }
-        fn read_block(&self, _: &mut FileBuffer, _: BlockId) { unimplemented!() }
-        fn write_block(&self, _: &FileBuffer, _: BlockId) { unimplemented!() }
-        fn convert_block(&self, _: BlockId, _: &FileBuffer) -> Box<FileBuffer> { unimplemented!() }
-        fn convert_to_persistent(&self, _: BlockId, _: Arc<BlockHandle>) -> Arc<BlockHandle> { unimplemented!() }
-        fn metadata_manager(&self) -> Option<Arc<dyn Any + Send + Sync>> { None }
+        fn block_is_registered(&self, _: BlockId) -> bool {
+            false
+        }
+        fn create_block(&self, _: BlockId, _: Option<Box<FileBuffer>>) -> Box<FileBuffer> {
+            unimplemented!()
+        }
+        fn read_block(&self, _: &mut FileBuffer, _: BlockId) {
+            unimplemented!()
+        }
+        fn write_block(&self, _: &FileBuffer, _: BlockId) {
+            unimplemented!()
+        }
+        fn convert_block(&self, _: BlockId, _: &FileBuffer) -> Box<FileBuffer> {
+            unimplemented!()
+        }
+        fn convert_to_persistent(&self, _: BlockId, _: Arc<BlockHandle>) -> Arc<BlockHandle> {
+            unimplemented!()
+        }
+        fn metadata_manager(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+            None
+        }
     }
     Arc::new(Placeholder)
 }

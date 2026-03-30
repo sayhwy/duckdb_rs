@@ -23,23 +23,18 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::{
-    Arc,
-    atomic::AtomicU8,
-};
+use std::sync::{Arc, atomic::AtomicU8};
 
 use parking_lot::Mutex;
 
 use crate::catalog::table_catalog_entry::PhysicalIndex;
 use crate::common::types::DataChunk;
-use crate::storage::data_table::{
-    ClientContext, ColumnDefinition, DataTable, StorageIndex,
-};
+use crate::storage::data_table::{ClientContext, ColumnDefinition, DataTable, StorageIndex};
 use crate::storage::optimistic_data_writer::{
     OptimisticDataWriter, OptimisticWriteCollection, OptimisticWritePartialManagers,
 };
-use crate::storage::storage_manager::StorageCommitState;
 use crate::storage::storage_info::{StorageError, StorageResult};
+use crate::storage::storage_manager::StorageCommitState;
 use crate::storage::table::append_state::{BoundConstraint, LocalAppendState, TableAppendState};
 use crate::storage::table::data_table_info::DataTableInfo;
 use crate::storage::table::row_group_collection::RowGroupCollection;
@@ -85,7 +80,6 @@ pub struct PartitionStatistics {
 /// 提交时由 `LocalStorage::flush_one` 合并到主表。
 pub struct LocalTableStorage {
     // ── 表标识 ───────────────────────────────────────────────────────────────
-
     /// 表的唯一数字标识（C++: 通过 `reference<DataTable>` 地址标识）。
     pub table_id: u64,
 
@@ -96,12 +90,10 @@ pub struct LocalTableStorage {
     pub types: Vec<LogicalType>,
 
     // ── 行组数据 ──────────────────────────────────────────────────────────────
-
     /// 主行组集合（C++: `unique_ptr<OptimisticWriteCollection> row_groups`）。
     pub row_groups: Box<OptimisticWriteCollection>,
 
     // ── 索引 ──────────────────────────────────────────────────────────────────
-
     /// 唯一约束追加索引（C++: `TableIndexList append_indexes`）。
     pub append_indexes: TableIndexList,
 
@@ -109,7 +101,6 @@ pub struct LocalTableStorage {
     pub delete_indexes: TableIndexList,
 
     // ── 模式与计数 ────────────────────────────────────────────────────────────
-
     /// 索引追加模式（C++: `IndexAppendMode index_append_mode`）。
     pub index_append_mode: IndexAppendMode,
 
@@ -117,7 +108,6 @@ pub struct LocalTableStorage {
     pub deleted_rows: Idx,
 
     // ── 乐观写入 ──────────────────────────────────────────────────────────────
-
     /// 乐观写入集合列表（C++: `vector<unique_ptr<OptimisticWriteCollection>>`）。
     optimistic_collections: Vec<Option<Box<OptimisticWriteCollection>>>,
 
@@ -125,7 +115,6 @@ pub struct LocalTableStorage {
     pub optimistic_writer: OptimisticDataWriter,
 
     // ── 标志 ──────────────────────────────────────────────────────────────────
-
     /// 是否已通过 LocalMerge 合并（C++: `bool merged_storage`）。
     pub merged_storage: bool,
 
@@ -133,7 +122,6 @@ pub struct LocalTableStorage {
     pub is_dropped: bool,
 
     // ── 锁 ────────────────────────────────────────────────────────────────────
-
     /// 保护 `optimistic_collections` 的互斥锁（C++: `mutex collections_lock`）。
     collections_lock: Mutex<()>,
 }
@@ -158,14 +146,8 @@ impl LocalTableStorage {
             .enumerate()
             .map(|(i, t)| ColumnDefinition::new(format!("col_{}", i), t.clone()))
             .collect();
-        let virtual_table = DataTable::new(
-            info.db_id,
-            info.table_io_manager_id,
-            "",
-            "",
-            col_defs,
-            None,
-        );
+        let virtual_table =
+            DataTable::new(info.db_id, info.table_io_manager_id, "", "", col_defs, None);
 
         // 创建最小上下文供乐观写入器持有。
         // 写入器仅用该上下文读取写缓冲阈值（默认 2），无副作用。
@@ -174,8 +156,7 @@ impl LocalTableStorage {
         }));
 
         // C++: optimistic_writer(context, table)
-        let mut optimistic_writer =
-            OptimisticDataWriter::new(ctx, Arc::clone(&virtual_table));
+        let mut optimistic_writer = OptimisticDataWriter::new(ctx, Arc::clone(&virtual_table));
 
         // C++: row_groups = optimistic_writer.CreateCollection(table, types, GLOBAL)
         let row_groups = Box::new(optimistic_writer.create_collection(
@@ -273,14 +254,17 @@ impl LocalTableStorage {
         );
 
         let mut optimistic_collections = Vec::new();
-        std::mem::swap(&mut optimistic_collections, &mut parent.optimistic_collections);
+        std::mem::swap(
+            &mut optimistic_collections,
+            &mut parent.optimistic_collections,
+        );
 
         // C++: append_indexes.Move(parent.append_indexes)
         let append_indexes = TableIndexList::new();
 
-        let row_groups = Box::new(OptimisticWriteCollection::new(
-            Arc::clone(&parent.row_groups.collection),
-        ));
+        let row_groups = Box::new(OptimisticWriteCollection::new(Arc::clone(
+            &parent.row_groups.collection,
+        )));
 
         Arc::new(Mutex::new(Self {
             table_id: new_table_id,
@@ -339,7 +323,10 @@ impl LocalTableStorage {
         );
 
         let mut optimistic_collections = Vec::new();
-        std::mem::swap(&mut optimistic_collections, &mut parent.optimistic_collections);
+        std::mem::swap(
+            &mut optimistic_collections,
+            &mut parent.optimistic_collections,
+        );
 
         let append_indexes = TableIndexList::new();
         let row_groups = Box::new(OptimisticWriteCollection::new(new_collection));
@@ -397,7 +384,10 @@ impl LocalTableStorage {
         );
 
         let mut optimistic_collections = Vec::new();
-        std::mem::swap(&mut optimistic_collections, &mut parent.optimistic_collections);
+        std::mem::swap(
+            &mut optimistic_collections,
+            &mut parent.optimistic_collections,
+        );
 
         let append_indexes = TableIndexList::new();
         let row_groups = Box::new(OptimisticWriteCollection::new(new_collection));
@@ -456,11 +446,7 @@ impl LocalTableStorage {
         let appended_rows = total_rows.saturating_sub(deleted);
 
         // C++: idx_t row_size = sum of GetTypeIdSize(type.InternalType())
-        let row_size: usize = collection
-            .types
-            .iter()
-            .map(|t| t.physical_size())
-            .sum();
+        let row_size: usize = collection.types.iter().map(|t| t.physical_size()).sum();
 
         // C++: idx_t index_sizes = bound_index.GetInMemorySize() for each append index
         // 当前索引为 stub，内存大小为 0
@@ -475,7 +461,8 @@ impl LocalTableStorage {
         if self.deleted_rows != 0 {
             return;
         }
-        self.optimistic_writer.write_new_row_group(&mut self.row_groups);
+        self.optimistic_writer
+            .write_new_row_group(&mut self.row_groups);
     }
 
     /// 将最后一个行组及 partial blocks 刷写到磁盘（C++: `FlushBlocks()`）。
@@ -486,7 +473,8 @@ impl LocalTableStorage {
         // C++: if (!merged_storage && collection.GetTotalRows() > row_group_size)
         //          optimistic_writer.WriteLastRowGroup(*row_groups);
         if !self.merged_storage && total_rows > row_group_size {
-            self.optimistic_writer.write_last_row_group(&mut self.row_groups);
+            self.optimistic_writer
+                .write_last_row_group(&mut self.row_groups);
         }
         // C++: optimistic_writer.FinalFlush();
         self.optimistic_writer.final_flush();
@@ -571,7 +559,10 @@ impl LocalTableStorage {
             collection.initialize_scan(&mut scan_state, &column_ids);
 
             let mut chunk = DataChunk::new();
-            chunk.initialize(&collection.types, crate::common::types::data_chunk::STANDARD_VECTOR_SIZE);
+            chunk.initialize(
+                &collection.types,
+                crate::common::types::data_chunk::STANDARD_VECTOR_SIZE,
+            );
 
             let mut chunks_scanned = 0usize;
             let mut rows_scanned = 0usize;
@@ -737,11 +728,7 @@ impl LocalTableManager {
         if let Some(existing) = lock.get(&table_id) {
             return Arc::clone(existing);
         }
-        let new_storage = LocalTableStorage::new(
-            table_id,
-            Arc::clone(info),
-            types.to_vec(),
-        );
+        let new_storage = LocalTableStorage::new(table_id, Arc::clone(info), types.to_vec());
         lock.insert(table_id, Arc::clone(&new_storage));
         new_storage
     }
@@ -882,12 +869,7 @@ impl LocalStorage {
     /// C++ 原型: `Scan(CollectionScanState&, const vector<StorageIndex>&, DataChunk&)`
     ///
     /// 通过 `table_id` 查找本地集合并驱动扫描。
-    pub fn scan(
-        &self,
-        table_id: u64,
-        state: &mut CollectionScanState,
-        result: &mut DataChunk,
-    ) {
+    pub fn scan(&self, table_id: u64, state: &mut CollectionScanState, result: &mut DataChunk) {
         // C++: state.Scan(transaction, result);
         // 在 Rust 中，CollectionScanState 不直接持有 collection 引用，
         // 需通过 table_id 找到对应集合后驱动扫描。
@@ -905,17 +887,14 @@ impl LocalStorage {
     }
 
     /// 初始化并行扫描状态（C++: `InitializeParallelScan`）。
-    pub fn initialize_parallel_scan(
-        &self,
-        table_id: u64,
-        state: &mut ParallelCollectionScanState,
-    ) {
+    pub fn initialize_parallel_scan(&self, table_id: u64, state: &mut ParallelCollectionScanState) {
         // C++: if (!storage) { state.max_row = 0; state.vector_index = 0; ... }
         //      else { storage->GetCollection().InitializeParallelScan(state); }
         match self.table_manager.get_storage(table_id) {
             None => {
                 state.max_row = 0;
-                state.current_row_group_index
+                state
+                    .current_row_group_index
                     .store(0, std::sync::atomic::Ordering::Relaxed);
             }
             Some(s) => {
@@ -956,7 +935,9 @@ impl LocalStorage {
     ) {
         // C++: state.storage = &table_manager.GetOrCreateStorage(context, table);
         //      state.storage->GetCollection().InitializeAppend(TransactionData(transaction), state.append_state);
-        let storage = self.table_manager.get_or_create_storage(table_id, &info, &types);
+        let storage = self
+            .table_manager
+            .get_or_create_storage(table_id, &info, &types);
         let collection = storage.lock().get_collection();
         collection.initialize_append(&mut state.append_state);
         state.storage = Some(Arc::clone(&storage));
@@ -971,7 +952,9 @@ impl LocalStorage {
         types: Vec<LogicalType>,
     ) {
         // C++: state.storage = &table_manager.GetOrCreateStorage(context, table);
-        let storage = self.table_manager.get_or_create_storage(table_id, &info, &types);
+        let storage = self
+            .table_manager
+            .get_or_create_storage(table_id, &info, &types);
         state.storage = Some(storage);
     }
 
@@ -991,7 +974,7 @@ impl LocalStorage {
             None => {
                 return Err(StorageError::Other(
                     "LocalStorage::append: LocalAppendState not initialized".to_string(),
-                ))
+                ));
             }
         };
         let mut storage = storage_arc.lock();
@@ -1042,7 +1025,9 @@ impl LocalStorage {
         transaction: TransactionData,
     ) -> StorageResult<()> {
         // C++: auto &storage = table_manager.GetOrCreateStorage(context, table);
-        let storage_arc = self.table_manager.get_or_create_storage(table_id, info, types);
+        let storage_arc = self
+            .table_manager
+            .get_or_create_storage(table_id, info, types);
         let mut storage = storage_arc.lock();
 
         // C++: if (!storage.append_indexes.Empty()) {
@@ -1082,20 +1067,20 @@ impl LocalStorage {
     ) -> PhysicalIndex {
         // C++: auto &storage = table_manager.GetOrCreateStorage(context, table);
         //      return storage.CreateOptimisticCollection(std::move(collection));
-        let storage_arc = self.table_manager.get_or_create_storage(table_id, info, types);
+        let storage_arc = self
+            .table_manager
+            .get_or_create_storage(table_id, info, types);
         storage_arc.lock().create_optimistic_collection(collection)
     }
 
     /// 重置指定索引的乐观写入集合（C++: `ResetOptimisticCollection`）。
-    pub fn reset_optimistic_collection(
-        &self,
-        table_id: u64,
-        collection_index: PhysicalIndex,
-    ) {
+    pub fn reset_optimistic_collection(&self, table_id: u64, collection_index: PhysicalIndex) {
         // C++: auto &storage = table_manager.GetOrCreateStorage(context, table);
         //      storage.ResetOptimisticCollection(collection_index);
         if let Some(storage_arc) = self.table_manager.get_storage(table_id) {
-            storage_arc.lock().reset_optimistic_collection(collection_index);
+            storage_arc
+                .lock()
+                .reset_optimistic_collection(collection_index);
         }
     }
 
@@ -1314,12 +1299,7 @@ impl LocalStorage {
         };
         let new_storage = {
             let mut guard = storage_arc.lock();
-            LocalTableStorage::from_add_column(
-                new_id,
-                new_info,
-                &mut guard,
-                new_column_type,
-            )
+            LocalTableStorage::from_add_column(new_id, new_info, &mut guard, new_column_type)
         };
         self.table_manager.insert_entry(new_id, new_storage);
     }
@@ -1338,12 +1318,7 @@ impl LocalStorage {
         };
         let new_storage = {
             let mut guard = storage_arc.lock();
-            LocalTableStorage::from_drop_column(
-                new_id,
-                new_info,
-                &mut guard,
-                drop_column_index,
-            )
+            LocalTableStorage::from_drop_column(new_id, new_info, &mut guard, drop_column_index)
         };
         self.table_manager.insert_entry(new_id, new_storage);
     }
@@ -1391,36 +1366,40 @@ impl LocalStorage {
         //      storage->GetCollection().Fetch(transaction, chunk, col_ids, row_ids, count, fetch_state);
         let storage_arc = match self.table_manager.get_storage(table_id) {
             Some(s) => s,
-            None => panic!("LocalStorage::fetch_chunk: local storage not found for table_id={}", table_id),
+            None => panic!(
+                "LocalStorage::fetch_chunk: local storage not found for table_id={}",
+                table_id
+            ),
         };
         let collection = storage_arc.lock().get_collection();
         let col_ids_u64: Vec<u64> = col_ids.iter().map(|s| s.0).collect();
-        collection.fetch(transaction, chunk, &col_ids_u64, row_ids, count, fetch_state);
+        collection.fetch(
+            transaction,
+            chunk,
+            &col_ids_u64,
+            row_ids,
+            count,
+            fetch_state,
+        );
     }
 
     /// 判断该行 ID 是否在本地存储中可见（C++: `CanFetch`）。
-    pub fn can_fetch(
-        &self,
-        table_id: u64,
-        row_id: RowId,
-        transaction: TransactionData,
-    ) -> bool {
+    pub fn can_fetch(&self, table_id: u64, row_id: RowId, transaction: TransactionData) -> bool {
         // C++: if (!storage) throw InternalException("LocalStorage::CanFetch - not found");
         //      return storage->GetCollection().CanFetch(transaction, row_id);
         let storage_arc = match self.table_manager.get_storage(table_id) {
             Some(s) => s,
-            None => panic!("LocalStorage::can_fetch: local storage not found for table_id={}", table_id),
+            None => panic!(
+                "LocalStorage::can_fetch: local storage not found for table_id={}",
+                table_id
+            ),
         };
         let collection = storage_arc.lock().get_collection();
         collection.can_fetch(transaction, row_id)
     }
 
     /// 验证新约束在本地存储中是否满足（C++: `VerifyNewConstraint`）。
-    pub fn verify_new_constraint(
-        &self,
-        table_id: u64,
-        _constraint: &BoundConstraint,
-    ) {
+    pub fn verify_new_constraint(&self, table_id: u64, _constraint: &BoundConstraint) {
         // C++: storage->GetCollection().VerifyNewConstraint(context, parent, constraint);
         if let Some(s) = self.table_manager.get_storage(table_id) {
             let _collection = s.lock().get_collection();

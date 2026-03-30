@@ -77,7 +77,12 @@ impl UpdateSegment {
     // ── Read ──────────────────────────────────────────────────
 
     /// Merge updates visible to `transaction` into `result` at `vector_index`.
-    pub fn fetch_updates(&self, transaction: TransactionData, vector_index: Idx, result: &mut [u8]) {
+    pub fn fetch_updates(
+        &self,
+        transaction: TransactionData,
+        vector_index: Idx,
+        result: &mut [u8],
+    ) {
         todo!("walk update chain, apply visible updates into result buffer")
     }
 
@@ -92,7 +97,13 @@ impl UpdateSegment {
     }
 
     /// Read a single updated row at `row_id` into `result[result_idx]`.
-    pub fn fetch_row(&self, transaction: TransactionData, row_id: Idx, result: &mut [u8], result_idx: usize) {
+    pub fn fetch_row(
+        &self,
+        transaction: TransactionData,
+        row_id: Idx,
+        result: &mut [u8],
+        result_idx: usize,
+    ) {
         todo!()
     }
 

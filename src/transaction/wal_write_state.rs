@@ -43,41 +43,41 @@ use crate::storage::write_ahead_log::WriteAheadLog;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogWalOp {
-    CreateTable      = 0,
-    DropTable        = 1,
-    CreateSchema     = 2,
-    DropSchema       = 3,
-    CreateView       = 4,
-    DropView         = 5,
-    CreateSequence   = 6,
-    DropSequence     = 7,
-    CreateType       = 8,
-    DropType         = 9,
-    CreateMacro      = 10,
-    DropMacro        = 11,
+    CreateTable = 0,
+    DropTable = 1,
+    CreateSchema = 2,
+    DropSchema = 3,
+    CreateView = 4,
+    DropView = 5,
+    CreateSequence = 6,
+    DropSequence = 7,
+    CreateType = 8,
+    DropType = 9,
+    CreateMacro = 10,
+    DropMacro = 11,
     CreateTableMacro = 12,
-    DropTableMacro   = 13,
-    CreateIndex      = 14,
-    DropIndex        = 15,
-    AlterTable       = 16,
+    DropTableMacro = 13,
+    CreateIndex = 14,
+    DropIndex = 15,
+    AlterTable = 16,
     /// 不需要写入 WAL（临时对象、RENAMED_ENTRY 等）。
-    Ignore           = 255,
+    Ignore = 255,
 }
 
 impl TryFrom<u8> for CatalogWalOp {
     type Error = u8;
     fn try_from(v: u8) -> Result<Self, Self::Error> {
         match v {
-            0  => Ok(Self::CreateTable),
-            1  => Ok(Self::DropTable),
-            2  => Ok(Self::CreateSchema),
-            3  => Ok(Self::DropSchema),
-            4  => Ok(Self::CreateView),
-            5  => Ok(Self::DropView),
-            6  => Ok(Self::CreateSequence),
-            7  => Ok(Self::DropSequence),
-            8  => Ok(Self::CreateType),
-            9  => Ok(Self::DropType),
+            0 => Ok(Self::CreateTable),
+            1 => Ok(Self::DropTable),
+            2 => Ok(Self::CreateSchema),
+            3 => Ok(Self::DropSchema),
+            4 => Ok(Self::CreateView),
+            5 => Ok(Self::DropView),
+            6 => Ok(Self::CreateSequence),
+            7 => Ok(Self::DropSequence),
+            8 => Ok(Self::CreateType),
+            9 => Ok(Self::DropType),
             10 => Ok(Self::CreateMacro),
             11 => Ok(Self::DropMacro),
             12 => Ok(Self::CreateTableMacro),
@@ -127,12 +127,17 @@ impl CatalogEntryUndoData {
     /// 序列化为字节。
     pub fn serialize(&self) -> Vec<u8> {
         let schema_b = self.schema.as_bytes();
-        let name_b   = self.name.as_bytes();
-        let cap = 1 + 1
-            + 4 + schema_b.len()
-            + 4 + name_b.len()
-            + 4 + self.payload.len()
-            + 4 + self.secondary_payload.len();
+        let name_b = self.name.as_bytes();
+        let cap = 1
+            + 1
+            + 4
+            + schema_b.len()
+            + 4
+            + name_b.len()
+            + 4
+            + self.payload.len()
+            + 4
+            + self.secondary_payload.len();
 
         let mut out = Vec::with_capacity(cap);
         out.push(self.op as u8);
@@ -152,15 +157,24 @@ impl CatalogEntryUndoData {
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
         let mut p = 0usize;
 
-        let op = CatalogWalOp::try_from(*bytes.get(p)?).ok()?; p += 1;
-        let is_temporary = *bytes.get(p)? != 0;                p += 1;
+        let op = CatalogWalOp::try_from(*bytes.get(p)?).ok()?;
+        p += 1;
+        let is_temporary = *bytes.get(p)? != 0;
+        p += 1;
 
-        let schema   = read_str(bytes, &mut p)?;
-        let name     = read_str(bytes, &mut p)?;
-        let payload          = read_bytes(bytes, &mut p)?;
+        let schema = read_str(bytes, &mut p)?;
+        let name = read_str(bytes, &mut p)?;
+        let payload = read_bytes(bytes, &mut p)?;
         let secondary_payload = read_bytes(bytes, &mut p)?;
 
-        Some(Self { op, is_temporary, schema, name, payload, secondary_payload })
+        Some(Self {
+            op,
+            is_temporary,
+            schema,
+            name,
+            payload,
+            secondary_payload,
+        })
     }
 }
 
@@ -180,17 +194,17 @@ impl CatalogEntryUndoData {
 /// [counter:      i64]
 /// ```
 pub struct SequenceValueUndoData {
-    pub schema:      String,
-    pub name:        String,
+    pub schema: String,
+    pub name: String,
     pub usage_count: i64,
-    pub counter:     i64,
+    pub counter: i64,
 }
 
 impl SequenceValueUndoData {
     /// 序列化为字节。
     pub fn serialize(&self) -> Vec<u8> {
         let schema_b = self.schema.as_bytes();
-        let name_b   = self.name.as_bytes();
+        let name_b = self.name.as_bytes();
         let cap = 4 + schema_b.len() + 4 + name_b.len() + 8 + 8;
         let mut out = Vec::with_capacity(cap);
         out.extend_from_slice(&(schema_b.len() as u32).to_le_bytes());
@@ -206,10 +220,15 @@ impl SequenceValueUndoData {
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
         let mut p = 0usize;
         let schema = read_str(bytes, &mut p)?;
-        let name   = read_str(bytes, &mut p)?;
+        let name = read_str(bytes, &mut p)?;
         let usage_count = read_i64(bytes, &mut p)?;
-        let counter     = read_i64(bytes, &mut p)?;
-        Some(Self { schema, name, usage_count, counter })
+        let counter = read_i64(bytes, &mut p)?;
+        Some(Self {
+            schema,
+            name,
+            usage_count,
+            counter,
+        })
     }
 }
 
@@ -226,13 +245,7 @@ impl SequenceValueUndoData {
 /// - `start_row`：追加起始行号（C++: `idx_t start_row`）。
 /// - `count`：追加行数（C++: `idx_t count`）。
 pub trait AppendWriter {
-    fn write_append(
-        &mut self,
-        log: &WriteAheadLog,
-        table_id: u64,
-        start_row: u64,
-        count: u64,
-    );
+    fn write_append(&mut self, log: &WriteAheadLog, table_id: u64, start_row: u64, count: u64);
 }
 
 // ─── WALWriteState ────────────────────────────────────────────────────────────
@@ -342,13 +355,19 @@ impl<'wal> WALWriteState<'wal> {
         //      WriteCatalogEntry(*catalog_entry, data + sizeof(CatalogEntry *));
 
         // 跳过 catalog_entry_id（8 字节）
-        if payload.len() < 8 { return; }
+        if payload.len() < 8 {
+            return;
+        }
         let after_id = &payload[8..];
 
         // 读取 extra_data_size（8 字节），0 表示无 extra_data
-        if after_id.len() < 8 { return; }
+        if after_id.len() < 8 {
+            return;
+        }
         let extra_size = u64::from_le_bytes(after_id[0..8].try_into().unwrap()) as usize;
-        if extra_size == 0 || after_id.len() < 8 + extra_size { return; }
+        if extra_size == 0 || after_id.len() < 8 + extra_size {
+            return;
+        }
 
         let data = &after_id[8..8 + extra_size];
         let entry = match CatalogEntryUndoData::deserialize(data) {
@@ -357,7 +376,9 @@ impl<'wal> WALWriteState<'wal> {
         };
 
         // C++: if (entry.temporary || entry.Parent().temporary) return;
-        if entry.is_temporary { return; }
+        if entry.is_temporary {
+            return;
+        }
 
         // C++: switch (parent.type) { … }
         match entry.op {
@@ -419,7 +440,9 @@ impl<'wal> WALWriteState<'wal> {
             }
             CatalogWalOp::CreateIndex => {
                 // C++: log.WriteCreateIndex(parent.Cast<IndexCatalogEntry>());
-                let _ = self.log.write_create_index(&entry.payload, &entry.secondary_payload);
+                let _ = self
+                    .log
+                    .write_create_index(&entry.payload, &entry.secondary_payload);
             }
             CatalogWalOp::DropIndex => {
                 // C++: log.WriteDropIndex(entry.Cast<IndexCatalogEntry>());
@@ -444,21 +467,20 @@ impl<'wal> WALWriteState<'wal> {
 
     /// 委托 INSERT_TUPLE 给 `AppendWriter`（C++: `info->table->WriteToLog(…)`）。
     fn write_append(&mut self, payload: &[u8]) {
-        if payload.len() < AppendInfo::serialized_size() { return; }
+        if payload.len() < AppendInfo::serialized_size() {
+            return;
+        }
         let info = AppendInfo::deserialize(payload);
 
         // C++: if (!info->table->IsTemporary())
         //          info->table->WriteToLog(transaction, log, start_row, count, commit_state);
         // 临时表不写 WAL；table_names 中不存在的 ID 按临时表处理。
-        if !self.table_names.contains_key(&info.table_id) { return; }
+        if !self.table_names.contains_key(&info.table_id) {
+            return;
+        }
 
         if let Some(writer) = self.append_writer.as_mut() {
-            writer.write_append(
-                self.log,
-                info.table_id,
-                info.start_row,
-                info.count,
-            );
+            writer.write_append(self.log, info.table_id, info.start_row, info.count);
         }
     }
 
@@ -534,14 +556,16 @@ impl<'wal> WALWriteState<'wal> {
         // segment_id(8)+table_id(8)+column_index(8)+row_group_start(8)+vector_index(8)
         // +version_number(8)+prev(16)+next(16)+n(2)+max(2) = 84 字节
         const HEADER_SIZE: usize = 84;
-        if payload.len() < HEADER_SIZE { return; }
+        if payload.len() < HEADER_SIZE {
+            return;
+        }
 
         // 直接从字节读取关键字段，避免完整反序列化（C++ 通过指针直接访问结构体成员）。
-        let table_id      = u64::from_le_bytes(payload[8..16].try_into().unwrap());
-        let column_index  = u64::from_le_bytes(payload[16..24].try_into().unwrap());
+        let table_id = u64::from_le_bytes(payload[8..16].try_into().unwrap());
+        let column_index = u64::from_le_bytes(payload[16..24].try_into().unwrap());
         let row_group_start = u64::from_le_bytes(payload[24..32].try_into().unwrap());
-        let vector_index  = u64::from_le_bytes(payload[32..40].try_into().unwrap());
-        let n             = u16::from_le_bytes(payload[80..82].try_into().unwrap()) as usize;
+        let vector_index = u64::from_le_bytes(payload[32..40].try_into().unwrap());
+        let n = u16::from_le_bytes(payload[80..82].try_into().unwrap()) as usize;
 
         // C++: SwitchTable(table_info, UndoFlags::UPDATE_TUPLE);
         if let Some((schema, table)) = self.table_names.get(&table_id).cloned() {
@@ -557,8 +581,10 @@ impl<'wal> WALWriteState<'wal> {
 
         // 读取 tuples（sel_t = u32，位于 HEADER_SIZE 之后）
         let tuples_offset = HEADER_SIZE;
-        let tuples_end    = tuples_offset + n * 4;
-        if payload.len() < tuples_end { return; }
+        let tuples_end = tuples_offset + n * 4;
+        if payload.len() < tuples_end {
+            return;
+        }
 
         let mut chunk = Vec::with_capacity(4 + n * 8);
         chunk.extend_from_slice(&(n as u32).to_le_bytes());
@@ -603,12 +629,9 @@ impl<'wal> WALWriteState<'wal> {
         // info 含 SequenceCatalogEntry* entry，用于获取 schema/name。
         // Rust: SequenceValueUndoData 中直接包含 schema/name。
         if let Some(sv) = SequenceValueUndoData::deserialize(payload) {
-            let _ = self.log.write_sequence_value(
-                &sv.schema,
-                &sv.name,
-                sv.usage_count,
-                sv.counter,
-            );
+            let _ = self
+                .log
+                .write_sequence_value(&sv.schema, &sv.name, sv.usage_count, sv.counter);
         }
     }
 }
@@ -619,7 +642,9 @@ impl<'wal> WALWriteState<'wal> {
 fn read_str(bytes: &[u8], pos: &mut usize) -> Option<String> {
     let len = u32::from_le_bytes(bytes.get(*pos..*pos + 4)?.try_into().ok()?) as usize;
     *pos += 4;
-    let s = std::str::from_utf8(bytes.get(*pos..*pos + len)?).ok()?.to_string();
+    let s = std::str::from_utf8(bytes.get(*pos..*pos + len)?)
+        .ok()?
+        .to_string();
     *pos += len;
     Some(s)
 }

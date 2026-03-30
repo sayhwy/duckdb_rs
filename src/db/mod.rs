@@ -6,25 +6,27 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::catalog::{
-    ColumnDefinition as CatalogColumnDefinition, ColumnList, CreateTableInfo, LogicalType as CatalogLogicalType,
-    TableCatalogEntry,
+    ColumnDefinition as CatalogColumnDefinition, ColumnList, CreateTableInfo,
+    LogicalType as CatalogLogicalType, TableCatalogEntry,
 };
 use crate::common::types::{DataChunk, LogicalType, STANDARD_VECTOR_SIZE};
+use crate::connection::{Connection, DatabaseInstance, TableHandle as ConnectionTableHandle};
 use crate::storage::buffer::{BlockAllocator, BlockManager, BufferPool};
-use crate::storage::checkpoint::table_data_reader::{BoundCreateTableInfo, TableDataReader};
 use crate::storage::checkpoint::TableInfo;
-use crate::storage::data_table::{ClientContext, ColumnDefinition as StorageColumnDefinition, DataTable};
+use crate::storage::checkpoint::table_data_reader::{BoundCreateTableInfo, TableDataReader};
+use crate::storage::data_table::{
+    ClientContext, ColumnDefinition as StorageColumnDefinition, DataTable,
+};
 use crate::storage::metadata::{BlockReaderType, MetadataManager, MetadataReader};
 use crate::storage::standard_file_system::LocalFileSystem;
 use crate::storage::storage_info::{
     BLOCK_HEADER_SIZE, DatabaseHeader, FILE_HEADER_SIZE, FileOpenFlags, FileSystem, INVALID_BLOCK,
-    MainHeader, StorageManagerOptions, StorageResult, StorageError,
+    MainHeader, StorageError, StorageManagerOptions, StorageResult,
 };
 use crate::storage::storage_manager::{SingleFileStorageManager, StorageManager, StorageOptions};
-use crate::storage::{SingleFileBlockManager, StandardBufferManager};
 use crate::storage::table::persistent_table_data::{PersistentStorageRuntime, PersistentTableData};
+use crate::storage::{SingleFileBlockManager, StandardBufferManager};
 use crate::transaction::duck_transaction_manager::DuckTransactionManager;
-use crate::connection::{Connection, DatabaseInstance, TableHandle as ConnectionTableHandle};
 
 #[derive(Clone)]
 pub struct TableHandle {
@@ -106,6 +108,9 @@ impl DB {
             transaction_manager,
             256 * 1024, // block_alloc_size
         ));
+        instance
+            .storage_manager
+            .bind_database_instance(Arc::downgrade(&instance));
 
         // 将表添加到 instance
         for (name, handle) in tables {
@@ -152,12 +157,7 @@ impl DB {
     }
 
     /// 创建表（C++: `CreateTable`）。
-    pub fn create_table(
-        &mut self,
-        schema: &str,
-        table: &str,
-        columns: Vec<(String, LogicalType)>,
-    ) {
+    pub fn create_table(&mut self, schema: &str, table: &str, columns: Vec<(String, LogicalType)>) {
         let catalog_columns: Vec<CatalogColumnDefinition> = columns
             .iter()
             .map(|(name, ty)| CatalogColumnDefinition::new(name.clone(), to_catalog_type(ty)))
@@ -190,23 +190,21 @@ impl DB {
         drop(tables);
 
         let catalog_entry = TableCatalogEntry::new(catalog_name, schema, table_id, create_info);
-        let storage = DataTable::new(
-            1,
-            table_id,
-            schema,
-            table,
-            storage_columns,
-            None,
-        );
+        let storage = DataTable::new(1, table_id, schema, table, storage_columns, None);
         self.instance.tables.lock().insert(
             normalize_name(table),
-            ConnectionTableHandle { catalog_entry, storage },
+            ConnectionTableHandle {
+                catalog_entry,
+                storage,
+            },
         );
     }
 
     /// 获取所有表名。
     pub fn tables(&self) -> Vec<String> {
-        self.instance.tables.lock()
+        self.instance
+            .tables
+            .lock()
             .values()
             .map(|t| t.catalog_entry.base.fields().name.clone())
             .collect()
@@ -233,24 +231,34 @@ impl DB {
         column_ids: Option<Vec<u64>>,
     ) -> StorageResult<Vec<DataChunk>> {
         let tables = self.instance.tables.lock();
-        let table = tables.get(&normalize_name(table_name))
-            .ok_or_else(|| StorageError::Corrupt { msg: format!("Table '{}' not found", table_name) })?
+        let table = tables
+            .get(&normalize_name(table_name))
+            .ok_or_else(|| StorageError::Corrupt {
+                msg: format!("Table '{}' not found", table_name),
+            })?
             .clone();
         drop(tables);
 
         let column_ids = column_ids.unwrap_or_else(|| {
-            (0..table.storage.column_count()).map(|idx| idx as u64).collect()
+            (0..table.storage.column_count())
+                .map(|idx| idx as u64)
+                .collect()
         });
         let result_types: Vec<LogicalType> = column_ids
             .iter()
-            .map(|idx| table.storage.column_definitions[*idx as usize].logical_type.clone())
+            .map(|idx| {
+                table.storage.column_definitions[*idx as usize]
+                    .logical_type
+                    .clone()
+            })
             .collect();
 
         let mut state = table.storage.begin_scan_state(column_ids.clone());
 
         // 使用连接获取事务
         let conn = self.connect();
-        let txn = conn.get_transaction()
+        let txn = conn
+            .get_transaction()
             .unwrap_or_else(|| conn.context.lock().transaction.get_or_create_transaction());
 
         {
@@ -299,7 +307,12 @@ impl DB {
     }
 
     /// 以 SQL 查询终端风格打印 DataChunk
-    pub fn print_chunk(&self, chunk: &DataChunk, column_names: &[String], column_types: &[LogicalType]) {
+    pub fn print_chunk(
+        &self,
+        chunk: &DataChunk,
+        column_names: &[String],
+        column_types: &[LogicalType],
+    ) {
         let num_rows = chunk.size();
         if num_rows == 0 {
             return;
@@ -313,7 +326,8 @@ impl DB {
         for row_idx in 0..num_rows {
             let mut row = Vec::with_capacity(column_names.len());
             for (col_idx, _) in column_names.iter().enumerate() {
-                let value_str = Self::extract_value_string(chunk, col_idx, row_idx, &column_types[col_idx]);
+                let value_str =
+                    Self::extract_value_string(chunk, col_idx, row_idx, &column_types[col_idx]);
                 col_widths[col_idx] = col_widths[col_idx].max(value_str.len());
                 row.push(value_str);
             }
@@ -329,7 +343,10 @@ impl DB {
         Self::print_separator(&col_widths);
 
         // 打印表头
-        Self::print_row(&column_names.iter().cloned().collect::<Vec<_>>(), &col_widths);
+        Self::print_row(
+            &column_names.iter().cloned().collect::<Vec<_>>(),
+            &col_widths,
+        );
 
         // 打印分隔线
         Self::print_separator(&col_widths);
@@ -344,7 +361,12 @@ impl DB {
     }
 
     /// 从 DataChunk 中提取单个值的字符串表示
-    fn extract_value_string(chunk: &DataChunk, col_idx: usize, row_idx: usize, col_type: &LogicalType) -> String {
+    fn extract_value_string(
+        chunk: &DataChunk,
+        col_idx: usize,
+        row_idx: usize,
+        col_type: &LogicalType,
+    ) -> String {
         // 检查 NULL
         if !chunk.data[col_idx].validity.row_is_valid(row_idx) {
             return "NULL".to_string();
@@ -381,7 +403,12 @@ impl DB {
             crate::common::types::LogicalTypeId::Integer => {
                 let offset = row_idx * 4;
                 if offset + 3 < raw.len() {
-                    let val = i32::from_le_bytes([raw[offset], raw[offset + 1], raw[offset + 2], raw[offset + 3]]);
+                    let val = i32::from_le_bytes([
+                        raw[offset],
+                        raw[offset + 1],
+                        raw[offset + 2],
+                        raw[offset + 3],
+                    ]);
                     format!("{}", val)
                 } else {
                     "NULL".to_string()
@@ -391,8 +418,14 @@ impl DB {
                 let offset = row_idx * 8;
                 if offset + 7 < raw.len() {
                     let val = i64::from_le_bytes([
-                        raw[offset], raw[offset + 1], raw[offset + 2], raw[offset + 3],
-                        raw[offset + 4], raw[offset + 5], raw[offset + 6], raw[offset + 7],
+                        raw[offset],
+                        raw[offset + 1],
+                        raw[offset + 2],
+                        raw[offset + 3],
+                        raw[offset + 4],
+                        raw[offset + 5],
+                        raw[offset + 6],
+                        raw[offset + 7],
                     ]);
                     format!("{}", val)
                 } else {
@@ -402,7 +435,12 @@ impl DB {
             crate::common::types::LogicalTypeId::Float => {
                 let offset = row_idx * 4;
                 if offset + 3 < raw.len() {
-                    let val = f32::from_le_bytes([raw[offset], raw[offset + 1], raw[offset + 2], raw[offset + 3]]);
+                    let val = f32::from_le_bytes([
+                        raw[offset],
+                        raw[offset + 1],
+                        raw[offset + 2],
+                        raw[offset + 3],
+                    ]);
                     format!("{}", val)
                 } else {
                     "NULL".to_string()
@@ -412,8 +450,14 @@ impl DB {
                 let offset = row_idx * 8;
                 if offset + 7 < raw.len() {
                     let val = f64::from_le_bytes([
-                        raw[offset], raw[offset + 1], raw[offset + 2], raw[offset + 3],
-                        raw[offset + 4], raw[offset + 5], raw[offset + 6], raw[offset + 7],
+                        raw[offset],
+                        raw[offset + 1],
+                        raw[offset + 2],
+                        raw[offset + 3],
+                        raw[offset + 4],
+                        raw[offset + 5],
+                        raw[offset + 6],
+                        raw[offset + 7],
                     ]);
                     format!("{}", val)
                 } else {
@@ -458,24 +502,34 @@ impl DB {
         column_ids: Option<Vec<u64>>,
     ) -> StorageResult<Vec<DataChunk>> {
         let tables = self.instance.tables.lock();
-        let table = tables.get(&normalize_name(table_name))
-            .ok_or_else(|| StorageError::Corrupt { msg: format!("Table '{}' not found", table_name) })?
+        let table = tables
+            .get(&normalize_name(table_name))
+            .ok_or_else(|| StorageError::Corrupt {
+                msg: format!("Table '{}' not found", table_name),
+            })?
             .clone();
         drop(tables);
 
         let column_ids = column_ids.unwrap_or_else(|| {
-            (0..table.storage.column_count()).map(|idx| idx as u64).collect()
+            (0..table.storage.column_count())
+                .map(|idx| idx as u64)
+                .collect()
         });
         let result_types: Vec<LogicalType> = column_ids
             .iter()
-            .map(|idx| table.storage.column_definitions[*idx as usize].logical_type.clone())
+            .map(|idx| {
+                table.storage.column_definitions[*idx as usize]
+                    .logical_type
+                    .clone()
+            })
             .collect();
 
         let mut state = table.storage.begin_scan_state(column_ids.clone());
 
         // 使用连接获取事务
         let conn = self.connect();
-        let txn = conn.get_transaction()
+        let txn = conn
+            .get_transaction()
             .unwrap_or_else(|| conn.context.lock().transaction.get_or_create_transaction());
 
         {
@@ -510,69 +564,12 @@ impl DB {
     /// 2. 表数据（RowGroups）
     /// 3. 更新 DatabaseHeader
     pub fn checkpoint(&self) -> StorageResult<()> {
-        // 不能对内存数据库执行 checkpoint
-        if self.path == SingleFileStorageManager::IN_MEMORY_PATH {
-            return Ok(());
-        }
-
-        // 获取 block manager 和 metadata manager
-        let fs = Arc::new(LocalFileSystem);
-        let allocator: Arc<dyn BlockAllocator> = Arc::new(NoopBlockAllocator);
-        let buffer_pool = BufferPool::new(allocator, 256 * 1024 * 1024, false, 0);
-        let buffer_manager = StandardBufferManager::new(buffer_pool.clone(), None, fs.clone());
-
-        // 读取当前 header 获取 block_alloc_size
-        let current_header = read_active_header(&*fs, &self.path)?;
-
-        let block_manager = SingleFileBlockManager::new(
-            buffer_manager.clone(),
-            fs.clone(),
-            self.path.clone(),
-            &StorageManagerOptions {
-                read_only: false,
-                use_direct_io: false,
-                debug_initialize: None,
-                block_alloc_size: current_header.block_alloc_size as usize,
-                block_header_size: Some(BLOCK_HEADER_SIZE),
-                storage_version: Some(current_header.serialization_compatibility),
-                encryption_options: Default::default(),
+        self.instance.storage_manager.create_checkpoint(
+            crate::storage::storage_manager::CheckpointOptions {
+                action: crate::storage::storage_manager::CheckpointAction::AlwaysCheckpoint,
+                transaction_id: None,
             },
-        );
-        buffer_manager.set_block_manager(block_manager.clone());
-        block_manager.initialize()?;
-
-        let metadata_manager = Arc::new(MetadataManager::new(
-            block_manager.clone() as Arc<dyn BlockManager>,
-            buffer_manager,
-        ));
-
-        // 设置 MetadataManager 到 block_manager（用于 write_header_with_free_list）
-        block_manager.set_metadata_manager(metadata_manager.clone());
-
-        // 创建 CheckpointManager 并执行 checkpoint
-        let checkpoint_manager = crate::storage::checkpoint::CheckpointManager::new(
-            block_manager.clone() as Arc<dyn BlockManager>,
-            metadata_manager,
-        );
-
-        // 收集所有表信息
-        let tables = self.instance.tables.lock();
-        let table_infos: Vec<crate::storage::checkpoint::TableInfo> = tables
-            .values()
-            .map(|handle| crate::storage::checkpoint::TableInfo {
-                entry: Arc::new(handle.catalog_entry.clone()),
-                storage: handle.storage.clone(),
-            })
-            .collect();
-        drop(tables);
-
-        // 执行 checkpoint，获取新的 header
-        let new_header = checkpoint_manager.create_checkpoint(&table_infos);
-
-        // 写入新的 header（包含 metadata 块注册信息）
-        block_manager.write_header_with_free_list(new_header)?;
-
-        Ok(())
+        )
     }
 }
 
@@ -591,14 +588,29 @@ fn build_table_handle(
     for column in &entry.columns {
         let catalog_ty = from_type_id_catalog(column.type_id);
         let storage_ty = from_type_id_storage(column.type_id);
-        catalog_columns.add_column(CatalogColumnDefinition::new(column.name.clone(), catalog_ty));
-        storage_columns.push(StorageColumnDefinition::new(column.name.clone(), storage_ty));
+        catalog_columns.add_column(CatalogColumnDefinition::new(
+            column.name.clone(),
+            catalog_ty,
+        ));
+        storage_columns.push(StorageColumnDefinition::new(
+            column.name.clone(),
+            storage_ty,
+        ));
     }
     create_info.columns = catalog_columns;
-    let catalog_entry = TableCatalogEntry::new(entry.catalog.clone(), entry.schema.clone(), table_id, create_info);
+    let catalog_entry = TableCatalogEntry::new(
+        entry.catalog.clone(),
+        entry.schema.clone(),
+        table_id,
+        create_info,
+    );
     let persistent_data = entry
         .table_pointer
-        .and_then(|table_pointer| runtime.as_ref().map(|runtime| read_table_data(entry, table_pointer, runtime)))
+        .and_then(|table_pointer| {
+            runtime
+                .as_ref()
+                .map(|runtime| read_table_data(entry, table_pointer, runtime))
+        })
         .transpose()
         .unwrap_or(None)
         .and_then(|data| data.map(Box::new));
@@ -610,7 +622,10 @@ fn build_table_handle(
         storage_columns,
         persistent_data,
     );
-    TableHandle { catalog_entry, storage }
+    TableHandle {
+        catalog_entry,
+        storage,
+    }
 }
 
 fn from_type_id_storage(type_id: u32) -> LogicalType {
@@ -652,7 +667,10 @@ fn to_catalog_type(ty: &LogicalType) -> CatalogLogicalType {
 
 fn read_catalog_from_db(
     path: &str,
-) -> StorageResult<(Vec<catalog_deserializer::CatalogEntry>, Option<Arc<PersistentStorageRuntime>>)> {
+) -> StorageResult<(
+    Vec<catalog_deserializer::CatalogEntry>,
+    Option<Arc<PersistentStorageRuntime>>,
+)> {
     let fs = Arc::new(LocalFileSystem);
     let header = read_active_header(&*fs, path)?;
     if header.meta_block == INVALID_BLOCK {
@@ -695,8 +713,8 @@ fn read_catalog_from_db(
         None,
         BlockReaderType::RegisterBlocks,
     );
-    let entries =
-        catalog_deserializer::read_catalog(&mut reader).map_err(crate::storage::storage_info::StorageError::Io)?;
+    let entries = catalog_deserializer::read_catalog(&mut reader)
+        .map_err(crate::storage::storage_info::StorageError::Io)?;
     let runtime = Arc::new(PersistentStorageRuntime {
         block_manager: block_manager as Arc<dyn BlockManager>,
         metadata_manager,
@@ -765,9 +783,13 @@ fn read_active_header(fs: &dyn FileSystem, path: &str) -> StorageResult<Database
 
     let mut header_buf = vec![0u8; FILE_HEADER_SIZE];
     file.read_at(&mut header_buf, FILE_HEADER_SIZE as u64)?;
-    let h0 = DatabaseHeader::deserialize(&header_buf[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + DatabaseHeader::SERIALIZED_SIZE]);
+    let h0 = DatabaseHeader::deserialize(
+        &header_buf[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + DatabaseHeader::SERIALIZED_SIZE],
+    );
     file.read_at(&mut header_buf, (FILE_HEADER_SIZE * 2) as u64)?;
-    let h1 = DatabaseHeader::deserialize(&header_buf[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + DatabaseHeader::SERIALIZED_SIZE]);
+    let h1 = DatabaseHeader::deserialize(
+        &header_buf[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + DatabaseHeader::SERIALIZED_SIZE],
+    );
     let headers = [h0, h1];
     Ok(headers[MainHeader::active_header_idx(&headers)].clone())
 }
@@ -808,7 +830,11 @@ mod tests {
     #[test]
     fn transient_insert_and_scan_roundtrip() {
         let mut db = DB::open(SingleFileStorageManager::IN_MEMORY_PATH).unwrap();
-        db.create_table("main", "numbers", vec![("id".to_string(), LogicalType::integer())]);
+        db.create_table(
+            "main",
+            "numbers",
+            vec![("id".to_string(), LogicalType::integer())],
+        );
 
         let mut chunk = build_integer_chunk(&[1, 2, 3]);
         db.insert_chunk("numbers", &mut chunk).unwrap();
@@ -840,10 +866,7 @@ mod tests {
         assert_eq!(total, 5000, "expected 5000 rows total");
 
         // Verify values are contiguous 0..5000
-        let mut all_values: Vec<i32> = chunks
-            .iter()
-            .flat_map(|c| read_i32_column(c, 0))
-            .collect();
+        let mut all_values: Vec<i32> = chunks.iter().flat_map(|c| read_i32_column(c, 0)).collect();
         all_values.sort_unstable();
         let expected: Vec<i32> = (0..5000).collect();
         assert_eq!(all_values, expected);
@@ -917,7 +940,10 @@ mod tests {
                 .scan_chunks(table_name, None)
                 .expect("scan should succeed");
             let total_rows: usize = chunks.iter().map(|c| c.size()).sum();
-            eprintln!("  table '{table_name}': {total_rows} rows in {} chunks", chunks.len());
+            eprintln!(
+                "  table '{table_name}': {total_rows} rows in {} chunks",
+                chunks.len()
+            );
             assert!(
                 total_rows > 0,
                 "table '{table_name}' returned 0 rows — persistent scan may be broken"
@@ -990,10 +1016,10 @@ mod tests {
 
         let seg = ColumnSegment::create_persistent(
             LogicalType::integer(),
-            42,   // block_id
-            16,   // byte offset in block
-            100,  // row count
-            400,  // segment_size = 100 rows * 4 bytes
+            42,  // block_id
+            16,  // byte offset in block
+            100, // row count
+            400, // segment_size = 100 rows * 4 bytes
             CompressionType::Uncompressed,
             SegmentStatistics::default(),
         );
@@ -1003,7 +1029,10 @@ mod tests {
         assert_eq!(seg.segment_size, 400);
         assert!(seg.block_handle.is_none());
         assert_eq!(seg.segment_type, ColumnSegmentType::Persistent);
-        assert!(seg.buffer.lock().is_empty(), "persistent segment buffer must be empty");
+        assert!(
+            seg.buffer.lock().is_empty(),
+            "persistent segment buffer must be empty"
+        );
     }
 
     /// Verify transient segment scan reads the correct bytes.
@@ -1034,7 +1063,13 @@ mod tests {
         // Use a DataChunk to create a properly-initialized Vector
         let mut chunk = DataChunk::new();
         chunk.initialize(&[LogicalType::integer()], values.len());
-        seg.scan(&state, values.len() as u64, &mut chunk.data[0], 0, ScanVectorType::ScanEntireVector);
+        seg.scan(
+            &state,
+            values.len() as u64,
+            &mut chunk.data[0],
+            0,
+            ScanVectorType::ScanEntireVector,
+        );
 
         let raw = chunk.data[0].raw_data();
         for (i, v) in values.iter().enumerate() {
@@ -1071,15 +1106,22 @@ mod tests {
 
         // Create database and table
         let mut db = DB::open(&db_path).expect("Failed to create database");
-        db.create_table("main", "test_table", vec![
-            ("id".to_string(), LogicalType::integer()),
-            ("value".to_string(), LogicalType::integer()),
-        ]);
+        db.create_table(
+            "main",
+            "test_table",
+            vec![
+                ("id".to_string(), LogicalType::integer()),
+                ("value".to_string(), LogicalType::integer()),
+            ],
+        );
 
         // Insert data
         let values: Vec<i32> = (1..=100).collect();
         let mut chunk = DataChunk::new();
-        chunk.initialize(&[LogicalType::integer(), LogicalType::integer()], values.len());
+        chunk.initialize(
+            &[LogicalType::integer(), LogicalType::integer()],
+            values.len(),
+        );
         for (i, v) in values.iter().enumerate() {
             // First column: id
             chunk.data[0].raw_data_mut()[i * 4..(i + 1) * 4].copy_from_slice(&v.to_le_bytes());
@@ -1089,10 +1131,13 @@ mod tests {
         }
         chunk.set_cardinality(values.len());
 
-        db.insert_chunk("test_table", &mut chunk).expect("Failed to insert chunk");
+        db.insert_chunk("test_table", &mut chunk)
+            .expect("Failed to insert chunk");
 
         // Verify data before checkpoint
-        let chunks_before = db.scan_chunks_silent("test_table", None).expect("Failed to scan");
+        let chunks_before = db
+            .scan_chunks_silent("test_table", None)
+            .expect("Failed to scan");
         let rows_before: usize = chunks_before.iter().map(|c| c.size()).sum();
         assert_eq!(rows_before, 100, "Expected 100 rows before checkpoint");
 
@@ -1101,7 +1146,10 @@ mod tests {
 
         // Verify file exists and has content
         let metadata = std::fs::metadata(&db_path).expect("Database file should exist");
-        assert!(metadata.len() > 0, "Database file should have content after checkpoint");
+        assert!(
+            metadata.len() > 0,
+            "Database file should have content after checkpoint"
+        );
 
         // Cleanup
         drop(db);
@@ -1119,16 +1167,19 @@ mod tests {
         // Phase 1: Create, insert, checkpoint, close
         {
             let mut db = DB::open(&db_path).expect("Failed to create database");
-            db.create_table("main", "persist_test", vec![
-                ("id".to_string(), LogicalType::integer()),
-            ]);
+            db.create_table(
+                "main",
+                "persist_test",
+                vec![("id".to_string(), LogicalType::integer())],
+            );
 
             // Insert multiple batches
             for batch in 0..5 {
                 let start = batch * 1000;
                 let values: Vec<i32> = (start..start + 1000).collect();
                 let mut chunk = build_integer_chunk(&values);
-                db.insert_chunk("persist_test", &mut chunk).expect("Insert failed");
+                db.insert_chunk("persist_test", &mut chunk)
+                    .expect("Insert failed");
             }
 
             // Checkpoint to persist
@@ -1141,18 +1192,21 @@ mod tests {
 
             // Verify table exists
             let tables = db.tables();
-            assert!(tables.contains(&"persist_test".to_string()), "Table should exist");
+            assert!(
+                tables.contains(&"persist_test".to_string()),
+                "Table should exist"
+            );
 
             // Verify data
-            let chunks = db.scan_chunks_silent("persist_test", None).expect("Scan failed");
+            let chunks = db
+                .scan_chunks_silent("persist_test", None)
+                .expect("Scan failed");
             let total_rows: usize = chunks.iter().map(|c| c.size()).sum();
             assert_eq!(total_rows, 5000, "Expected 5000 rows after reopen");
 
             // Verify data content
-            let mut all_values: Vec<i32> = chunks
-                .iter()
-                .flat_map(|c| read_i32_column(c, 0))
-                .collect();
+            let mut all_values: Vec<i32> =
+                chunks.iter().flat_map(|c| read_i32_column(c, 0)).collect();
             all_values.sort_unstable();
             let expected: Vec<i32> = (0..5000).collect();
             assert_eq!(all_values, expected, "Data should be preserved");
@@ -1172,54 +1226,90 @@ mod tests {
 
         // Create database
         let mut db = DB::open(&db_path).expect("Failed to create database");
-        db.create_table("main", "multi_test", vec![
-            ("id".to_string(), LogicalType::integer()),
-        ]);
+        db.create_table(
+            "main",
+            "multi_test",
+            vec![("id".to_string(), LogicalType::integer())],
+        );
 
         // Create two connections
         let conn1 = db.connect();
         let conn2 = db.connect();
 
         // Verify each connection has independent transaction state
-        assert!(conn1.is_auto_commit(), "conn1 should be in auto-commit mode initially");
-        assert!(conn2.is_auto_commit(), "conn2 should be in auto-commit mode initially");
+        assert!(
+            conn1.is_auto_commit(),
+            "conn1 should be in auto-commit mode initially"
+        );
+        assert!(
+            conn2.is_auto_commit(),
+            "conn2 should be in auto-commit mode initially"
+        );
 
         // Connection 1: manual transaction
-        conn1.begin_transaction().expect("Failed to begin transaction on conn1");
+        conn1
+            .begin_transaction()
+            .expect("Failed to begin transaction on conn1");
 
         // Debug: check state after begin
         let auto_commit_after_begin = conn1.is_auto_commit();
-        println!("After begin_transaction: auto_commit={}, has_active={}",
-                 auto_commit_after_begin, conn1.has_active_transaction());
+        println!(
+            "After begin_transaction: auto_commit={}, has_active={}",
+            auto_commit_after_begin,
+            conn1.has_active_transaction()
+        );
 
-        assert!(!auto_commit_after_begin, "conn1 should not be in auto-commit after begin");
-        assert!(conn1.has_active_transaction(), "conn1 should have active transaction");
+        assert!(
+            !auto_commit_after_begin,
+            "conn1 should not be in auto-commit after begin"
+        );
+        assert!(
+            conn1.has_active_transaction(),
+            "conn1 should have active transaction"
+        );
 
         // Connection 2: should still be in auto-commit
-        assert!(conn2.is_auto_commit(), "conn2 should still be in auto-commit");
-        assert!(!conn2.has_active_transaction(), "conn2 should not have active transaction");
+        assert!(
+            conn2.is_auto_commit(),
+            "conn2 should still be in auto-commit"
+        );
+        assert!(
+            !conn2.has_active_transaction(),
+            "conn2 should not have active transaction"
+        );
 
         // Insert data through conn1
         let values: Vec<i32> = (1..=50).collect();
         let mut chunk = build_integer_chunk(&values);
-        conn1.insert_chunk("multi_test", &mut chunk).expect("Insert through conn1 failed");
+        conn1
+            .insert_chunk("multi_test", &mut chunk)
+            .expect("Insert through conn1 failed");
 
         // Commit conn1 transaction
         conn1.commit().expect("Failed to commit conn1");
-        assert!(conn1.is_auto_commit(), "conn1 should be back in auto-commit after commit");
+        assert!(
+            conn1.is_auto_commit(),
+            "conn1 should be back in auto-commit after commit"
+        );
 
         // Verify data
-        let chunks = db.scan_chunks_silent("multi_test", None).expect("Scan failed");
+        let chunks = db
+            .scan_chunks_silent("multi_test", None)
+            .expect("Scan failed");
         let total_rows: usize = chunks.iter().map(|c| c.size()).sum();
         assert_eq!(total_rows, 50, "Expected 50 rows after conn1 commit");
 
         // Connection 2: insert in auto-commit mode
         let values2: Vec<i32> = (51..=100).collect();
         let mut chunk2 = build_integer_chunk(&values2);
-        conn2.insert_chunk("multi_test", &mut chunk2).expect("Insert through conn2 failed");
+        conn2
+            .insert_chunk("multi_test", &mut chunk2)
+            .expect("Insert through conn2 failed");
 
         // Verify total data
-        let chunks = db.scan_chunks_silent("multi_test", None).expect("Scan failed");
+        let chunks = db
+            .scan_chunks_silent("multi_test", None)
+            .expect("Scan failed");
         let total_rows: usize = chunks.iter().map(|c| c.size()).sum();
         assert_eq!(total_rows, 100, "Expected 100 rows total");
 
@@ -1240,33 +1330,42 @@ mod tests {
 
         // Create database
         let mut db = DB::open(&db_path).expect("Failed to create database");
-        db.create_table("main", "rollback_test", vec![
-            ("id".to_string(), LogicalType::integer()),
-        ]);
+        db.create_table(
+            "main",
+            "rollback_test",
+            vec![("id".to_string(), LogicalType::integer())],
+        );
 
         // Insert initial data (auto-commit)
         let initial_values: Vec<i32> = (1..=10).collect();
         let mut chunk1 = build_integer_chunk(&initial_values);
-        db.insert_chunk("rollback_test", &mut chunk1).expect("Initial insert failed");
+        db.insert_chunk("rollback_test", &mut chunk1)
+            .expect("Initial insert failed");
 
         // Verify initial data
-        let chunks = db.scan_chunks_silent("rollback_test", None).expect("Scan failed");
+        let chunks = db
+            .scan_chunks_silent("rollback_test", None)
+            .expect("Scan failed");
         let initial_rows: usize = chunks.iter().map(|c| c.size()).sum();
         assert_eq!(initial_rows, 10, "Expected 10 initial rows");
 
         // Start a transaction, insert, then rollback
         let conn = db.connect();
-        conn.begin_transaction().expect("Failed to begin transaction");
+        conn.begin_transaction()
+            .expect("Failed to begin transaction");
 
         let rollback_values: Vec<i32> = (100..=200).collect();
         let mut chunk2 = build_integer_chunk(&rollback_values);
-        conn.insert_chunk("rollback_test", &mut chunk2).expect("Insert in transaction failed");
+        conn.insert_chunk("rollback_test", &mut chunk2)
+            .expect("Insert in transaction failed");
 
         // Rollback
         conn.rollback().expect("Failed to rollback");
 
         // Verify data is still 10 rows (rollback should undo the insert)
-        let chunks = db.scan_chunks_silent("rollback_test", None).expect("Scan failed");
+        let chunks = db
+            .scan_chunks_silent("rollback_test", None)
+            .expect("Scan failed");
         let final_rows: usize = chunks.iter().map(|c| c.size()).sum();
 
         // Note: Due to simplified LocalStorage implementation, the row count behavior

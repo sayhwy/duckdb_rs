@@ -19,9 +19,7 @@ impl SegmentStatistics {
 
     /// Create new segment statistics from existing base statistics
     pub fn from_stats(stats: BaseStatistics) -> Self {
-        Self {
-            statistics: stats,
-        }
+        Self { statistics: stats }
     }
 
     /// Get reference to the base statistics
@@ -86,7 +84,8 @@ mod tests {
 
     #[test]
     fn test_from_stats() {
-        let base_stats = BaseStatistics::create_unknown(crate::common::types::LogicalType::integer());
+        let base_stats =
+            BaseStatistics::create_unknown(crate::common::types::LogicalType::integer());
         let seg_stats = SegmentStatistics::from_stats(base_stats);
 
         assert!(seg_stats.statistics().can_have_null());
@@ -122,4 +121,3 @@ mod tests {
         assert!(!stats.has_no_null());
     }
 }
-

@@ -78,7 +78,10 @@ impl StringStats {
 
     /// Extract string from byte array (stops at first null byte)
     fn get_string_value(bytes: &[u8; MAX_STRING_MINMAX_SIZE]) -> String {
-        let len = bytes.iter().position(|&b| b == 0).unwrap_or(MAX_STRING_MINMAX_SIZE);
+        let len = bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(MAX_STRING_MINMAX_SIZE);
         String::from_utf8_lossy(&bytes[..len]).to_string()
     }
 

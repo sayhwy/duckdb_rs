@@ -28,19 +28,18 @@
 //! | `reference_map_t<DataTable, shared_ptr<DataTable>>` | `modified_tables: Mutex<HashSet<u64>>` |
 //! | `atomic<idx_t> catalog_version` | `catalog_version: AtomicU64` |
 
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::types::{
-    TransactionId, Idx, ActiveTransactionState, UndoFlags,
-    MAXIMUM_QUERY_ID, NOT_DELETED_ID,
-};
-use super::transaction::Transaction;
-use super::undo_buffer::{UndoBuffer, UndoBufferProperties, CommitInfo, IteratorState};
 use super::append_info::AppendInfo;
 use super::delete_info::DeleteInfo;
+use super::transaction::Transaction;
+use super::types::{
+    ActiveTransactionState, Idx, MAXIMUM_QUERY_ID, NOT_DELETED_ID, TransactionId, UndoFlags,
+};
+use super::undo_buffer::{CommitInfo, IteratorState, UndoBuffer, UndoBufferProperties};
 use crate::storage::local_storage::LocalStorage;
 use crate::storage::storage_lock::{StorageLock, StorageLockKey};
 use crate::storage::storage_manager::StorageManager;
@@ -69,7 +68,10 @@ impl TransactionData {
 
     /// 直接指定 ID 构造（C++: `TransactionData(transaction_t, transaction_t)`）。
     pub fn new(transaction_id: TransactionId, start_time: TransactionId) -> Self {
-        Self { transaction_id, start_time }
+        Self {
+            transaction_id,
+            start_time,
+        }
     }
 }
 
@@ -100,17 +102,19 @@ impl DatabaseModificationType {
     // ── 标志位常量 ───────────────────────────────────────────────────────────
 
     pub const INSERT_DATA_WITH_INDEX: u32 = 1 << 0;
-    pub const DELETE_DATA:            u32 = 1 << 1;
-    pub const UPDATE_DATA:            u32 = 1 << 2;
-    pub const ALTER_TABLE:            u32 = 1 << 3;
-    pub const CREATE_CATALOG_ENTRY:   u32 = 1 << 4;
-    pub const DROP_CATALOG_ENTRY:     u32 = 1 << 5;
-    pub const SEQUENCE:               u32 = 1 << 6;
-    pub const CREATE_INDEX:           u32 = 1 << 7;
+    pub const DELETE_DATA: u32 = 1 << 1;
+    pub const UPDATE_DATA: u32 = 1 << 2;
+    pub const ALTER_TABLE: u32 = 1 << 3;
+    pub const CREATE_CATALOG_ENTRY: u32 = 1 << 4;
+    pub const DROP_CATALOG_ENTRY: u32 = 1 << 5;
+    pub const SEQUENCE: u32 = 1 << 6;
+    pub const CREATE_INDEX: u32 = 1 << 7;
 
     // ── 构造 ─────────────────────────────────────────────────────────────────
 
-    pub fn new(flags: u32) -> Self { Self(flags) }
+    pub fn new(flags: u32) -> Self {
+        Self(flags)
+    }
 
     // ── 判断 ─────────────────────────────────────────────────────────────────
 
@@ -205,7 +209,6 @@ impl ActiveTableLock {
 /// DuckDB 原生事务（C++: `class DuckTransaction`）。
 pub struct DuckTransaction {
     // ── 事务标识 ──────────────────────────────────────────────────────────────
-
     /// 事务的 start_time（用于 MVCC 可见性判断）（C++: `transaction_t start_time`）。
     pub start_time: TransactionId,
 
@@ -222,7 +225,6 @@ pub struct DuckTransaction {
     pub awaiting_cleanup: bool,
 
     // ── 可见性 / 读写状态 ──────────────────────────────────────────────────────
-
     /// 是否只读（C++: `bool is_read_only` in Transaction base）。
     ///
     /// 使用 `AtomicBool` 以支持通过 `Arc<dyn Transaction>` 调用 `set_read_write(&self)`。
@@ -232,31 +234,26 @@ pub struct DuckTransaction {
     active_query: AtomicU64,
 
     // ── 撤销日志 ──────────────────────────────────────────────────────────────
-
     /// MVCC 撤销日志（C++: `UndoBuffer undo_buffer`）。
     pub undo_buffer: UndoBuffer,
 
     // ── 本地未提交数据 ─────────────────────────────────────────────────────────
-
     /// 本地 Append 缓冲（C++: `unique_ptr<LocalStorage> storage`）。
     pub storage: Box<LocalStorage>,
 
     // ── 锁 ────────────────────────────────────────────────────────────────────
-
     /// Checkpoint 写锁（Shared 类型）（C++: `unique_ptr<StorageLockKey> write_lock`）。
     ///
     /// 非 None 时，表示事务已持有 checkpoint 锁，防止并发 checkpoint。
     write_lock: Option<Box<StorageLockKey>>,
 
     // ── 序列使用快照 ───────────────────────────────────────────────────────────
-
     /// 序列 ID → 本事务快照值（C++: `reference_map_t<SequenceCatalogEntry, SequenceValue>`）。
     ///
     /// 受 `sequence_lock` 保护，以支持并发 PushSequenceUsage。
     sequence_usage: Mutex<HashMap<u64, SequenceValue>>,
 
     // ── 修改的表（持有 ID 集合防止错误调度）──────────────────────────────────
-
     /// 被本事务修改的表 ID 集合（C++: `reference_map_t<DataTable, shared_ptr<DataTable>>`）。
     ///
     /// C++ 持有 `shared_ptr<DataTable>` 防止表在事务提交前被析构；
@@ -264,7 +261,6 @@ pub struct DuckTransaction {
     modified_tables: Mutex<HashSet<u64>>,
 
     // ── 按表的 Checkpoint 锁缓存 ───────────────────────────────────────────────
-
     /// 表 ID → 活跃 Checkpoint 锁缓存（C++: `reference_map_t<DataTableInfo, ActiveTableLock>`）。
     ///
     /// 受 `active_locks_lock` 保护。
@@ -326,7 +322,9 @@ impl DuckTransaction {
             8 + extra_data.len()
         };
 
-        let entry_ref = self.undo_buffer.create_entry(UndoFlags::CatalogEntry, alloc_size);
+        let entry_ref = self
+            .undo_buffer
+            .create_entry(UndoFlags::CatalogEntry, alloc_size);
         // 载荷格式：catalog_entry_id(8B) [+ extra_data_size(8B) + extra_data(N B)]
         // 注：实际写入操作待 UndoBufferReference 提供写接口后填充。
         let _ = (entry_ref, catalog_entry_id, extra_data);
@@ -349,7 +347,9 @@ impl DuckTransaction {
         self.modify_table(info.table_id);
 
         let alloc_size = info.serialized_size();
-        let entry_ref = self.undo_buffer.create_entry(UndoFlags::DeleteTuple, alloc_size);
+        let entry_ref = self
+            .undo_buffer
+            .create_entry(UndoFlags::DeleteTuple, alloc_size);
         // TODO: 将 info 序列化写入 entry_ref.payload_mut()
         let _ = (entry_ref, info);
     }
@@ -372,14 +372,13 @@ impl DuckTransaction {
         };
         let mut payload = vec![0u8; alloc_size];
         info.serialize(&mut payload);
-        self.undo_buffer
-            .write_payload(
-                entry_ref
-                    .slab_index
-                    .expect("Append undo entry must have a slab index"),
-                entry_ref.position,
-                &payload,
-            );
+        self.undo_buffer.write_payload(
+            entry_ref
+                .slab_index
+                .expect("Append undo entry must have a slab index"),
+            entry_ref.position,
+            &payload,
+        );
     }
 
     /// 在 Undo 日志中为 UpdateInfo 预留空间，返回可写引用
@@ -397,9 +396,11 @@ impl DuckTransaction {
         let alloc_size = std::mem::size_of::<u64>() * 6 // 固定字段（segment_id, table_id, column_index, row_group_start, vector_index, version_number）
             + std::mem::size_of::<u64>() * 2             // prev + next (UndoBufferPointer)
             + std::mem::size_of::<u16>() * 2             // n, max
-            + entries * (4 + type_size);                 // tuples(sel_t) + values
+            + entries * (4 + type_size); // tuples(sel_t) + values
 
-        let entry_ref = self.undo_buffer.create_entry(UndoFlags::UpdateTuple, alloc_size);
+        let entry_ref = self
+            .undo_buffer
+            .create_entry(UndoFlags::UpdateTuple, alloc_size);
         // TODO: 在 entry_ref 所指载荷中初始化 UpdateInfo 固定字段：
         //   table_id, transaction_id=self.transaction_id, row_group_start
         let _ = (table_id, entries, row_group_start);
@@ -493,7 +494,8 @@ impl DuckTransaction {
 
         // C++: auto &storage_manager = db.GetStorageManager();
         //      return storage_manager.AutomaticCheckpoint(properties.estimated_size);
-        db.storage_manager.automatic_checkpoint(properties.estimated_size as u64)
+        db.storage_manager
+            .automatic_checkpoint(properties.estimated_size as u64)
     }
 
     /// 是否需要将本次提交写入 WAL（C++: `DuckTransaction::ShouldWriteToWAL()`）。
@@ -671,14 +673,17 @@ impl DuckTransaction {
         // C++: auto &storage_manager = db.GetStorageManager();
         //      auto wal = storage_manager.GetWAL();
         //      commit_state = storage_manager.GenStorageCommitState(*wal);
-        let mut commit_state = storage_manager.gen_storage_commit_state()
-            .ok_or_else(|| "Failed to generate StorageCommitState (WAL not available)".to_string())?;
+        let mut commit_state = storage_manager.gen_storage_commit_state().ok_or_else(|| {
+            "Failed to generate StorageCommitState (WAL not available)".to_string()
+        })?;
 
         // 使用 catch_unwind 捕获 panic，模拟 C++ 的 try-catch
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // C++: storage->Commit(commit_state.get());
             // 将本地 Append 数据 flush 到 WAL
-            let append_entries = self.storage.commit(tables)
+            let append_entries = self
+                .storage
+                .commit(tables)
                 .map_err(|e| format!("LocalStorage commit failed: {:?}", e))?;
             for (table_id, row_start, row_count) in append_entries {
                 self.push_append(table_id, row_start, row_count);
@@ -686,7 +691,8 @@ impl DuckTransaction {
 
             // C++: undo_buffer.WriteToWAL(*wal, commit_state.get());
             // 将 Undo 日志（catalog/delete/update）写入 WAL
-            self.undo_buffer.write_to_wal(commit_state.as_mut(), tables)
+            self.undo_buffer
+                .write_to_wal(commit_state.as_mut(), tables)
                 .map_err(|e| format!("UndoBuffer write_to_wal failed: {:?}", e))?;
 
             // C++: if (commit_state->HasRowGroupData()) {
@@ -801,7 +807,8 @@ impl DuckTransaction {
             Err(e) => {
                 // 提交失败，回滚 UndoBuffer
                 // C++: undo_buffer.RevertCommit(iterator_state, this->transaction_id);
-                self.undo_buffer.revert_commit(&iterator_state, self.transaction_id);
+                self.undo_buffer
+                    .revert_commit(&iterator_state, self.transaction_id);
 
                 // C++: if (commit_state) { commit_state->RevertCommit(); }
                 if let Some(cs) = commit_state {
@@ -825,7 +832,8 @@ impl DuckTransaction {
 
         if let Err(_e) = undo_result {
             // Undo 提交失败（panic），需要回滚
-            self.undo_buffer.revert_commit(&iterator_state, self.transaction_id);
+            self.undo_buffer
+                .revert_commit(&iterator_state, self.transaction_id);
 
             if let Some(cs) = commit_state {
                 cs.revert_commit();
@@ -839,7 +847,8 @@ impl DuckTransaction {
         if let Some(cs) = commit_state {
             if let Err(e) = cs.flush_commit() {
                 // Flush 失败，需要回滚
-                self.undo_buffer.revert_commit(&iterator_state, self.transaction_id);
+                self.undo_buffer
+                    .revert_commit(&iterator_state, self.transaction_id);
                 cs.revert_commit();
 
                 return Err(format!("FlushCommit failed: {:?}", e));
@@ -874,7 +883,6 @@ impl DuckTransaction {
 
         Ok(())
     }
-
 
     /// 回滚（C++: `DuckTransaction::Rollback()`）。
     ///

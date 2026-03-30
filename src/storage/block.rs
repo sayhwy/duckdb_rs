@@ -44,11 +44,7 @@ impl Block {
     /// 对应 C++ Block(BlockAllocator&, block_id_t, idx_t block_size, idx_t block_header_size)
     ///
     /// 创建指定大小的 Block（分配大小必须是 SECTOR_SIZE 的整数倍）。
-    pub fn new(
-        id: BlockId,
-        alloc_size: usize,
-        block_header_size: usize,
-    ) -> Self {
+    pub fn new(id: BlockId, alloc_size: usize, block_header_size: usize) -> Self {
         debug_assert_eq!(
             alloc_size % SECTOR_SIZE,
             0,

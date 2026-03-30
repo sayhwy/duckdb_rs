@@ -187,7 +187,10 @@ impl ScanFilterInfo {
     }
 
     pub fn column_has_filters(&self, col_idx: usize) -> bool {
-        self.column_has_filter.get(col_idx).copied().unwrap_or(false)
+        self.column_has_filter
+            .get(col_idx)
+            .copied()
+            .unwrap_or(false)
     }
 
     pub fn set_filter_always_true(&mut self, filter_idx: usize) {

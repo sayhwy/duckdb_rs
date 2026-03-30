@@ -75,8 +75,8 @@
 //! - `Clear()` -> `clear()`
 
 use super::column_checkpoint_state::{BlockManager, PartialBlockManager, PartialBlockState};
-use super::types::{Idx, MetaBlockPointer};
 use super::table_statistics::TableStatistics;
+use super::types::{Idx, MetaBlockPointer};
 use std::sync::Arc;
 
 // ============================================================================
@@ -179,12 +179,17 @@ pub struct InMemoryRowGroupWriter {
 
 impl InMemoryRowGroupWriter {
     pub fn new(options: CheckpointOptions) -> Self {
-        Self { metadata_writer: Vec::new(), options }
+        Self {
+            metadata_writer: Vec::new(),
+            options,
+        }
     }
 }
 
 impl RowGroupWriter for InMemoryRowGroupWriter {
-    fn get_checkpoint_options(&self) -> CheckpointOptions { self.options }
+    fn get_checkpoint_options(&self) -> CheckpointOptions {
+        self.options
+    }
     fn get_meta_block_pointer(&self) -> MetaBlockPointer {
         MetaBlockPointer::default()
     }
@@ -202,7 +207,10 @@ pub struct InMemoryTableDataWriter {
 
 impl InMemoryTableDataWriter {
     pub fn new(checkpointer_id: u64, options: CheckpointOptions) -> Self {
-        Self { checkpointer_id, options }
+        Self {
+            checkpointer_id,
+            options,
+        }
     }
 }
 
@@ -213,7 +221,9 @@ impl TableDataWriter for InMemoryTableDataWriter {
     fn finalize_table(&mut self, _global_stats: &TableStatistics, _total_rows: Idx) {
         todo!("在内存中序列化表统计信息")
     }
-    fn get_checkpoint_options(&self) -> CheckpointOptions { self.options }
+    fn get_checkpoint_options(&self) -> CheckpointOptions {
+        self.options
+    }
 }
 
 // ─── InMemoryPartialBlock ─────────────────────────────────────────────────────
@@ -235,7 +245,12 @@ impl super::column_checkpoint_state::PartialBlock for InMemoryPartialBlock {
     fn flush(&mut self, _free_space_left: Idx) {
         todo!("更新列段引用，不写磁盘")
     }
-    fn merge(&mut self, _other: &mut dyn super::column_checkpoint_state::PartialBlock, _offset: Idx, _size: Idx) {
+    fn merge(
+        &mut self,
+        _other: &mut dyn super::column_checkpoint_state::PartialBlock,
+        _offset: Idx,
+        _size: Idx,
+    ) {
         todo!("合并两个内存块")
     }
     fn add_segment_to_tail(&mut self, _offset_in_block: u32) {
@@ -288,7 +303,7 @@ impl InMemoryCheckpointer {
             db_id,
             options: CheckpointOptions {
                 force,
-                in_memory: true
+                in_memory: true,
             },
             partial_block_manager: PartialBlockManager,
         }

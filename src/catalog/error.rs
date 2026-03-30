@@ -2,8 +2,8 @@
 //!
 //! 对应 C++: `duckdb/common/exception/catalog_exception.hpp`
 
-use std::fmt;
 use super::types::CatalogType;
+use std::fmt;
 
 // ─── CatalogError ──────────────────────────────────────────────────────────────
 
@@ -23,10 +23,7 @@ pub enum CatalogError {
         did_you_mean: Option<String>,
     },
     /// 依赖冲突（C++: `Cannot drop ... because there are entries that depend on it`）。
-    DependencyViolation {
-        name: String,
-        reason: String,
-    },
+    DependencyViolation { name: String, reason: String },
     /// 类型不匹配（C++: `... is not an ...`）。
     TypeMismatch {
         expected: CatalogType,
@@ -45,11 +42,18 @@ pub enum CatalogError {
 
 impl CatalogError {
     pub fn already_exists(catalog_type: CatalogType, name: impl Into<String>) -> Self {
-        Self::AlreadyExists { catalog_type, name: name.into() }
+        Self::AlreadyExists {
+            catalog_type,
+            name: name.into(),
+        }
     }
 
     pub fn not_found(catalog_type: CatalogType, name: impl Into<String>) -> Self {
-        Self::EntryNotFound { catalog_type, name: name.into(), did_you_mean: None }
+        Self::EntryNotFound {
+            catalog_type,
+            name: name.into(),
+            did_you_mean: None,
+        }
     }
 
     pub fn not_found_with_hint(
@@ -65,11 +69,22 @@ impl CatalogError {
     }
 
     pub fn dependency_violation(name: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::DependencyViolation { name: name.into(), reason: reason.into() }
+        Self::DependencyViolation {
+            name: name.into(),
+            reason: reason.into(),
+        }
     }
 
-    pub fn type_mismatch(expected: CatalogType, actual: CatalogType, name: impl Into<String>) -> Self {
-        Self::TypeMismatch { expected, actual, name: name.into() }
+    pub fn type_mismatch(
+        expected: CatalogType,
+        actual: CatalogType,
+        name: impl Into<String>,
+    ) -> Self {
+        Self::TypeMismatch {
+            expected,
+            actual,
+            name: name.into(),
+        }
     }
 
     pub fn transaction_conflict(name: impl Into<String>) -> Self {
@@ -92,10 +107,15 @@ impl CatalogError {
 impl fmt::Display for CatalogError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CatalogError::AlreadyExists { catalog_type, name } =>
-                write!(f, "Catalog {} \"{}\" already exists!", catalog_type, name),
+            CatalogError::AlreadyExists { catalog_type, name } => {
+                write!(f, "Catalog {} \"{}\" already exists!", catalog_type, name)
+            }
 
-            CatalogError::EntryNotFound { catalog_type, name, did_you_mean } => {
+            CatalogError::EntryNotFound {
+                catalog_type,
+                name,
+                did_you_mean,
+            } => {
                 write!(f, "{} with name \"{}\" does not exist!", catalog_type, name)?;
                 if let Some(hint) = did_you_mean {
                     write!(f, " Did you mean \"{}\"?", hint)?;
@@ -103,23 +123,27 @@ impl fmt::Display for CatalogError {
                 Ok(())
             }
 
-            CatalogError::DependencyViolation { name, reason } =>
-                write!(f, "Cannot drop \"{}\" because there are entries that depend on it: {}", name, reason),
+            CatalogError::DependencyViolation { name, reason } => write!(
+                f,
+                "Cannot drop \"{}\" because there are entries that depend on it: {}",
+                name, reason
+            ),
 
-            CatalogError::TypeMismatch { expected, actual, name } =>
-                write!(f, "\"{}\" is not a {} (it is a {})", name, expected, actual),
+            CatalogError::TypeMismatch {
+                expected,
+                actual,
+                name,
+            } => write!(f, "\"{}\" is not a {} (it is a {})", name, expected, actual),
 
-            CatalogError::TransactionConflict { name } =>
-                write!(f, "Catalog write-write conflict on \"{}\"", name),
+            CatalogError::TransactionConflict { name } => {
+                write!(f, "Catalog write-write conflict on \"{}\"", name)
+            }
 
-            CatalogError::InvalidOperation(msg) =>
-                write!(f, "Invalid catalog operation: {}", msg),
+            CatalogError::InvalidOperation(msg) => write!(f, "Invalid catalog operation: {}", msg),
 
-            CatalogError::Io(msg) =>
-                write!(f, "Catalog IO error: {}", msg),
+            CatalogError::Io(msg) => write!(f, "Catalog IO error: {}", msg),
 
-            CatalogError::Other(msg) =>
-                write!(f, "Catalog error: {}", msg),
+            CatalogError::Other(msg) => write!(f, "Catalog error: {}", msg),
         }
     }
 }

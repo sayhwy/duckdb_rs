@@ -24,10 +24,10 @@ use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
 
+use super::duck_transaction_manager::{DuckTransactionManager, DuckTxnHandle};
 use super::meta_transaction::MetaTransaction;
 use super::transaction_manager::ErrorData;
 use super::types::TransactionId;
-use super::duck_transaction_manager::{DuckTransactionManager, DuckTxnHandle};
 use crate::storage::data_table::DataTable;
 
 // ─── TransactionError ──────────────────────────────────────────────────────────
@@ -182,7 +182,9 @@ impl TransactionContext {
     pub fn begin_transaction(&self) -> Result<(), TransactionError> {
         let mut current = self.current_transaction.lock();
         if current.is_some() {
-            return Err(TransactionError::new("cannot begin transaction: already in transaction"));
+            return Err(TransactionError::new(
+                "cannot begin transaction: already in transaction",
+            ));
         }
         let start_timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -205,8 +207,9 @@ impl TransactionContext {
     /// # Errors
     /// 提交失败时返回错误（C++: `ThrowException(error)`）。
     pub fn commit(&self) -> Result<(), TransactionError> {
-        let txn = self.current_transaction.lock().take()
-            .ok_or_else(|| TransactionError::new("TransactionContext::commit called without active transaction"))?;
+        let txn = self.current_transaction.lock().take().ok_or_else(|| {
+            TransactionError::new("TransactionContext::commit called without active transaction")
+        })?;
 
         // C++: auto error = transaction->Commit();
         let result = txn.commit();
@@ -237,7 +240,8 @@ impl TransactionContext {
 
     /// 获取活跃查询 ID（C++: `GetActiveQuery()`）。
     pub fn get_active_query(&self) -> TransactionId {
-        self.current_transaction.lock()
+        self.current_transaction
+            .lock()
             .as_ref()
             .map(|txn| txn.get_active_query())
             .unwrap_or(super::types::MAXIMUM_QUERY_ID)

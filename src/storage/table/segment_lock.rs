@@ -19,7 +19,9 @@ use parking_lot::MutexGuard;
 /// let lock = tree.lock();
 /// let root = tree.get_root_segment(&lock);
 /// ```
-pub struct SegmentLock<'a, T: Send + Sync>(pub(super) MutexGuard<'a, Vec<super::segment_tree::SegmentNode<T>>>);
+pub struct SegmentLock<'a, T: Send + Sync>(
+    pub(super) MutexGuard<'a, Vec<super::segment_tree::SegmentNode<T>>>,
+);
 
 impl<'a, T: Send + Sync> SegmentLock<'a, T> {
     /// Explicitly release the lock ahead of its natural scope end.

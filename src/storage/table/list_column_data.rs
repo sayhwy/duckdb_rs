@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use super::column_data::{ColumnData};
+use super::column_data::ColumnData;
 use super::validity_column_data::ValidityColumnData;
 
 /// Variable-length list column.
@@ -25,10 +25,10 @@ pub struct ListColumnData {
 }
 
 impl ListColumnData {
-    pub fn new(
-        child_column: Arc<ColumnData>,
-        validity: Arc<ValidityColumnData>,
-    ) -> Self {
-        ListColumnData { child_column, validity }
+    pub fn new(child_column: Arc<ColumnData>, validity: Arc<ValidityColumnData>) -> Self {
+        ListColumnData {
+            child_column,
+            validity,
+        }
     }
 }

@@ -167,15 +167,23 @@ mod tests {
     #[test]
     fn block_pointer_validity() {
         use crate::storage::table::types::INVALID_BLOCK;
-        let valid = BlockPointer { block_id: 42, offset: 0 };
-        let invalid = BlockPointer { block_id: INVALID_BLOCK, offset: 0 };
+        let valid = BlockPointer {
+            block_id: 42,
+            offset: 0,
+        };
+        let invalid = BlockPointer {
+            block_id: INVALID_BLOCK,
+            offset: 0,
+        };
         assert!(valid.is_valid());
         assert!(!invalid.is_valid());
     }
 
     #[test]
     fn blocks_segment_state_serialize() {
-        let state = BlocksColumnSegmentState { blocks: vec![1, 2, 3] };
+        let state = BlocksColumnSegmentState {
+            blocks: vec![1, 2, 3],
+        };
         let mut buf = Vec::new();
         state.serialize(&mut buf);
         // 8 bytes count + 3 * 8 bytes block ids = 32 bytes

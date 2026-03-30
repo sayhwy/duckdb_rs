@@ -18,9 +18,9 @@
 //! | `LogicalDependencyList` | `LogicalDependencyList` |
 //! | `MangledEntryName` / `MangledDependencyName` | 同名结构体 |
 
-use std::collections::HashSet;
-use super::types::CatalogType;
 use super::error::CatalogError;
+use super::types::CatalogType;
+use std::collections::HashSet;
 
 // ─── CatalogEntryInfo ──────────────────────────────────────────────────────────
 
@@ -33,8 +33,16 @@ pub struct CatalogEntryInfo {
 }
 
 impl CatalogEntryInfo {
-    pub fn new(entry_type: CatalogType, schema: impl Into<String>, name: impl Into<String>) -> Self {
-        Self { entry_type, schema: schema.into(), name: name.into() }
+    pub fn new(
+        entry_type: CatalogType,
+        schema: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        Self {
+            entry_type,
+            schema: schema.into(),
+            name: name.into(),
+        }
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -50,18 +58,40 @@ impl CatalogEntryInfo {
     }
 
     pub fn deserialize(data: &[u8]) -> Option<(Self, usize)> {
-        if data.is_empty() { return None; }
+        if data.is_empty() {
+            return None;
+        }
         let mut pos = 0;
-        let entry_type = CatalogType::from_u8(data[pos]); pos += 1;
-        if data.len() < pos + 4 { return None; }
-        let slen = u32::from_le_bytes(data[pos..pos+4].try_into().ok()?) as usize; pos += 4;
-        if data.len() < pos + slen { return None; }
-        let schema = String::from_utf8(data[pos..pos+slen].to_vec()).ok()?; pos += slen;
-        if data.len() < pos + 4 { return None; }
-        let nlen = u32::from_le_bytes(data[pos..pos+4].try_into().ok()?) as usize; pos += 4;
-        if data.len() < pos + nlen { return None; }
-        let name = String::from_utf8(data[pos..pos+nlen].to_vec()).ok()?; pos += nlen;
-        Some((Self { entry_type, schema, name }, pos))
+        let entry_type = CatalogType::from_u8(data[pos]);
+        pos += 1;
+        if data.len() < pos + 4 {
+            return None;
+        }
+        let slen = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+        pos += 4;
+        if data.len() < pos + slen {
+            return None;
+        }
+        let schema = String::from_utf8(data[pos..pos + slen].to_vec()).ok()?;
+        pos += slen;
+        if data.len() < pos + 4 {
+            return None;
+        }
+        let nlen = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+        pos += 4;
+        if data.len() < pos + nlen {
+            return None;
+        }
+        let name = String::from_utf8(data[pos..pos + nlen].to_vec()).ok()?;
+        pos += nlen;
+        Some((
+            Self {
+                entry_type,
+                schema,
+                name,
+            },
+            pos,
+        ))
     }
 }
 
@@ -74,16 +104,28 @@ pub struct DependencySubjectFlags(u8);
 impl DependencySubjectFlags {
     const OWNERSHIP: u8 = 1 << 0;
 
-    pub fn new() -> Self { Self(0) }
+    pub fn new() -> Self {
+        Self(0)
+    }
 
-    pub fn is_ownership(&self)   -> bool { self.0 & Self::OWNERSHIP != 0 }
-    pub fn set_ownership(&mut self) { self.0 |= Self::OWNERSHIP; }
+    pub fn is_ownership(&self) -> bool {
+        self.0 & Self::OWNERSHIP != 0
+    }
+    pub fn set_ownership(&mut self) {
+        self.0 |= Self::OWNERSHIP;
+    }
 
-    pub fn merge(&mut self, other: Self) { self.0 |= other.0; }
+    pub fn merge(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
 
-    pub fn value(&self) -> u8 { self.0 }
+    pub fn value(&self) -> u8 {
+        self.0
+    }
 
-    pub fn from_u8(v: u8) -> Self { Self(v) }
+    pub fn from_u8(v: u8) -> Self {
+        Self(v)
+    }
 }
 
 impl std::fmt::Display for DependencySubjectFlags {
@@ -103,29 +145,51 @@ impl std::fmt::Display for DependencySubjectFlags {
 pub struct DependencyDependentFlags(u8);
 
 impl DependencyDependentFlags {
-    const BLOCKING: u8  = 1 << 0;
-    const OWNED_BY: u8  = 1 << 1;
+    const BLOCKING: u8 = 1 << 0;
+    const OWNED_BY: u8 = 1 << 1;
 
-    pub fn new() -> Self { Self(0) }
+    pub fn new() -> Self {
+        Self(0)
+    }
 
-    pub fn is_blocking(&self)  -> bool { self.0 & Self::BLOCKING != 0 }
-    pub fn is_owned_by(&self)  -> bool { self.0 & Self::OWNED_BY != 0 }
-    pub fn set_blocking(&mut self) { self.0 |= Self::BLOCKING; }
-    pub fn set_owned_by(&mut self) { self.0 |= Self::OWNED_BY; }
+    pub fn is_blocking(&self) -> bool {
+        self.0 & Self::BLOCKING != 0
+    }
+    pub fn is_owned_by(&self) -> bool {
+        self.0 & Self::OWNED_BY != 0
+    }
+    pub fn set_blocking(&mut self) {
+        self.0 |= Self::BLOCKING;
+    }
+    pub fn set_owned_by(&mut self) {
+        self.0 |= Self::OWNED_BY;
+    }
 
-    pub fn merge(&mut self, other: Self) { self.0 |= other.0; }
+    pub fn merge(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
 
-    pub fn value(&self) -> u8 { self.0 }
+    pub fn value(&self) -> u8 {
+        self.0
+    }
 
-    pub fn from_u8(v: u8) -> Self { Self(v) }
+    pub fn from_u8(v: u8) -> Self {
+        Self(v)
+    }
 }
 
 impl std::fmt::Display for DependencyDependentFlags {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut parts = Vec::new();
-        if self.is_blocking() { parts.push("BLOCKING"); }
-        if self.is_owned_by() { parts.push("OWNED_BY"); }
-        if parts.is_empty()   { parts.push("NONE"); }
+        if self.is_blocking() {
+            parts.push("BLOCKING");
+        }
+        if self.is_owned_by() {
+            parts.push("OWNED_BY");
+        }
+        if parts.is_empty() {
+            parts.push("NONE");
+        }
         write!(f, "{}", parts.join("|"))
     }
 }
@@ -150,7 +214,7 @@ pub struct DependencyDependent {
 #[derive(Debug, Clone)]
 pub struct DependencyInfo {
     pub dependent: DependencyDependent,
-    pub subject:   DependencySubject,
+    pub subject: DependencySubject,
 }
 
 impl DependencyInfo {
@@ -164,13 +228,16 @@ impl DependencyInfo {
 /// 逻辑依赖（序列化时使用，不直接引用活跃对象）（C++: `LogicalDependency`）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LogicalDependency {
-    pub entry:   CatalogEntryInfo,
+    pub entry: CatalogEntryInfo,
     pub catalog: String,
 }
 
 impl LogicalDependency {
     pub fn new(entry: CatalogEntryInfo, catalog: impl Into<String>) -> Self {
-        Self { entry, catalog: catalog.into() }
+        Self {
+            entry,
+            catalog: catalog.into(),
+        }
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -183,10 +250,16 @@ impl LogicalDependency {
 
     pub fn deserialize(data: &[u8]) -> Option<(Self, usize)> {
         let (entry, mut pos) = CatalogEntryInfo::deserialize(data)?;
-        if data.len() < pos + 4 { return None; }
-        let clen = u32::from_le_bytes(data[pos..pos+4].try_into().ok()?) as usize; pos += 4;
-        if data.len() < pos + clen { return None; }
-        let catalog = String::from_utf8(data[pos..pos+clen].to_vec()).ok()?; pos += clen;
+        if data.len() < pos + 4 {
+            return None;
+        }
+        let clen = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+        pos += 4;
+        if data.len() < pos + clen {
+            return None;
+        }
+        let catalog = String::from_utf8(data[pos..pos + clen].to_vec()).ok()?;
+        pos += clen;
         Some((Self { entry, catalog }, pos))
     }
 }
@@ -200,9 +273,13 @@ pub struct LogicalDependencyList {
 }
 
 impl LogicalDependencyList {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-    pub fn add(&mut self, dep: LogicalDependency) { self.set.insert(dep); }
+    pub fn add(&mut self, dep: LogicalDependency) {
+        self.set.insert(dep);
+    }
 
     pub fn add_entry(
         &mut self,
@@ -217,18 +294,28 @@ impl LogicalDependencyList {
         ));
     }
 
-    pub fn contains(&self, dep: &LogicalDependency) -> bool { self.set.contains(dep) }
+    pub fn contains(&self, dep: &LogicalDependency) -> bool {
+        self.set.contains(dep)
+    }
 
     pub fn contains_entry(&self, info: &CatalogEntryInfo) -> bool {
         self.set.iter().any(|d| &d.entry == info)
     }
 
-    pub fn is_empty(&self) -> bool { self.set.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty()
+    }
 
-    pub fn iter(&self) -> impl Iterator<Item = &LogicalDependency> { self.set.iter() }
+    pub fn iter(&self) -> impl Iterator<Item = &LogicalDependency> {
+        self.set.iter()
+    }
 
     /// 验证依赖是否都存在（用于写入前校验）（C++: `VerifyDependencies`）。
-    pub fn verify_dependencies(&self, catalog_name: &str, entry_name: &str) -> Result<(), CatalogError> {
+    pub fn verify_dependencies(
+        &self,
+        catalog_name: &str,
+        entry_name: &str,
+    ) -> Result<(), CatalogError> {
         // 在 Rust 中无法在此直接访问 Catalog，调用方需要在更高层验证。
         // 此处仅做基本检查（空名称等）。
         for dep in &self.set {
@@ -255,14 +342,23 @@ impl LogicalDependencyList {
 
     pub fn deserialize(data: &[u8]) -> Option<(Self, usize)> {
         let mut pos = 0;
-        if data.len() < 4 { return None; }
-        let count = u32::from_le_bytes(data[pos..pos+4].try_into().ok()?) as usize; pos += 4;
+        if data.len() < 4 {
+            return None;
+        }
+        let count = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+        pos += 4;
         let mut set = HashSet::new();
         for _ in 0..count {
-            if data.len() < pos + 4 { return None; }
-            let dlen = u32::from_le_bytes(data[pos..pos+4].try_into().ok()?) as usize; pos += 4;
-            if data.len() < pos + dlen { return None; }
-            let (dep, _) = LogicalDependency::deserialize(&data[pos..pos+dlen])?; pos += dlen;
+            if data.len() < pos + 4 {
+                return None;
+            }
+            let dlen = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+            pos += 4;
+            if data.len() < pos + dlen {
+                return None;
+            }
+            let (dep, _) = LogicalDependency::deserialize(&data[pos..pos + dlen])?;
+            pos += dlen;
             set.insert(dep);
         }
         Some((Self { set }, pos))
@@ -307,6 +403,8 @@ pub struct MangledDependencyName {
 
 impl MangledDependencyName {
     pub fn new(subject: &MangledEntryName, dependent: &MangledEntryName) -> Self {
-        Self { name: format!("{}\0{}", subject.name, dependent.name) }
+        Self {
+            name: format!("{}\0{}", subject.name, dependent.name),
+        }
     }
 }

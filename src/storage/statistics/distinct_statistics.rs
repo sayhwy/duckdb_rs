@@ -45,7 +45,11 @@ impl HyperLogLog {
         };
 
         let raw_estimate = {
-            let sum: f64 = self.registers.iter().map(|&r| 2.0_f64.powi(-(r as i32))).sum();
+            let sum: f64 = self
+                .registers
+                .iter()
+                .map(|&r| 2.0_f64.powi(-(r as i32)))
+                .sum();
             alpha * m * m / sum
         };
 
@@ -113,8 +117,12 @@ impl DistinctStatistics {
     /// Merge another DistinctStatistics into this one
     pub fn merge(&mut self, other: &DistinctStatistics) {
         self.log.merge(&other.log);
-        self.sample_count.fetch_add(other.sample_count.load(Ordering::Relaxed), Ordering::Relaxed);
-        self.total_count.fetch_add(other.total_count.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.sample_count.fetch_add(
+            other.sample_count.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.total_count
+            .fetch_add(other.total_count.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 
     /// Update with a sample of new data
@@ -143,7 +151,8 @@ impl DistinctStatistics {
 
     /// Internal update method
     fn update_internal(&mut self, hashes: &[u64]) {
-        self.sample_count.fetch_add(hashes.len() as u64, Ordering::Relaxed);
+        self.sample_count
+            .fetch_add(hashes.len() as u64, Ordering::Relaxed);
         for &hash in hashes {
             self.log.add(hash);
         }

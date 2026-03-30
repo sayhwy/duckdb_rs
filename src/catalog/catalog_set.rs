@@ -23,17 +23,17 @@
 //! CleanupEntry: 清理旧版本（不再对任何活跃事务可见的节点）
 //! ```
 
-use std::collections::BTreeMap;
 use parking_lot::RwLock;
+use std::collections::BTreeMap;
 
-use super::types::{CatalogType, CreateInfo, AlterInfo, DropInfo};
-use super::error::CatalogError;
+use super::default_generator::DefaultGenerator;
 use super::dependency::LogicalDependencyList;
-use super::transaction::{CatalogTransaction, is_visible, has_conflict};
 use super::entry::{CatalogEntryBase, CatalogEntryKind, CatalogEntryNode};
 use super::entry_lookup::SimilarCatalogEntry;
-use super::default_generator::DefaultGenerator;
-use crate::transaction::types::{TransactionId, TRANSACTION_ID_START};
+use super::error::CatalogError;
+use super::transaction::{CatalogTransaction, has_conflict, is_visible};
+use super::types::{AlterInfo, CatalogType, CreateInfo, DropInfo};
+use crate::transaction::types::{TRANSACTION_ID_START, TransactionId};
 
 // ─── EntryLookupResult ─────────────────────────────────────────────────────────
 
@@ -62,7 +62,11 @@ struct CatalogEntryMapInner {
 }
 
 impl CatalogEntryMapInner {
-    fn new() -> Self { Self { entries: BTreeMap::new() } }
+    fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+        }
+    }
 
     /// 获取指定名称的链头（不考虑 MVCC 可见性）。
     fn get_raw(&self, lower_name: &str) -> Option<&CatalogEntryNode> {
@@ -70,7 +74,11 @@ impl CatalogEntryMapInner {
     }
 
     /// 获取对事务可见的条目（走完 MVCC 链）。
-    fn get_visible<'a>(&'a self, txn: &CatalogTransaction, lower_name: &str) -> Option<&'a CatalogEntryNode> {
+    fn get_visible<'a>(
+        &'a self,
+        txn: &CatalogTransaction,
+        lower_name: &str,
+    ) -> Option<&'a CatalogEntryNode> {
         let mut current = self.entries.get(lower_name)?.as_ref();
         loop {
             if is_visible(txn, current.base.get_timestamp()) {
@@ -81,7 +89,11 @@ impl CatalogEntryMapInner {
     }
 
     /// 详细查找（C++: `GetEntryDetailed`）。
-    fn get_visible_detailed(&self, txn: &CatalogTransaction, lower_name: &str) -> (Option<&CatalogEntryNode>, LookupFailureReason) {
+    fn get_visible_detailed(
+        &self,
+        txn: &CatalogTransaction,
+        lower_name: &str,
+    ) -> (Option<&CatalogEntryNode>, LookupFailureReason) {
         let head = match self.entries.get(lower_name) {
             None => return (None, LookupFailureReason::NotPresent),
             Some(h) => h.as_ref(),
@@ -130,10 +142,14 @@ pub struct CatalogEntryMap {
 
 impl CatalogEntryMap {
     pub fn new() -> Self {
-        Self { inner: RwLock::new(CatalogEntryMapInner::new()) }
+        Self {
+            inner: RwLock::new(CatalogEntryMapInner::new()),
+        }
     }
 
-    fn lower(name: &str) -> String { name.to_lowercase() }
+    fn lower(name: &str) -> String {
+        name.to_lowercase()
+    }
 
     /// 添加新条目（条目名称已存在时会 panic；应先检查）。
     pub fn add_entry(&self, node: Box<CatalogEntryNode>) {
@@ -168,11 +184,19 @@ pub struct CatalogSet {
 
 impl CatalogSet {
     pub fn new(catalog_oid: u64) -> Self {
-        Self { map: RwLock::new(CatalogEntryMapInner::new()), defaults: None, catalog_oid }
+        Self {
+            map: RwLock::new(CatalogEntryMapInner::new()),
+            defaults: None,
+            catalog_oid,
+        }
     }
 
     pub fn with_defaults(catalog_oid: u64, defaults: Box<dyn DefaultGenerator>) -> Self {
-        Self { map: RwLock::new(CatalogEntryMapInner::new()), defaults: Some(defaults), catalog_oid }
+        Self {
+            map: RwLock::new(CatalogEntryMapInner::new()),
+            defaults: Some(defaults),
+            catalog_oid,
+        }
     }
 
     pub fn set_default_generator(&mut self, generator: Box<dyn DefaultGenerator>) {
@@ -314,9 +338,10 @@ impl CatalogSet {
 
         let existing = existing.unwrap();
         if existing.base.internal && !allow_drop_internal {
-            return Err(CatalogError::invalid(
-                format!("Cannot drop internal catalog entry \"{}\"", name)
-            ));
+            return Err(CatalogError::invalid(format!(
+                "Cannot drop internal catalog entry \"{}\"",
+                name
+            )));
         }
 
         let ts = existing.base.get_timestamp();
@@ -330,7 +355,11 @@ impl CatalogSet {
         let catalog_name = existing.base.catalog_name.clone();
         let schema_name = existing.base.schema_name.clone();
         let mut tombstone = Box::new(CatalogEntryNode::tombstone(
-            oid, name.to_string(), catalog_name, schema_name, entry_type
+            oid,
+            name.to_string(),
+            catalog_name,
+            schema_name,
+            entry_type,
         ));
         tombstone.base.set_timestamp(txn.transaction_id);
         map.push_head(lower, tombstone);
@@ -353,7 +382,7 @@ impl CatalogSet {
         }
 
         // 尝试默认生成器
-        None  // 默认生成器在 get_entry_with_defaults 中处理
+        None // 默认生成器在 get_entry_with_defaults 中处理
     }
 
     /// 带默认生成器的条目获取（需要 &mut self 因为默认生成器可能创建新条目）。
@@ -495,7 +524,9 @@ impl CatalogSet {
         let lower_prefix = prefix.to_lowercase();
         let map = self.map.read();
         for (key, head) in map.entries.range(lower_prefix.clone()..) {
-            if !key.starts_with(&lower_prefix) { break; }
+            if !key.starts_with(&lower_prefix) {
+                break;
+            }
             let mut current = head.as_ref();
             loop {
                 if is_visible(txn, current.base.get_timestamp()) {
@@ -605,5 +636,7 @@ impl CatalogSet {
 }
 
 impl Default for CatalogSet {
-    fn default() -> Self { Self::new(0) }
+    fn default() -> Self {
+        Self::new(0)
+    }
 }

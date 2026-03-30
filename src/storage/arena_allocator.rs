@@ -197,7 +197,10 @@ impl ArenaAllocator {
             self.allocate_new_block(len);
         }
 
-        let head = self.head.as_mut().expect("head must exist after allocate_new_block");
+        let head = self
+            .head
+            .as_mut()
+            .expect("head must exist after allocate_new_block");
         debug_assert!(head.current_position + len <= head.maximum_size());
 
         let ptr = head.cursor_ptr_mut();
@@ -441,7 +444,7 @@ mod tests {
         // Allocating 256 fills it exactly; the next byte triggers a new block.
         let mut arena = ArenaAllocator::with_capacity(128);
         let _p1 = arena.allocate(256); // fills first block (128 * 2 = 256)
-        let _p2 = arena.allocate(1);   // must trigger a new block
+        let _p2 = arena.allocate(1); // must trigger a new block
         // Two chunks: head (new) and tail (original).
         assert!(arena.get_head().is_some());
         assert!(arena.get_tail().is_some());
@@ -456,7 +459,7 @@ mod tests {
     fn capacity_doubling_strategy() {
         let mut arena = ArenaAllocator::with_capacity(64);
         arena.allocate(64); // fills initial 64-byte block
-        arena.allocate(1);  // new block should be 128 bytes (64 * 2)
+        arena.allocate(1); // new block should be 128 bytes (64 * 2)
         let head_cap = arena.get_head().unwrap().maximum_size();
         assert_eq!(head_cap, 128);
     }
@@ -505,7 +508,7 @@ mod tests {
     fn get_tail_returns_oldest_chunk() {
         let mut arena = ArenaAllocator::with_capacity(16);
         arena.allocate(16); // chunk 0 (becomes tail after next alloc)
-        arena.allocate(1);  // chunk 1 (head)
+        arena.allocate(1); // chunk 1 (head)
         // tail == oldest chunk, its capacity is the initial block size
         // (before doubling), so it should be smaller than head's.
         let tail_cap = arena.get_tail().unwrap().maximum_size();

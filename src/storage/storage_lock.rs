@@ -25,8 +25,8 @@
 //! 共享锁，则同时颁发一把 Exclusive 锁（此时 readers == 1）。
 //! 返回后调用者同时持有 Shared + Exclusive 两把锁，这是 DuckDB checkpoint 的预期行为。
 
-use std::sync::Arc;
 use parking_lot::{Condvar, Mutex};
+use std::sync::Arc;
 
 // ─── LockState ──────────────────────────────────────────────────────────────
 
@@ -39,7 +39,10 @@ struct LockState {
 
 impl LockState {
     fn new() -> Self {
-        Self { exclusive: false, readers: 0 }
+        Self {
+            exclusive: false,
+            readers: 0,
+        }
     }
 }
 
@@ -48,7 +51,7 @@ impl LockState {
 /// 锁类型（C++: `enum class StorageLockType`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageLockType {
-    Shared    = 0,
+    Shared = 0,
     Exclusive = 1,
 }
 
@@ -56,17 +59,17 @@ pub enum StorageLockType {
 
 /// 锁的内部状态，由 `StorageLock` 和所有 `StorageLockKey` 共享（C++: `StorageLockInternals`）。
 struct StorageLockInternals {
-    state:        Mutex<LockState>,
+    state: Mutex<LockState>,
     no_exclusive: Condvar,
-    no_readers:   Condvar,
+    no_readers: Condvar,
 }
 
 impl StorageLockInternals {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            state:        Mutex::new(LockState::new()),
+            state: Mutex::new(LockState::new()),
             no_exclusive: Condvar::new(),
-            no_readers:   Condvar::new(),
+            no_readers: Condvar::new(),
         })
     }
 
@@ -201,7 +204,7 @@ impl Drop for StorageLockKey {
     fn drop(&mut self) {
         match self.lock_type {
             StorageLockType::Exclusive => self.internals.release_exclusive(),
-            StorageLockType::Shared    => self.internals.release_shared(),
+            StorageLockType::Shared => self.internals.release_shared(),
         }
     }
 }
@@ -218,7 +221,9 @@ pub struct StorageLock {
 impl StorageLock {
     /// 创建新锁（C++: `StorageLock::StorageLock()`）。
     pub fn new() -> Self {
-        Self { inner: StorageLockInternals::new() }
+        Self {
+            inner: StorageLockInternals::new(),
+        }
     }
 
     /// 获取独占锁（阻塞）（C++: `GetExclusiveLock()`）。

@@ -13,8 +13,8 @@
 //   精度说明：与 C++ 相同，在 no-flush 模式下误差上限为
 //   CACHE_COUNT × CACHE_THRESHOLD = 64 × 32KB = 2MB。
 
+use super::types::{MEMORY_TAG_COUNT, MemoryTag};
 use std::sync::atomic::{AtomicI64, Ordering};
-use super::types::{MemoryTag, MEMORY_TAG_COUNT};
 
 /// 每个分片缓存的阈值：超过此值才 flush 到全局计数器
 const CACHE_THRESHOLD: i64 = 32 * 1024; // 32KB

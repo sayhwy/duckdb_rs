@@ -1,5 +1,7 @@
 use crate::catalog::{CreateTableInfo, LogicalTypeId};
-use crate::storage::checkpoint::binary_metadata_deserializer::{BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID};
+use crate::storage::checkpoint::binary_metadata_deserializer::{
+    BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID,
+};
 use crate::storage::metadata::{MetaBlockPointer, MetadataReader, ReadStream};
 use crate::storage::table::persistent_table_data::PersistentTableData;
 
@@ -53,9 +55,14 @@ impl<'a, 'mgr> TableDataReader<'a, 'mgr> {
             skip_table_statistics(&mut deserializer, &column_types)
                 .expect("failed to skip table statistics");
 
-            let terminator = deserializer.next_field().expect("failed to read terminator");
+            let terminator = deserializer
+                .next_field()
+                .expect("failed to read terminator");
             if terminator != MESSAGE_TERMINATOR_FIELD_ID {
-                panic!("expected TableStatistics terminator, got field {}", terminator);
+                panic!(
+                    "expected TableStatistics terminator, got field {}",
+                    terminator
+                );
             }
         }
 
@@ -102,7 +109,10 @@ fn skip_table_statistics(
     if field != 101 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("expected TableStatistics field 101 (table_sample), got {}", field),
+            format!(
+                "expected TableStatistics field 101 (table_sample), got {}",
+                field
+            ),
         ));
     }
 
@@ -321,7 +331,9 @@ fn skip_blocking_sample(de: &mut BinaryMetadataDeserializer<'_>) -> std::io::Res
     }
 }
 
-fn skip_optional_base_reservoir_sampling(de: &mut BinaryMetadataDeserializer<'_>) -> std::io::Result<()> {
+fn skip_optional_base_reservoir_sampling(
+    de: &mut BinaryMetadataDeserializer<'_>,
+) -> std::io::Result<()> {
     if de.read_u8() == 0 {
         return Ok(());
     }

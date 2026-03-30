@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use super::column_data::{ ColumnData};
+use super::column_data::ColumnData;
 use super::validity_column_data::ValidityColumnData;
 
 /// Fixed-length array column.
@@ -31,6 +31,10 @@ impl ArrayColumnData {
         validity: Arc<ValidityColumnData>,
         array_size: u32,
     ) -> Self {
-        ArrayColumnData { child_column, validity, array_size }
+        ArrayColumnData {
+            child_column,
+            validity,
+            array_size,
+        }
     }
 }

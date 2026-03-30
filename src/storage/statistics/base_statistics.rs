@@ -1,4 +1,4 @@
-use crate::common::types::{LogicalType, LogicalTypeId, Vector, SelectionVector};
+use crate::common::types::{LogicalType, LogicalTypeId, SelectionVector, Vector};
 use std::fmt;
 
 /// Statistics type enumeration
@@ -165,13 +165,15 @@ impl BaseStatistics {
         match Self::get_stats_type_from_logical(&self.logical_type) {
             StatisticsType::NumericStats => {
                 if let (StatsData::Numeric(data), StatsData::Numeric(other_data)) =
-                    (&mut self.stats_data, &other.stats_data) {
+                    (&mut self.stats_data, &other.stats_data)
+                {
                     super::NumericStats::merge(data, other_data, &self.logical_type);
                 }
             }
             StatisticsType::StringStats => {
                 if let (StatsData::String(data), StatsData::String(other_data)) =
-                    (&mut self.stats_data, &other.stats_data) {
+                    (&mut self.stats_data, &other.stats_data)
+                {
                     super::StringStats::merge(data, other_data);
                 }
             }
@@ -246,7 +248,12 @@ impl BaseStatistics {
     }
 
     /// Verify that a vector matches the statistics
-    pub fn verify(&self, _vector: &Vector, _sel: &SelectionVector, _count: usize) -> Result<(), String> {
+    pub fn verify(
+        &self,
+        _vector: &Vector,
+        _sel: &SelectionVector,
+        _count: usize,
+    ) -> Result<(), String> {
         // TODO: Implement verification logic
         Ok(())
     }
@@ -266,7 +273,11 @@ impl fmt::Display for BaseStatistics {
 
         match &self.stats_data {
             StatsData::Numeric(data) => {
-                write!(f, "{}", super::NumericStats::to_string(data, &self.logical_type))?;
+                write!(
+                    f,
+                    "{}",
+                    super::NumericStats::to_string(data, &self.logical_type)
+                )?;
             }
             StatsData::String(data) => {
                 write!(f, "{}", super::StringStats::to_string(data))?;

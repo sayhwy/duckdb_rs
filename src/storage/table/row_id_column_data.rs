@@ -16,7 +16,7 @@
 
 use super::column_data::{ColumnDataContext, ColumnDataType};
 use super::data_table_info::DataTableInfo;
-use super::types::{Idx, LogicalType, TransactionData, RowId};
+use super::types::{Idx, LogicalType, RowId, TransactionData};
 use std::sync::Arc;
 
 // ─── RowIdColumnData ───────────────────────────────────────────────────────────
@@ -54,7 +54,8 @@ impl RowIdColumnData {
         count: Idx,
         result: &mut Vec<RowId>,
     ) -> Idx {
-        let base = row_group_start + (vector_index as i64) * (super::types::STANDARD_VECTOR_SIZE as i64);
+        let base =
+            row_group_start + (vector_index as i64) * (super::types::STANDARD_VECTOR_SIZE as i64);
         result.clear();
         for i in 0..count as i64 {
             result.push(base + i);
@@ -70,7 +71,16 @@ impl RowIdColumnData {
         count: Idx,
         result: &mut Vec<RowId>,
     ) -> Idx {
-        self.scan(TransactionData { start_time: 0, transaction_id: 0 }, vector_index, row_group_start, count, result)
+        self.scan(
+            TransactionData {
+                start_time: 0,
+                transaction_id: 0,
+            },
+            vector_index,
+            row_group_start,
+            count,
+            result,
+        )
     }
 
     /// 按 row_id fetch 单行（C++: `Fetch(state, row_id, result)`）。
@@ -88,12 +98,16 @@ impl RowIdColumnData {
     /// Append（C++: `Append()`）— row_id 列由引擎自动维护，不手动追加。
     pub fn append(&mut self, _count: Idx) {
         let old = self.ctx.count.load(std::sync::atomic::Ordering::Relaxed);
-        self.ctx.count.store(old + _count, std::sync::atomic::Ordering::Relaxed);
+        self.ctx
+            .count
+            .store(old + _count, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// RevertAppend（C++: `RevertAppend(row_t new_count)`）。
     pub fn revert_append(&mut self, new_count: RowId) {
-        self.ctx.count.store(new_count as u64, std::sync::atomic::Ordering::Relaxed);
+        self.ctx
+            .count
+            .store(new_count as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// 创建 Checkpoint 状态（C++: `CreateCheckpointState()`）。

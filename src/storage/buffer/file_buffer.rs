@@ -3,7 +3,7 @@
 // 对应 C++: duckdb/common/file_buffer.hpp / file_buffer.cpp
 // ============================================================
 
-use super::types::{FileBufferType, DEFAULT_BLOCK_ALLOC_SIZE, DEFAULT_BLOCK_HEADER_SIZE};
+use super::types::{DEFAULT_BLOCK_ALLOC_SIZE, DEFAULT_BLOCK_HEADER_SIZE, FileBufferType};
 
 /// 对应 C++ FileBuffer
 ///

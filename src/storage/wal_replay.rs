@@ -354,7 +354,11 @@ impl<R: WalReader> WalFrameReader<R> {
             reader.seek(SeekFrom::Start(0))?;
             end
         };
-        Ok(Self { reader, version: WalVersion::V1, file_size })
+        Ok(Self {
+            reader,
+            version: WalVersion::V1,
+            file_size,
+        })
     }
 
     /// 将读取器重置到文件头（C++: `reader.Reset()`）。
@@ -443,7 +447,12 @@ impl<R: WalReader> WalFrameReader<R> {
                 let mut tag = [0u8; TAG_SIZE];
                 self.reader.read_exact(&mut tag)?;
 
-                WalFrame::V3Encrypted { plaintext_size: size, nonce, ciphertext, tag }
+                WalFrame::V3Encrypted {
+                    plaintext_size: size,
+                    nonce,
+                    ciphertext,
+                    tag,
+                }
             }
         };
 
@@ -516,31 +525,40 @@ impl<'a> WalEntryDecoder<'a> {
     pub fn decode(&mut self) -> WalResult<WalEntry> {
         // field_id=100 → wal_type : u8
         let wal_type_byte = self.read_field_u8(100)?;
-        let wal_type = WalType::try_from(wal_type_byte)
-            .map_err(|b| WalError::UnknownWalType(b))?;
+        let wal_type = WalType::try_from(wal_type_byte).map_err(|b| WalError::UnknownWalType(b))?;
 
         match wal_type {
             WalType::WalFlush => Ok(WalEntry::WalFlush),
 
             WalType::WalVersion => self.decode_version(),
 
-            WalType::CreateTable => Ok(WalEntry::CreateTable { payload: self.read_field_bytes(101)? }),
+            WalType::CreateTable => Ok(WalEntry::CreateTable {
+                payload: self.read_field_bytes(101)?,
+            }),
             WalType::DropTable => Ok(WalEntry::DropTable {
                 schema: self.read_field_str(101)?,
                 name: self.read_field_str(102)?,
             }),
             WalType::AlterInfo => self.decode_alter(),
 
-            WalType::CreateSchema => Ok(WalEntry::CreateSchema { name: self.read_field_str(101)? }),
-            WalType::DropSchema => Ok(WalEntry::DropSchema { name: self.read_field_str(101)? }),
+            WalType::CreateSchema => Ok(WalEntry::CreateSchema {
+                name: self.read_field_str(101)?,
+            }),
+            WalType::DropSchema => Ok(WalEntry::DropSchema {
+                name: self.read_field_str(101)?,
+            }),
 
-            WalType::CreateView => Ok(WalEntry::CreateView { payload: self.read_field_bytes(101)? }),
+            WalType::CreateView => Ok(WalEntry::CreateView {
+                payload: self.read_field_bytes(101)?,
+            }),
             WalType::DropView => Ok(WalEntry::DropView {
                 schema: self.read_field_str(101)?,
                 name: self.read_field_str(102)?,
             }),
 
-            WalType::CreateSequence => Ok(WalEntry::CreateSequence { payload: self.read_field_bytes(101)? }),
+            WalType::CreateSequence => Ok(WalEntry::CreateSequence {
+                payload: self.read_field_bytes(101)?,
+            }),
             WalType::DropSequence => Ok(WalEntry::DropSequence {
                 schema: self.read_field_str(101)?,
                 name: self.read_field_str(102)?,
@@ -552,12 +570,16 @@ impl<'a> WalEntryDecoder<'a> {
                 counter: self.read_field_i64(104)?,
             }),
 
-            WalType::CreateMacro => Ok(WalEntry::CreateMacro { payload: self.read_field_bytes(101)? }),
+            WalType::CreateMacro => Ok(WalEntry::CreateMacro {
+                payload: self.read_field_bytes(101)?,
+            }),
             WalType::DropMacro => Ok(WalEntry::DropMacro {
                 schema: self.read_field_str(101)?,
                 name: self.read_field_str(102)?,
             }),
-            WalType::CreateTableMacro => Ok(WalEntry::CreateTableMacro { payload: self.read_field_bytes(101)? }),
+            WalType::CreateTableMacro => Ok(WalEntry::CreateTableMacro {
+                payload: self.read_field_bytes(101)?,
+            }),
             WalType::DropTableMacro => Ok(WalEntry::DropTableMacro {
                 schema: self.read_field_str(101)?,
                 name: self.read_field_str(102)?,
@@ -569,7 +591,9 @@ impl<'a> WalEntryDecoder<'a> {
                 name: self.read_field_str(102)?,
             }),
 
-            WalType::CreateType => Ok(WalEntry::CreateType { payload: self.read_field_bytes(101)? }),
+            WalType::CreateType => Ok(WalEntry::CreateType {
+                payload: self.read_field_bytes(101)?,
+            }),
             WalType::DropType => Ok(WalEntry::DropType {
                 schema: self.read_field_str(101)?,
                 name: self.read_field_str(102)?,
@@ -579,9 +603,15 @@ impl<'a> WalEntryDecoder<'a> {
                 schema: self.read_field_str(101)?,
                 table: self.read_field_str(102)?,
             }),
-            WalType::InsertTuple => Ok(WalEntry::Insert { chunk_payload: self.read_field_bytes(101)? }),
-            WalType::RowGroupData => Ok(WalEntry::RowGroupData { data_payload: self.read_field_bytes(101)? }),
-            WalType::DeleteTuple => Ok(WalEntry::Delete { chunk_payload: self.read_field_bytes(101)? }),
+            WalType::InsertTuple => Ok(WalEntry::Insert {
+                chunk_payload: self.read_field_bytes(101)?,
+            }),
+            WalType::RowGroupData => Ok(WalEntry::RowGroupData {
+                data_payload: self.read_field_bytes(101)?,
+            }),
+            WalType::DeleteTuple => Ok(WalEntry::Delete {
+                chunk_payload: self.read_field_bytes(101)?,
+            }),
             WalType::UpdateTuple => Ok(WalEntry::Update {
                 column_indexes_payload: self.read_field_bytes(101)?,
                 chunk_payload: self.read_field_bytes(102)?,
@@ -592,7 +622,10 @@ impl<'a> WalEntryDecoder<'a> {
                 let block_pointer = self.read_field_u64(101)?;
                 let offset = self.read_field_u32(102)?;
                 Ok(WalEntry::Checkpoint {
-                    meta_block: MetaBlockPointer { block_pointer, offset },
+                    meta_block: MetaBlockPointer {
+                        block_pointer,
+                        offset,
+                    },
                 })
             }
 
@@ -612,7 +645,11 @@ impl<'a> WalEntryDecoder<'a> {
         } else {
             None
         };
-        Ok(WalEntry::Version { version, db_identifier, checkpoint_iteration })
+        Ok(WalEntry::Version {
+            version,
+            db_identifier,
+            checkpoint_iteration,
+        })
     }
 
     // ── ALTER 解码 ─────────────────────────────────────────────────────────────
@@ -626,7 +663,11 @@ impl<'a> WalEntryDecoder<'a> {
         } else {
             None
         };
-        Ok(WalEntry::AlterInfo { payload, index_storage_info, index_storage_data })
+        Ok(WalEntry::AlterInfo {
+            payload,
+            index_storage_info,
+            index_storage_data,
+        })
     }
 
     // ── CREATE INDEX 解码 ──────────────────────────────────────────────────────
@@ -635,7 +676,11 @@ impl<'a> WalEntryDecoder<'a> {
         let catalog_payload = self.read_field_bytes(101)?;
         let storage_info = self.read_field_bytes(102)?;
         let storage_data = self.read_field_bytes(103)?;
-        Ok(WalEntry::CreateIndex { catalog_payload, storage_info, storage_data })
+        Ok(WalEntry::CreateIndex {
+            catalog_payload,
+            storage_info,
+            storage_data,
+        })
     }
 
     // ── 基础读取辅助 ───────────────────────────────────────────────────────────
@@ -656,7 +701,9 @@ impl<'a> WalEntryDecoder<'a> {
     fn read_field_u8(&mut self, expected_id: u8) -> WalResult<u8> {
         let id = self.read_field_id()?;
         if id != expected_id {
-            return Err(WalError::Corrupt(format!("expected field_id={expected_id}, got {id}")));
+            return Err(WalError::Corrupt(format!(
+                "expected field_id={expected_id}, got {id}"
+            )));
         }
         if self.pos >= self.buf.len() {
             return Err(WalError::Corrupt("truncated u8 field".into()));
@@ -669,7 +716,9 @@ impl<'a> WalEntryDecoder<'a> {
     fn read_field_u64(&mut self, expected_id: u8) -> WalResult<u64> {
         let id = self.read_field_id()?;
         if id != expected_id {
-            return Err(WalError::Corrupt(format!("expected field_id={expected_id}, got {id}")));
+            return Err(WalError::Corrupt(format!(
+                "expected field_id={expected_id}, got {id}"
+            )));
         }
         self.read_u64_raw()
     }
@@ -688,7 +737,9 @@ impl<'a> WalEntryDecoder<'a> {
     fn read_field_u32(&mut self, expected_id: u8) -> WalResult<u32> {
         let id = self.read_field_id()?;
         if id != expected_id {
-            return Err(WalError::Corrupt(format!("expected field_id={expected_id}, got {id}")));
+            return Err(WalError::Corrupt(format!(
+                "expected field_id={expected_id}, got {id}"
+            )));
         }
         if self.pos + 4 > self.buf.len() {
             return Err(WalError::Corrupt("truncated u32 field".into()));
@@ -707,18 +758,23 @@ impl<'a> WalEntryDecoder<'a> {
     fn read_field_bytes(&mut self, expected_id: u8) -> WalResult<Vec<u8>> {
         let id = self.read_field_id()?;
         if id != expected_id {
-            return Err(WalError::Corrupt(format!("expected field_id={expected_id}, got {id}")));
+            return Err(WalError::Corrupt(format!(
+                "expected field_id={expected_id}, got {id}"
+            )));
         }
         let len = {
             if self.pos + 4 > self.buf.len() {
                 return Err(WalError::Corrupt("truncated bytes length".into()));
             }
-            let v = u32::from_le_bytes(self.buf[self.pos..self.pos + 4].try_into().unwrap()) as usize;
+            let v =
+                u32::from_le_bytes(self.buf[self.pos..self.pos + 4].try_into().unwrap()) as usize;
             self.pos += 4;
             v
         };
         if self.pos + len > self.buf.len() {
-            return Err(WalError::Corrupt(format!("bytes field len={len} exceeds payload")));
+            return Err(WalError::Corrupt(format!(
+                "bytes field len={len} exceeds payload"
+            )));
         }
         let data = self.buf[self.pos..self.pos + len].to_vec();
         self.pos += len;
@@ -732,7 +788,10 @@ impl<'a> WalEntryDecoder<'a> {
         Ok(Some(self.read_field_bytes(expected_id)?))
     }
 
-    fn try_read_field_bytes_fixed<const N: usize>(&mut self, expected_id: u8) -> WalResult<Option<[u8; N]>> {
+    fn try_read_field_bytes_fixed<const N: usize>(
+        &mut self,
+        expected_id: u8,
+    ) -> WalResult<Option<[u8; N]>> {
         if self.peek_field_id() != Some(expected_id) {
             return Ok(None);
         }
@@ -789,7 +848,13 @@ pub trait CatalogOps {
 
     fn create_sequence(&mut self, payload: &[u8]) -> WalResult<()>;
     fn drop_sequence(&mut self, schema: &str, name: &str) -> WalResult<()>;
-    fn update_sequence_value(&mut self, schema: &str, name: &str, usage_count: u64, counter: i64) -> WalResult<()>;
+    fn update_sequence_value(
+        &mut self,
+        schema: &str,
+        name: &str,
+        usage_count: u64,
+        counter: i64,
+    ) -> WalResult<()>;
 
     fn create_macro(&mut self, payload: &[u8]) -> WalResult<()>;
     fn drop_macro(&mut self, schema: &str, name: &str) -> WalResult<()>;
@@ -814,7 +879,12 @@ pub trait CatalogOps {
     fn append_chunk(&mut self, schema: &str, table: &str, chunk_payload: &[u8]) -> WalResult<()>;
 
     /// 向当前表合并 RowGroup 数据（C++: `storage.MergeStorage(...)`）。
-    fn merge_row_group_data(&mut self, schema: &str, table: &str, data_payload: &[u8]) -> WalResult<()>;
+    fn merge_row_group_data(
+        &mut self,
+        schema: &str,
+        table: &str,
+        data_payload: &[u8],
+    ) -> WalResult<()>;
 
     /// 删除行（C++: `storage.Delete(...)`）。
     fn delete_rows(&mut self, schema: &str, table: &str, chunk_payload: &[u8]) -> WalResult<()>;
@@ -898,7 +968,11 @@ pub struct WalReplayer<R: WalReader, C: CatalogOps> {
 
 impl<R: WalReader, C: CatalogOps> WalReplayer<R, C> {
     /// 构造（C++: `ReplayInternal(context, storage_manager, handle, replay_state)`）。
-    pub fn new(reader: R, catalog: C, encryption: Option<Box<dyn EncryptionOps>>) -> io::Result<Self> {
+    pub fn new(
+        reader: R,
+        catalog: C,
+        encryption: Option<Box<dyn EncryptionOps>>,
+    ) -> io::Result<Self> {
         Ok(Self {
             frame_reader: WalFrameReader::new(reader)?,
             catalog,
@@ -966,11 +1040,17 @@ impl<R: WalReader, C: CatalogOps> WalReplayer<R, C> {
 
     fn update_scan_state(&mut self, state: &mut ReplayState, entry: &WalEntry) -> WalResult<()> {
         match entry {
-            WalEntry::Version { version, db_identifier, checkpoint_iteration } => {
+            WalEntry::Version {
+                version,
+                db_identifier,
+                checkpoint_iteration,
+            } => {
                 state.wal_version = WalVersion::try_from(*version)?;
                 self.frame_reader.set_version(state.wal_version);
 
-                let expected = self.catalog.verify_wal_version(*db_identifier, *checkpoint_iteration)?;
+                let expected = self
+                    .catalog
+                    .verify_wal_version(*db_identifier, *checkpoint_iteration)?;
                 state.expected_checkpoint_id = expected;
             }
             WalEntry::Checkpoint { meta_block } => {
@@ -1044,7 +1124,8 @@ impl<R: WalReader, C: CatalogOps> WalReplayer<R, C> {
                     self.catalog.commit()?;
                     let indexes = std::mem::take(&mut state.pending_indexes);
                     self.catalog.commit_indexes(indexes)?;
-                    last_success_offset = self.frame_reader.current_offset().map_err(WalError::Io)?;
+                    last_success_offset =
+                        self.frame_reader.current_offset().map_err(WalError::Io)?;
 
                     if self.frame_reader.is_finished().map_err(WalError::Io)? {
                         all_succeeded = true;
@@ -1079,22 +1160,33 @@ impl<R: WalReader, C: CatalogOps> WalReplayer<R, C> {
         match entry {
             WalEntry::WalFlush => return Ok(true),
 
-            WalEntry::Version { version, db_identifier, checkpoint_iteration } => {
+            WalEntry::Version {
+                version,
+                db_identifier,
+                checkpoint_iteration,
+            } => {
                 state.wal_version = WalVersion::try_from(version)?;
                 self.frame_reader.set_version(state.wal_version);
-                let expected = self.catalog.verify_wal_version(db_identifier, checkpoint_iteration)?;
+                let expected = self
+                    .catalog
+                    .verify_wal_version(db_identifier, checkpoint_iteration)?;
                 state.expected_checkpoint_id = expected;
             }
 
             // ── DDL ────────────────────────────────────────────────────────
-
             WalEntry::CreateTable { payload } => self.catalog.create_table(&payload)?,
             WalEntry::DropTable { schema, name } => {
                 // 同时清除 pending_indexes 中属于该表的条目
-                state.pending_indexes.retain(|i| !(i.table_schema == schema && i.table_name == name));
+                state
+                    .pending_indexes
+                    .retain(|i| !(i.table_schema == schema && i.table_name == name));
                 self.catalog.drop_table(&schema, &name)?;
             }
-            WalEntry::AlterInfo { payload, index_storage_info, index_storage_data } => {
+            WalEntry::AlterInfo {
+                payload,
+                index_storage_info,
+                index_storage_data,
+            } => {
                 if let Some(info) = self.catalog.alter_table(
                     &payload,
                     index_storage_info.as_deref(),
@@ -1111,18 +1203,34 @@ impl<R: WalReader, C: CatalogOps> WalReplayer<R, C> {
             WalEntry::DropView { schema, name } => self.catalog.drop_view(&schema, &name)?,
 
             WalEntry::CreateSequence { payload } => self.catalog.create_sequence(&payload)?,
-            WalEntry::DropSequence { schema, name } => self.catalog.drop_sequence(&schema, &name)?,
-            WalEntry::SequenceValue { schema, name, usage_count, counter } => {
-                self.catalog.update_sequence_value(&schema, &name, usage_count, counter)?;
+            WalEntry::DropSequence { schema, name } => {
+                self.catalog.drop_sequence(&schema, &name)?
+            }
+            WalEntry::SequenceValue {
+                schema,
+                name,
+                usage_count,
+                counter,
+            } => {
+                self.catalog
+                    .update_sequence_value(&schema, &name, usage_count, counter)?;
             }
 
             WalEntry::CreateMacro { payload } => self.catalog.create_macro(&payload)?,
             WalEntry::DropMacro { schema, name } => self.catalog.drop_macro(&schema, &name)?,
             WalEntry::CreateTableMacro { payload } => self.catalog.create_table_macro(&payload)?,
-            WalEntry::DropTableMacro { schema, name } => self.catalog.drop_table_macro(&schema, &name)?,
+            WalEntry::DropTableMacro { schema, name } => {
+                self.catalog.drop_table_macro(&schema, &name)?
+            }
 
-            WalEntry::CreateIndex { catalog_payload, storage_info, storage_data } => {
-                let info = self.catalog.create_index(&catalog_payload, &storage_info, &storage_data)?;
+            WalEntry::CreateIndex {
+                catalog_payload,
+                storage_info,
+                storage_data,
+            } => {
+                let info =
+                    self.catalog
+                        .create_index(&catalog_payload, &storage_info, &storage_data)?;
                 state.pending_indexes.push(info);
             }
             WalEntry::DropIndex { schema, name } => {
@@ -1136,37 +1244,48 @@ impl<R: WalReader, C: CatalogOps> WalReplayer<R, C> {
             WalEntry::DropType { schema, name } => self.catalog.drop_type(&schema, &name)?,
 
             // ── DML ────────────────────────────────────────────────────────
-
             WalEntry::UseTable { schema, table } => {
                 state.current_table = Some((schema, table));
             }
             WalEntry::Insert { chunk_payload } => {
-                let (schema, table) = state.current_table.as_ref()
+                let (schema, table) = state
+                    .current_table
+                    .as_ref()
                     .map(|(s, t)| (s.as_str(), t.as_str()))
                     .ok_or(WalError::NoCurrentTable)?;
                 self.catalog.append_chunk(schema, table, &chunk_payload)?;
             }
             WalEntry::RowGroupData { data_payload } => {
-                let (schema, table) = state.current_table.as_ref()
+                let (schema, table) = state
+                    .current_table
+                    .as_ref()
                     .map(|(s, t)| (s.as_str(), t.as_str()))
                     .ok_or(WalError::NoCurrentTable)?;
-                self.catalog.merge_row_group_data(schema, table, &data_payload)?;
+                self.catalog
+                    .merge_row_group_data(schema, table, &data_payload)?;
             }
             WalEntry::Delete { chunk_payload } => {
-                let (schema, table) = state.current_table.as_ref()
+                let (schema, table) = state
+                    .current_table
+                    .as_ref()
                     .map(|(s, t)| (s.as_str(), t.as_str()))
                     .ok_or(WalError::NoCurrentTable)?;
                 self.catalog.delete_rows(schema, table, &chunk_payload)?;
             }
-            WalEntry::Update { column_indexes_payload, chunk_payload } => {
-                let (schema, table) = state.current_table.as_ref()
+            WalEntry::Update {
+                column_indexes_payload,
+                chunk_payload,
+            } => {
+                let (schema, table) = state
+                    .current_table
+                    .as_ref()
                     .map(|(s, t)| (s.as_str(), t.as_str()))
                     .ok_or(WalError::NoCurrentTable)?;
-                self.catalog.update_rows(schema, table, &column_indexes_payload, &chunk_payload)?;
+                self.catalog
+                    .update_rows(schema, table, &column_indexes_payload, &chunk_payload)?;
             }
 
             // ── 控制 ───────────────────────────────────────────────────────
-
             WalEntry::Checkpoint { meta_block } => {
                 state.checkpoint_id = Some(meta_block);
                 state.checkpoint_position = state.current_position;
@@ -1186,7 +1305,12 @@ impl<R: WalReader, C: CatalogOps> WalReplayer<R, C> {
                 Ok(Vec::new())
             }
             WalFrame::V2 { payload } => Ok(payload),
-            WalFrame::V3Encrypted { plaintext_size, nonce, ciphertext, tag } => {
+            WalFrame::V3Encrypted {
+                plaintext_size,
+                nonce,
+                ciphertext,
+                tag,
+            } => {
                 let enc = self.encryption.as_ref().ok_or_else(|| {
                     WalError::Corrupt("v3 encrypted WAL but no EncryptionOps provided".into())
                 })?;
@@ -1246,12 +1370,24 @@ fn compute_checksum(data: &[u8]) -> u64 {
 
         // n < 8 → n_blocks = 0，跳过 8 字节循环，直接处理尾部字节。
         // 对应 C++ switch 的 fallthrough（从 case n 向下直到 case 1）：
-        if n >= 7 { h ^= (tail[6] as u64) << 48; }
-        if n >= 6 { h ^= (tail[5] as u64) << 40; }
-        if n >= 5 { h ^= (tail[4] as u64) << 32; }
-        if n >= 4 { h ^= (tail[3] as u64) << 24; }
-        if n >= 3 { h ^= (tail[2] as u64) << 16; }
-        if n >= 2 { h ^= (tail[1] as u64) << 8; }
+        if n >= 7 {
+            h ^= (tail[6] as u64) << 48;
+        }
+        if n >= 6 {
+            h ^= (tail[5] as u64) << 40;
+        }
+        if n >= 5 {
+            h ^= (tail[4] as u64) << 32;
+        }
+        if n >= 4 {
+            h ^= (tail[3] as u64) << 24;
+        }
+        if n >= 3 {
+            h ^= (tail[2] as u64) << 16;
+        }
+        if n >= 2 {
+            h ^= (tail[1] as u64) << 8;
+        }
         if n >= 1 {
             h ^= tail[0] as u64;
             h = h.wrapping_mul(M);

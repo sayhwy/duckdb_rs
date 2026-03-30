@@ -1,7 +1,9 @@
 #![allow(non_snake_case)]
 
 use crate::common::serializer::read_stream::{QueryContext, ReadStream};
-use crate::storage::storage_info::{FileHandle, FileOpenFlags, FileSystem, StorageError, StorageResult};
+use crate::storage::storage_info::{
+    FileHandle, FileOpenFlags, FileSystem, StorageError, StorageResult,
+};
 
 use super::buffered_file_write::FILE_BUFFER_SIZE;
 
@@ -17,13 +19,13 @@ pub enum FileLockType {
 pub struct FileOpener;
 
 pub struct BufferedFileReader<'fs> {
-    pub fs:        &'fs dyn FileSystem,
-    pub data:      Vec<u8>,
-    pub offset:    usize,
+    pub fs: &'fs dyn FileSystem,
+    pub data: Vec<u8>,
+    pub offset: usize,
     pub read_data: usize,
-    pub handle:    Box<dyn FileHandle>,
-    file_size:     u64,
-    total_read:    u64,
+    pub handle: Box<dyn FileHandle>,
+    file_size: u64,
+    total_read: u64,
 }
 
 impl<'fs> BufferedFileReader<'fs> {
@@ -188,7 +190,8 @@ mod tests {
         writer.WriteData(&payload, payload.len()).unwrap();
         writer.Close().unwrap();
 
-        let mut reader = BufferedFileReader::new(&fs, &path, FileLockType::READ_LOCK, None).unwrap();
+        let mut reader =
+            BufferedFileReader::new(&fs, &path, FileLockType::READ_LOCK, None).unwrap();
         let mut actual = vec![0u8; payload.len()];
         let actual_len = actual.len();
         reader.ReadData(&mut actual, actual_len).unwrap();
@@ -208,7 +211,8 @@ mod tests {
         writer.WriteData(b"abcdef", 6).unwrap();
         writer.Close().unwrap();
 
-        let mut reader = BufferedFileReader::new(&fs, &path, FileLockType::READ_LOCK, None).unwrap();
+        let mut reader =
+            BufferedFileReader::new(&fs, &path, FileLockType::READ_LOCK, None).unwrap();
         reader.Seek(2).unwrap();
         let mut tail = [0u8; 2];
         reader.ReadData(&mut tail, 2).unwrap();

@@ -3,8 +3,8 @@
 // 对应 C++: duckdb/storage/compression/compression.hpp
 // ============================================================
 
-mod uncompressed;
 mod rle;
+mod uncompressed;
 
 pub use uncompressed::UncompressedReader;
 
@@ -41,18 +41,18 @@ pub enum CompressionType {
 impl From<u8> for CompressionType {
     fn from(v: u8) -> Self {
         match v {
-            0  => Self::Uncompressed,
-            1  => Self::Constant,
-            2  => Self::Rle,
-            3  => Self::Dictionary,
-            4  => Self::Patas,
-            5  => Self::BitPacking,
-            6  => Self::Fsst,
-            7  => Self::Chimp,
-            8  => Self::Alp,
-            9  => Self::Zstd,
+            0 => Self::Uncompressed,
+            1 => Self::Constant,
+            2 => Self::Rle,
+            3 => Self::Dictionary,
+            4 => Self::Patas,
+            5 => Self::BitPacking,
+            6 => Self::Fsst,
+            7 => Self::Chimp,
+            8 => Self::Alp,
+            9 => Self::Zstd,
             10 => Self::AlpRd,
-            _  => Self::Unknown,
+            _ => Self::Unknown,
         }
     }
 }

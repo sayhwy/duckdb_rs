@@ -14,26 +14,25 @@
 //! | `unique_ptr<DependencyManager> dependency_manager` | `dependency_manager: DependencyManager` |
 //! | `mutex write_lock` | `write_lock: Mutex<()>` |
 
-use std::sync::Arc;
 use parking_lot::{Mutex, RwLock};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::types::{
-    CatalogType, OnEntryNotFound, CatalogLookupBehavior,
-    CreateSchemaInfo, CreateTableInfo, CreateViewInfo, CreateSequenceInfo,
-    CreateTypeInfo, CreateIndexInfo, CreateFunctionInfo,
-    CreateCopyFunctionInfo, CreatePragmaFunctionInfo, CreateCollationInfo,
-    AlterInfo, DropInfo, DatabaseSize, MetadataBlockInfo,
-};
-use super::error::CatalogError;
-use super::entry::{CatalogEntryBase, CatalogEntryKind, CatalogEntryNode};
 use super::catalog_set::{CatalogSet, LookupFailureReason};
-use super::transaction::CatalogTransaction;
-use super::entry_lookup::{EntryLookupInfo, CatalogEntryLookup, SimilarCatalogEntry};
+use super::default_generator::DefaultSchemaGenerator;
 use super::dependency::LogicalDependencyList;
 use super::dependency_manager::DependencyManager;
-use super::default_generator::DefaultSchemaGenerator;
-use super::schema_entry::{SchemaCatalogEntry, DuckSchemaEntry};
+use super::entry::{CatalogEntryBase, CatalogEntryKind, CatalogEntryNode};
+use super::entry_lookup::{CatalogEntryLookup, EntryLookupInfo, SimilarCatalogEntry};
+use super::error::CatalogError;
+use super::schema_entry::{DuckSchemaEntry, SchemaCatalogEntry};
+use super::transaction::CatalogTransaction;
+use super::types::{
+    AlterInfo, CatalogLookupBehavior, CatalogType, CreateCollationInfo, CreateCopyFunctionInfo,
+    CreateFunctionInfo, CreateIndexInfo, CreatePragmaFunctionInfo, CreateSchemaInfo,
+    CreateSequenceInfo, CreateTableInfo, CreateTypeInfo, CreateViewInfo, DatabaseSize, DropInfo,
+    MetadataBlockInfo, OnEntryNotFound,
+};
 
 // ─── Catalog trait ─────────────────────────────────────────────────────────────
 
@@ -49,7 +48,9 @@ pub trait Catalog: Send + Sync {
     fn catalog_type_str(&self) -> &str;
 
     /// 是否为 DuckDB 原生 Catalog（C++: `virtual bool IsDuckCatalog()`）。
-    fn is_duck_catalog(&self) -> bool { false }
+    fn is_duck_catalog(&self) -> bool {
+        false
+    }
 
     /// 是否为系统 Catalog（C++: `IsSystemCatalog`）。
     fn is_system_catalog(&self) -> bool {
@@ -57,13 +58,17 @@ pub trait Catalog: Send + Sync {
     }
 
     /// 是否为临时 Catalog。
-    fn is_temporary_catalog(&self) -> bool { self.name() == "temp" }
+    fn is_temporary_catalog(&self) -> bool {
+        self.name() == "temp"
+    }
 
     /// 初始化（C++: `virtual void Initialize(bool load_builtin) = 0`）。
     fn initialize(&mut self, load_builtin: bool) -> Result<(), CatalogError>;
 
     /// 获取 Catalog 版本号（C++: `virtual optional_idx GetCatalogVersion`）。
-    fn catalog_version(&self) -> Option<u64> { None }
+    fn catalog_version(&self) -> Option<u64> {
+        None
+    }
 
     // ── Schema 操作 ───────────────────────────────────────────────────────────
 
@@ -105,16 +110,56 @@ pub trait Catalog: Send + Sync {
 
     // ── 表/视图/函数等创建接口 ───────────────────────────────────────────────
 
-    fn create_table(&self, txn: &CatalogTransaction, info: &CreateTableInfo) -> Result<(), CatalogError>;
-    fn create_view(&self, txn: &CatalogTransaction, info: &CreateViewInfo) -> Result<(), CatalogError>;
-    fn create_sequence(&self, txn: &CatalogTransaction, info: &CreateSequenceInfo) -> Result<(), CatalogError>;
-    fn create_type(&self, txn: &CatalogTransaction, info: &CreateTypeInfo) -> Result<(), CatalogError>;
-    fn create_index(&self, txn: &CatalogTransaction, info: &CreateIndexInfo) -> Result<(), CatalogError>;
-    fn create_function(&self, txn: &CatalogTransaction, info: &CreateFunctionInfo) -> Result<(), CatalogError>;
-    fn create_table_function(&self, txn: &CatalogTransaction, info: &CreateFunctionInfo) -> Result<(), CatalogError>;
-    fn create_copy_function(&self, txn: &CatalogTransaction, info: &CreateCopyFunctionInfo) -> Result<(), CatalogError>;
-    fn create_pragma_function(&self, txn: &CatalogTransaction, info: &CreatePragmaFunctionInfo) -> Result<(), CatalogError>;
-    fn create_collation(&self, txn: &CatalogTransaction, info: &CreateCollationInfo) -> Result<(), CatalogError>;
+    fn create_table(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateTableInfo,
+    ) -> Result<(), CatalogError>;
+    fn create_view(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateViewInfo,
+    ) -> Result<(), CatalogError>;
+    fn create_sequence(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateSequenceInfo,
+    ) -> Result<(), CatalogError>;
+    fn create_type(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateTypeInfo,
+    ) -> Result<(), CatalogError>;
+    fn create_index(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateIndexInfo,
+    ) -> Result<(), CatalogError>;
+    fn create_function(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateFunctionInfo,
+    ) -> Result<(), CatalogError>;
+    fn create_table_function(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateFunctionInfo,
+    ) -> Result<(), CatalogError>;
+    fn create_copy_function(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateCopyFunctionInfo,
+    ) -> Result<(), CatalogError>;
+    fn create_pragma_function(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreatePragmaFunctionInfo,
+    ) -> Result<(), CatalogError>;
+    fn create_collation(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateCollationInfo,
+    ) -> Result<(), CatalogError>;
 
     // ── 条目查找 ──────────────────────────────────────────────────────────────
 
@@ -138,9 +183,15 @@ pub trait Catalog: Send + Sync {
     fn in_memory(&self) -> bool;
     fn db_path(&self) -> String;
 
-    fn supports_time_travel(&self) -> bool { false }
-    fn is_encrypted(&self) -> bool { false }
-    fn encryption_cipher(&self) -> String { String::new() }
+    fn supports_time_travel(&self) -> bool {
+        false
+    }
+    fn is_encrypted(&self) -> bool {
+        false
+    }
+    fn encryption_cipher(&self) -> String {
+        String::new()
+    }
 
     /// 查找行为（C++: `CatalogTypeLookupRule`）。
     fn catalog_type_lookup_rule(&self, _catalog_type: CatalogType) -> CatalogLookupBehavior {
@@ -148,7 +199,9 @@ pub trait Catalog: Send + Sync {
     }
 
     /// 默认 schema 名称（C++: `GetDefaultSchema`）。
-    fn default_schema(&self) -> &str { "main" }
+    fn default_schema(&self) -> &str {
+        "main"
+    }
 }
 
 // ─── DuckCatalog ──────────────────────────────────────────────────────────────
@@ -224,7 +277,9 @@ impl DuckCatalog {
     }
 
     /// 获取 schema CatalogSet（C++: `GetSchemaCatalogSet`）。
-    pub fn get_schema_catalog_set(&self) -> &CatalogSet { &self.schemas }
+    pub fn get_schema_catalog_set(&self) -> &CatalogSet {
+        &self.schemas
+    }
 
     /// 递增 catalog 版本号。
     pub fn increment_catalog_version(&self) -> u64 {
@@ -278,7 +333,10 @@ impl DuckCatalog {
                 // 尝试默认生成器
                 // 注意：get_entry_with_defaults 需要 &mut self，这里用 unsafe 绕过
                 // 实际上应在初始化时预填充所有默认 schema
-                return Err(CatalogError::not_found(CatalogType::SchemaEntry, schema_name));
+                return Err(CatalogError::not_found(
+                    CatalogType::SchemaEntry,
+                    schema_name,
+                ));
             }
             lower
         };
@@ -290,10 +348,18 @@ impl DuckCatalog {
 }
 
 impl Catalog for DuckCatalog {
-    fn name(&self) -> &str { &self.name }
-    fn oid(&self) -> u64 { self.oid }
-    fn catalog_type_str(&self) -> &str { "duckdb" }
-    fn is_duck_catalog(&self) -> bool { true }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn oid(&self) -> u64 {
+        self.oid
+    }
+    fn catalog_type_str(&self) -> &str {
+        "duckdb"
+    }
+    fn is_duck_catalog(&self) -> bool {
+        true
+    }
     fn catalog_version(&self) -> Option<u64> {
         Some(self.catalog_version.load(Ordering::SeqCst))
     }
@@ -319,7 +385,11 @@ impl Catalog for DuckCatalog {
 
     // ── Schema 操作 ───────────────────────────────────────────────────────────
 
-    fn create_schema(&self, txn: &CatalogTransaction, info: &CreateSchemaInfo) -> Result<(), CatalogError> {
+    fn create_schema(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateSchemaInfo,
+    ) -> Result<(), CatalogError> {
         let _lock = self.write_lock.lock();
         let schema_name = info.schema_name();
         let oid = schema_name.len() as u64 ^ self.oid;
@@ -334,13 +404,19 @@ impl Catalog for DuckCatalog {
         base.comment = info.base.comment.clone();
         let node = Box::new(CatalogEntryNode::new(base, CatalogEntryKind::Schema));
 
-        match self.schemas.create_entry(txn, schema_name, node, &LogicalDependencyList::new()) {
+        match self
+            .schemas
+            .create_entry(txn, schema_name, node, &LogicalDependencyList::new())
+        {
             Ok(_) => {
                 self.increment_catalog_version();
                 Ok(())
             }
             Err(CatalogError::AlreadyExists { .. })
-                if info.base.on_conflict == super::types::OnCreateConflict::IgnoreOnConflict => Ok(()),
+                if info.base.on_conflict == super::types::OnCreateConflict::IgnoreOnConflict =>
+            {
+                Ok(())
+            }
             Err(e) => Err(e),
         }
     }
@@ -353,19 +429,27 @@ impl Catalog for DuckCatalog {
     ) -> Result<Option<String>, CatalogError> {
         let result = self.schemas.get_entry_detailed(txn, &lookup.name);
         match result.reason {
-            LookupFailureReason::Success => {
-                Ok(Some(result.node.map(|n| n.base.name).unwrap_or_else(|| lookup.name.clone())))
-            }
+            LookupFailureReason::Success => Ok(Some(
+                result
+                    .node
+                    .map(|n| n.base.name)
+                    .unwrap_or_else(|| lookup.name.clone()),
+            )),
             _ => match if_not_found {
                 OnEntryNotFound::ReturnNull => Ok(None),
                 OnEntryNotFound::ThrowException => {
                     let similar = self.schemas.similar_entry(txn, &lookup.name);
                     if similar.found() {
                         Err(CatalogError::not_found_with_hint(
-                            CatalogType::SchemaEntry, &lookup.name, &similar.name
+                            CatalogType::SchemaEntry,
+                            &lookup.name,
+                            &similar.name,
                         ))
                     } else {
-                        Err(CatalogError::not_found(CatalogType::SchemaEntry, &lookup.name))
+                        Err(CatalogError::not_found(
+                            CatalogType::SchemaEntry,
+                            &lookup.name,
+                        ))
                     }
                 }
             },
@@ -382,7 +466,11 @@ impl Catalog for DuckCatalog {
 
     // ── 表/视图等创建 ─────────────────────────────────────────────────────────
 
-    fn create_table(&self, txn: &CatalogTransaction, info: &CreateTableInfo) -> Result<(), CatalogError> {
+    fn create_table(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateTableInfo,
+    ) -> Result<(), CatalogError> {
         let _lock = self.write_lock.lock();
         let schema = self.get_schema_for_op(txn, &info.base.schema)?;
         schema.create_table(txn, info)?;
@@ -390,7 +478,11 @@ impl Catalog for DuckCatalog {
         Ok(())
     }
 
-    fn create_view(&self, txn: &CatalogTransaction, info: &CreateViewInfo) -> Result<(), CatalogError> {
+    fn create_view(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateViewInfo,
+    ) -> Result<(), CatalogError> {
         let _lock = self.write_lock.lock();
         let schema = self.get_schema_for_op(txn, &info.base.schema)?;
         schema.create_view(txn, info)?;
@@ -398,7 +490,11 @@ impl Catalog for DuckCatalog {
         Ok(())
     }
 
-    fn create_sequence(&self, txn: &CatalogTransaction, info: &CreateSequenceInfo) -> Result<(), CatalogError> {
+    fn create_sequence(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateSequenceInfo,
+    ) -> Result<(), CatalogError> {
         let _lock = self.write_lock.lock();
         let schema = self.get_schema_for_op(txn, &info.base.schema)?;
         schema.create_sequence(txn, info)?;
@@ -406,7 +502,11 @@ impl Catalog for DuckCatalog {
         Ok(())
     }
 
-    fn create_type(&self, txn: &CatalogTransaction, info: &CreateTypeInfo) -> Result<(), CatalogError> {
+    fn create_type(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateTypeInfo,
+    ) -> Result<(), CatalogError> {
         let _lock = self.write_lock.lock();
         let schema = self.get_schema_for_op(txn, &info.base.schema)?;
         schema.create_type(txn, info)?;
@@ -414,7 +514,11 @@ impl Catalog for DuckCatalog {
         Ok(())
     }
 
-    fn create_index(&self, txn: &CatalogTransaction, info: &CreateIndexInfo) -> Result<(), CatalogError> {
+    fn create_index(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateIndexInfo,
+    ) -> Result<(), CatalogError> {
         let _lock = self.write_lock.lock();
         let schema = self.get_schema_for_op(txn, &info.base.schema)?;
         schema.create_index(txn, info)?;
@@ -422,7 +526,11 @@ impl Catalog for DuckCatalog {
         Ok(())
     }
 
-    fn create_function(&self, txn: &CatalogTransaction, info: &CreateFunctionInfo) -> Result<(), CatalogError> {
+    fn create_function(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateFunctionInfo,
+    ) -> Result<(), CatalogError> {
         let _lock = self.write_lock.lock();
         let schema = self.get_schema_for_op(txn, &info.base.schema)?;
         schema.create_function(txn, info)?;
@@ -430,19 +538,35 @@ impl Catalog for DuckCatalog {
         Ok(())
     }
 
-    fn create_table_function(&self, txn: &CatalogTransaction, info: &CreateFunctionInfo) -> Result<(), CatalogError> {
+    fn create_table_function(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateFunctionInfo,
+    ) -> Result<(), CatalogError> {
         self.create_function(txn, info)
     }
 
-    fn create_copy_function(&self, txn: &CatalogTransaction, info: &CreateCopyFunctionInfo) -> Result<(), CatalogError> {
+    fn create_copy_function(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateCopyFunctionInfo,
+    ) -> Result<(), CatalogError> {
         self.create_function(txn, info)
     }
 
-    fn create_pragma_function(&self, txn: &CatalogTransaction, info: &CreatePragmaFunctionInfo) -> Result<(), CatalogError> {
+    fn create_pragma_function(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreatePragmaFunctionInfo,
+    ) -> Result<(), CatalogError> {
         self.create_function(txn, info)
     }
 
-    fn create_collation(&self, txn: &CatalogTransaction, info: &CreateCollationInfo) -> Result<(), CatalogError> {
+    fn create_collation(
+        &self,
+        txn: &CatalogTransaction,
+        info: &CreateCollationInfo,
+    ) -> Result<(), CatalogError> {
         let _lock = self.write_lock.lock();
         let schema = self.get_schema_for_op(txn, &info.base.schema)?;
         schema.create_collation(txn, info)?;
@@ -461,10 +585,12 @@ impl Catalog for DuckCatalog {
     ) -> Result<Option<CatalogEntryNode>, CatalogError> {
         let schema = match self.get_schema_for_op(txn, schema_name) {
             Ok(s) => s,
-            Err(e) => return match if_not_found {
-                OnEntryNotFound::ReturnNull => Ok(None),
-                OnEntryNotFound::ThrowException => Err(e),
-            },
+            Err(e) => {
+                return match if_not_found {
+                    OnEntryNotFound::ReturnNull => Ok(None),
+                    OnEntryNotFound::ThrowException => Err(e),
+                };
+            }
         };
 
         let entry = schema.lookup_entry(txn, lookup);
@@ -476,7 +602,9 @@ impl Catalog for DuckCatalog {
                     let similar = schema.get_similar_entry(txn, lookup);
                     if similar.found() {
                         Err(CatalogError::not_found_with_hint(
-                            lookup.catalog_type, &lookup.name, &similar.name
+                            lookup.catalog_type,
+                            &lookup.name,
+                            &similar.name,
                         ))
                     } else {
                         Err(CatalogError::not_found(lookup.catalog_type, &lookup.name))
@@ -493,19 +621,24 @@ impl Catalog for DuckCatalog {
 
         if info.catalog_type == CatalogType::SchemaEntry {
             // Drop schema：需要先 drop schema 内的所有对象
-            let schema = self.get_schema_for_op(txn, &info.name)
+            let schema = self
+                .get_schema_for_op(txn, &info.name)
                 .or_else(|e| if info.if_exists { Err(e) } else { Err(e) })?;
 
             // 依赖检查
-            let schema_info = super::dependency::CatalogEntryInfo::new(
-                CatalogType::SchemaEntry, "", &info.name
-            );
-            let to_drop = self.dependency_manager.check_drop(txn, &schema_info, info.cascade)?;
+            let schema_info =
+                super::dependency::CatalogEntryInfo::new(CatalogType::SchemaEntry, "", &info.name);
+            let to_drop = self
+                .dependency_manager
+                .check_drop(txn, &schema_info, info.cascade)?;
 
-            self.schemas.drop_entry(txn, &info.name, info.cascade, info.allow_drop_internal)?;
+            self.schemas
+                .drop_entry(txn, &info.name, info.cascade, info.allow_drop_internal)?;
 
             // 从实例缓存中删除
-            self.schema_instances.write().remove(&info.name.to_lowercase());
+            self.schema_instances
+                .write()
+                .remove(&info.name.to_lowercase());
             self.increment_catalog_version();
             return Ok(());
         }
@@ -514,10 +647,11 @@ impl Catalog for DuckCatalog {
         let schema = self.get_schema_for_op(txn, &info.schema)?;
 
         // 依赖检查
-        let entry_info = super::dependency::CatalogEntryInfo::new(
-            info.catalog_type, &info.schema, &info.name
-        );
-        let _to_drop = self.dependency_manager.check_drop(txn, &entry_info, info.cascade)?;
+        let entry_info =
+            super::dependency::CatalogEntryInfo::new(info.catalog_type, &info.schema, &info.name);
+        let _to_drop = self
+            .dependency_manager
+            .check_drop(txn, &entry_info, info.cascade)?;
         // 真正的级联删除在实际实现中会递归删除 to_drop 中的条目
 
         schema.drop_entry(txn, info)?;
@@ -544,13 +678,23 @@ impl Catalog for DuckCatalog {
         Vec::new()
     }
 
-    fn in_memory(&self) -> bool { self.is_in_memory }
+    fn in_memory(&self) -> bool {
+        self.is_in_memory
+    }
 
-    fn db_path(&self) -> String { self.db_path_str.clone() }
+    fn db_path(&self) -> String {
+        self.db_path_str.clone()
+    }
 
-    fn is_encrypted(&self) -> bool { self.encrypted }
+    fn is_encrypted(&self) -> bool {
+        self.encrypted
+    }
 
     fn encryption_cipher(&self) -> String {
-        if self.encrypted { "AES-256-GCM".to_string() } else { String::new() }
+        if self.encrypted {
+            "AES-256-GCM".to_string()
+        } else {
+            String::new()
+        }
     }
 }

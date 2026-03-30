@@ -146,7 +146,13 @@ impl DataTableInfo {
 
     /// 获取磁盘索引元数据快照。
     pub fn get_index_storage_infos(&self) -> Vec<IndexStorageInfo> {
-        self.index_storage_infos.lock().iter().map(|i| IndexStorageInfo { name: i.name.clone() }).collect()
+        self.index_storage_infos
+            .lock()
+            .iter()
+            .map(|i| IndexStorageInfo {
+                name: i.name.clone(),
+            })
+            .collect()
     }
 
     pub fn set_persistent_storage(&self, storage: Arc<PersistentStorageRuntime>) {

@@ -20,55 +20,48 @@
 //! catalog.rs            ← Catalog trait, DuckCatalog
 //! ```
 
-pub mod types;
-pub mod error;
-pub mod dependency;
-pub mod transaction;
-pub mod entry_lookup;
-pub mod entry;
-pub mod catalog_set;
-pub mod default_generator;
-pub mod search_path;
-pub mod column_dependency;
-pub mod dependency_manager;
-pub mod schema_entry;
 pub mod catalog;
-pub mod table_catalog_entry;
 mod catalog_entry;
+pub mod catalog_set;
+pub mod column_dependency;
+pub mod default_generator;
+pub mod dependency;
+pub mod dependency_manager;
+pub mod entry;
+pub mod entry_lookup;
+pub mod error;
+pub mod schema_entry;
+pub mod search_path;
 mod standard_entry;
+pub mod table_catalog_entry;
+pub mod transaction;
+pub mod types;
 // ─── 常用类型重新导出 ──────────────────────────────────────────────────────────
 
 pub use types::{
-    CatalogType, OnEntryNotFound, OnCreateConflict, CatalogLookupBehavior,
-    IndexConstraintType, Value, LogicalTypeId, LogicalType,
-    ColumnDefinition, ColumnList, ConstraintType,
-    CreateInfo, CreateSchemaInfo, CreateTableInfo, CreateViewInfo,
-    CreateSequenceInfo, CreateTypeInfo, CreateIndexInfo,
-    CreateFunctionInfo, CreateCopyFunctionInfo, CreatePragmaFunctionInfo,
-    CreateCollationInfo,
-    AlterInfo, AlterKind, DropInfo,
-    DatabaseSize, MetadataBlockInfo,
+    AlterInfo, AlterKind, CatalogLookupBehavior, CatalogType, ColumnDefinition, ColumnList,
+    ConstraintType, CreateCollationInfo, CreateCopyFunctionInfo, CreateFunctionInfo,
+    CreateIndexInfo, CreateInfo, CreatePragmaFunctionInfo, CreateSchemaInfo, CreateSequenceInfo,
+    CreateTableInfo, CreateTypeInfo, CreateViewInfo, DatabaseSize, DropInfo, IndexConstraintType,
+    LogicalType, LogicalTypeId, MetadataBlockInfo, OnCreateConflict, OnEntryNotFound, Value,
 };
 
 pub use error::CatalogError;
 
 pub use dependency::{
-    CatalogEntryInfo, LogicalDependency, LogicalDependencyList,
-    DependencySubjectFlags, DependencyDependentFlags,
-    DependencySubject, DependencyDependent, DependencyInfo,
-    MangledEntryName, MangledDependencyName,
+    CatalogEntryInfo, DependencyDependent, DependencyDependentFlags, DependencyInfo,
+    DependencySubject, DependencySubjectFlags, LogicalDependency, LogicalDependencyList,
+    MangledDependencyName, MangledEntryName,
 };
 
-pub use transaction::{CatalogTransaction, is_visible, is_committed};
+pub use transaction::{CatalogTransaction, is_committed, is_visible};
 
-pub use entry_lookup::{EntryLookupInfo, CatalogEntryLookup, SimilarCatalogEntry};
+pub use entry_lookup::{CatalogEntryLookup, EntryLookupInfo, SimilarCatalogEntry};
 
 pub use entry::{
-    CatalogEntryBase, CatalogEntryKind, CatalogEntryNode, CatalogEntryRef,
-    TableEntryData, ViewEntryData, SequenceEntryData,
-    IndexEntryData, TypeEntryData, FunctionEntryData,
-    DependencyRelationData,
-    new_entry_ref,
+    CatalogEntryBase, CatalogEntryKind, CatalogEntryNode, CatalogEntryRef, DependencyRelationData,
+    FunctionEntryData, IndexEntryData, SequenceEntryData, TableEntryData, TypeEntryData,
+    ViewEntryData, new_entry_ref,
 };
 
 pub use catalog_set::{CatalogSet, EntryLookupResult, LookupFailureReason};
@@ -81,15 +74,12 @@ pub use column_dependency::ColumnDependencyManager;
 
 pub use dependency_manager::DependencyManager;
 
-pub use schema_entry::{SchemaCatalogEntry, DuckSchemaEntry};
+pub use schema_entry::{DuckSchemaEntry, SchemaCatalogEntry};
 
 pub use catalog::{Catalog, DuckCatalog};
 
 pub use table_catalog_entry::{
-    TableCatalogEntry, TableCatalogEntryVirtual,
-    LogicalIndex, PhysicalIndex,
-    ColumnSegmentInfo, TableStorageInfo, IndexInfo,
-    VirtualColumn, VirtualColumnMap,
-    ColumnStatistics, ScanFunctionBinding,
-    COLUMN_IDENTIFIER_ROW_ID,
+    COLUMN_IDENTIFIER_ROW_ID, ColumnSegmentInfo, ColumnStatistics, IndexInfo, LogicalIndex,
+    PhysicalIndex, ScanFunctionBinding, TableCatalogEntry, TableCatalogEntryVirtual,
+    TableStorageInfo, VirtualColumn, VirtualColumnMap,
 };

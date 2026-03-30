@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use crate::storage::buffer::{BlockId, BlockManager, BufferHandle, BufferManager, INVALID_BLOCK, MemoryTag};
+use crate::storage::buffer::{
+    BlockId, BlockManager, BufferHandle, BufferManager, INVALID_BLOCK, MemoryTag,
+};
 
 use super::string_checkpoint_state::{OverflowStringWriter, UncompressedStringSegmentState};
 
@@ -137,6 +139,9 @@ impl OverflowStringWriter for WriteOverflowStringsToDisk {
 
 impl Drop for WriteOverflowStringsToDisk {
     fn drop(&mut self) {
-        debug_assert!(self.offset == 0, "overflow string writer must be flushed before drop");
+        debug_assert!(
+            self.offset == 0,
+            "overflow string writer must be flushed before drop"
+        );
     }
 }

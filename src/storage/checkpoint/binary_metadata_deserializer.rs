@@ -1,9 +1,9 @@
 use std::io;
 
+use crate::common::types::LogicalType;
 use crate::storage::metadata::{MetaBlockPointer, ReadStream};
 use crate::storage::table::row_group::RowGroupPointer;
-use crate::common::types::LogicalType;
-use crate::storage::table::types::{CompressionType, DataPointer, Idx, INVALID_BLOCK};
+use crate::storage::table::types::{CompressionType, DataPointer, INVALID_BLOCK, Idx};
 
 pub const MESSAGE_TERMINATOR_FIELD_ID: u16 = 0xFFFF;
 
@@ -52,7 +52,10 @@ impl<'a> BinaryMetadataDeserializer<'a> {
             }
             shift += 7;
             if shift >= 64 {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "varint overflow"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "varint overflow",
+                ));
             }
         }
     }
@@ -138,7 +141,10 @@ impl<'a> BinaryMetadataDeserializer<'a> {
                 100 => block_pointer = self.read_varint()?,
                 101 => offset = self.read_u32_varint()?,
                 MESSAGE_TERMINATOR_FIELD_ID => {
-                    return Ok(MetaBlockPointer { block_pointer, offset });
+                    return Ok(MetaBlockPointer {
+                        block_pointer,
+                        offset,
+                    });
                 }
                 other => {
                     return Err(io::Error::new(
@@ -271,7 +277,10 @@ fn read_compression_type(value: u8) -> CompressionType {
     }
 }
 
-fn skip_base_statistics(de: &mut BinaryMetadataDeserializer<'_>, logical_type: &LogicalType) -> io::Result<()> {
+fn skip_base_statistics(
+    de: &mut BinaryMetadataDeserializer<'_>,
+    logical_type: &LogicalType,
+) -> io::Result<()> {
     loop {
         match de.next_field()? {
             100 | 101 => {
@@ -292,7 +301,10 @@ fn skip_base_statistics(de: &mut BinaryMetadataDeserializer<'_>, logical_type: &
     }
 }
 
-fn skip_type_statistics(de: &mut BinaryMetadataDeserializer<'_>, logical_type: &LogicalType) -> io::Result<()> {
+fn skip_type_statistics(
+    de: &mut BinaryMetadataDeserializer<'_>,
+    logical_type: &LogicalType,
+) -> io::Result<()> {
     loop {
         match de.next_field()? {
             200 | 201 => skip_numeric_stat_value(de, logical_type)?,
@@ -313,7 +325,10 @@ fn skip_type_statistics(de: &mut BinaryMetadataDeserializer<'_>, logical_type: &
     }
 }
 
-fn skip_numeric_stat_value(de: &mut BinaryMetadataDeserializer<'_>, logical_type: &LogicalType) -> io::Result<()> {
+fn skip_numeric_stat_value(
+    de: &mut BinaryMetadataDeserializer<'_>,
+    logical_type: &LogicalType,
+) -> io::Result<()> {
     let mut has_value = false;
     loop {
         match de.next_field()? {
@@ -336,7 +351,10 @@ fn skip_numeric_stat_value(de: &mut BinaryMetadataDeserializer<'_>, logical_type
     }
 }
 
-fn skip_numeric_value(de: &mut BinaryMetadataDeserializer<'_>, logical_type: &LogicalType) -> io::Result<()> {
+fn skip_numeric_value(
+    de: &mut BinaryMetadataDeserializer<'_>,
+    logical_type: &LogicalType,
+) -> io::Result<()> {
     match logical_type.id {
         crate::common::types::LogicalTypeId::Float => de.skip_bytes(4),
         crate::common::types::LogicalTypeId::Double => de.skip_bytes(8),
@@ -434,7 +452,9 @@ fn skip_blocking_sample(de: &mut BinaryMetadataDeserializer<'_>) -> io::Result<(
     }
 }
 
-fn skip_optional_base_reservoir_sampling(de: &mut BinaryMetadataDeserializer<'_>) -> io::Result<()> {
+fn skip_optional_base_reservoir_sampling(
+    de: &mut BinaryMetadataDeserializer<'_>,
+) -> io::Result<()> {
     if de.read_u8() == 0 {
         return Ok(());
     }
@@ -508,7 +528,10 @@ fn skip_nested_object_recursive(de: &mut BinaryMetadataDeserializer<'_>) -> io::
 }
 
 /// Skip an unknown value - try to handle common patterns
-fn skip_unknown_value(de: &mut BinaryMetadataDeserializer<'_>, depth: &mut usize) -> io::Result<()> {
+fn skip_unknown_value(
+    de: &mut BinaryMetadataDeserializer<'_>,
+    depth: &mut usize,
+) -> io::Result<()> {
     // Read first byte to detect type
     let first_byte = de.stream.read_u8();
 

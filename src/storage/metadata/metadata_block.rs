@@ -13,7 +13,10 @@
 //   bit i = 1 表示 sub-block i 空闲；bit i = 0 表示已使用。
 //   序列化/反序列化时用一个 u64 存储。
 
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use crate::storage::buffer::{BlockHandle, BlockId, INVALID_BLOCK};
 

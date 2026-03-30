@@ -17,12 +17,15 @@
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CatalogSearchEntry {
     pub catalog: String,
-    pub schema:  String,
+    pub schema: String,
 }
 
 impl CatalogSearchEntry {
     pub fn new(catalog: impl Into<String>, schema: impl Into<String>) -> Self {
-        Self { catalog: catalog.into(), schema: schema.into() }
+        Self {
+            catalog: catalog.into(),
+            schema: schema.into(),
+        }
     }
 
     /// 解析 `"catalog.schema"` 或 `"schema"` 格式的字符串。
@@ -53,7 +56,11 @@ impl CatalogSearchEntry {
 
     /// 列表转字符串（C++: `CatalogSearchEntry::ListToString`）。
     pub fn list_to_string(entries: &[Self]) -> String {
-        entries.iter().map(|e| e.to_string_repr()).collect::<Vec<_>>().join(",")
+        entries
+            .iter()
+            .map(|e| e.to_string_repr())
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
@@ -120,17 +127,24 @@ impl CatalogSearchPath {
     }
 
     /// 获取当前完整搜索路径（C++: `CatalogSearchPath::Get`）。
-    pub fn get(&self) -> &[CatalogSearchEntry] { &self.paths }
+    pub fn get(&self) -> &[CatalogSearchEntry] {
+        &self.paths
+    }
 
     /// 获取用户明确设置的路径（C++: `CatalogSearchPath::GetSetPaths`）。
-    pub fn get_set_paths(&self) -> &[CatalogSearchEntry] { &self.set_paths }
+    pub fn get_set_paths(&self) -> &[CatalogSearchEntry] {
+        &self.set_paths
+    }
 
     /// 获取默认 schema 名称（C++: `CatalogSearchPath::GetDefault`）。
     pub fn get_default_entry(&self) -> CatalogSearchEntry {
-        self.paths.first().cloned().unwrap_or_else(|| CatalogSearchEntry {
-            catalog: self.default_catalog.clone(),
-            schema: "main".to_string(),
-        })
+        self.paths
+            .first()
+            .cloned()
+            .unwrap_or_else(|| CatalogSearchEntry {
+                catalog: self.default_catalog.clone(),
+                schema: "main".to_string(),
+            })
     }
 
     /// 获取指定 catalog 的默认 schema（C++: `GetDefaultSchema(catalog)`）。
@@ -155,7 +169,8 @@ impl CatalogSearchPath {
 
     /// 获取指定 catalog 的所有 schema（C++: `GetSchemasForCatalog`）。
     pub fn get_schemas_for_catalog(&self, catalog: &str) -> Vec<String> {
-        self.paths.iter()
+        self.paths
+            .iter()
             .filter(|e| e.catalog.eq_ignore_ascii_case(catalog))
             .map(|e| e.schema.clone())
             .collect()
@@ -163,7 +178,8 @@ impl CatalogSearchPath {
 
     /// 获取指定 schema 的所有 catalog（C++: `GetCatalogsForSchema`）。
     pub fn get_catalogs_for_schema(&self, schema: &str) -> Vec<String> {
-        self.paths.iter()
+        self.paths
+            .iter()
             .filter(|e| e.schema.eq_ignore_ascii_case(schema))
             .map(|e| e.catalog.clone())
             .collect()
@@ -171,10 +187,9 @@ impl CatalogSearchPath {
 
     /// 判断 (catalog, schema) 是否在搜索路径中（C++: `SchemaInSearchPath`）。
     pub fn schema_in_search_path(&self, catalog: &str, schema: &str) -> bool {
-        self.paths.iter().any(|e|
-            e.catalog.eq_ignore_ascii_case(catalog) &&
-            e.schema.eq_ignore_ascii_case(schema)
-        )
+        self.paths.iter().any(|e| {
+            e.catalog.eq_ignore_ascii_case(catalog) && e.schema.eq_ignore_ascii_case(schema)
+        })
     }
 
     // ─── 内部辅助 ──────────────────────────────────────────────────────────────
@@ -183,11 +198,17 @@ impl CatalogSearchPath {
         let mut paths = user_paths;
         // 确保 `temp` schema 始终在搜索路径中（高优先级）
         if !paths.iter().any(|e| e.schema.eq_ignore_ascii_case("temp")) {
-            paths.insert(0, CatalogSearchEntry::new(self.default_catalog.clone(), "temp"));
+            paths.insert(
+                0,
+                CatalogSearchEntry::new(self.default_catalog.clone(), "temp"),
+            );
         }
         // 确保 `main` schema 始终在搜索路径中
         if !paths.iter().any(|e| e.schema.eq_ignore_ascii_case("main")) {
-            paths.push(CatalogSearchEntry::new(self.default_catalog.clone(), "main"));
+            paths.push(CatalogSearchEntry::new(
+                self.default_catalog.clone(),
+                "main",
+            ));
         }
         self.paths = paths;
     }

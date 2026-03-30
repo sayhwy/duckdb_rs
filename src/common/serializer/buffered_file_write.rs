@@ -1,23 +1,24 @@
 #![allow(non_snake_case)]
 
 use crate::common::serializer::write_stream::WriteStream;
-use crate::storage::storage_info::{FileHandle, FileOpenFlags, FileSystem, StorageError, StorageResult};
+use crate::storage::storage_info::{
+    FileHandle, FileOpenFlags, FileSystem, StorageError, StorageResult,
+};
 
 pub const FILE_BUFFER_SIZE: usize = 4096;
 
 pub struct BufferedFileWriter<'fs> {
-    pub fs:            &'fs dyn FileSystem,
-    pub path:          String,
-    pub data:          Vec<u8>,
-    pub offset:        usize,
+    pub fs: &'fs dyn FileSystem,
+    pub path: String,
+    pub data: Vec<u8>,
+    pub offset: usize,
     pub total_written: u64,
-    pub handle:        Option<Box<dyn FileHandle>>,
+    pub handle: Option<Box<dyn FileHandle>>,
 }
 
 impl<'fs> BufferedFileWriter<'fs> {
-    pub const DEFAULT_OPEN_FLAGS: FileOpenFlags = FileOpenFlags(
-        FileOpenFlags::WRITE.0 | FileOpenFlags::CREATE.0,
-    );
+    pub const DEFAULT_OPEN_FLAGS: FileOpenFlags =
+        FileOpenFlags(FileOpenFlags::WRITE.0 | FileOpenFlags::CREATE.0);
 
     // Serializes to a buffer allocated by the serializer, will expand when
     // writing past the initial threshold.

@@ -29,12 +29,12 @@
 //! | `unique_ptr<CatalogEntry> child`      | `CatalogEntryChain::older`             |
 //! | `optional_ptr<CatalogEntry> parent`   | 由 `CatalogSet` 管理，此处不持有       |
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::types::{CatalogType, Value, CreateInfo, AlterInfo};
 use super::error::CatalogError;
 use super::transaction::CatalogTransaction;
+use super::types::{AlterInfo, CatalogType, CreateInfo, Value};
 
 // ─── CatalogEntryFields ────────────────────────────────────────────────────────
 
@@ -121,11 +121,10 @@ pub trait CatalogEntryVirtual: Send + Sync {
     /// C++: `virtual unique_ptr<CatalogEntry> AlterEntry(ClientContext&, AlterInfo&)`
     ///
     /// 默认实现：抛出"不支持"错误（对应 C++ 的 `throw InternalException`）。
-    fn alter_entry(
-        &self,
-        _info: &AlterInfo,
-    ) -> Result<Box<dyn CatalogEntryVirtual>, CatalogError> {
-        Err(CatalogError::other("Unsupported alter type for catalog entry!"))
+    fn alter_entry(&self, _info: &AlterInfo) -> Result<Box<dyn CatalogEntryVirtual>, CatalogError> {
+        Err(CatalogError::other(
+            "Unsupported alter type for catalog entry!",
+        ))
     }
 
     /// 使用事务上下文执行 Alter 操作。
@@ -140,7 +139,9 @@ pub trait CatalogEntryVirtual: Send + Sync {
         info: &AlterInfo,
     ) -> Result<Box<dyn CatalogEntryVirtual>, CatalogError> {
         if !transaction.has_context {
-            return Err(CatalogError::other("Cannot AlterEntry without client context"));
+            return Err(CatalogError::other(
+                "Cannot AlterEntry without client context",
+            ));
         }
         self.alter_entry(info)
     }
@@ -160,7 +161,9 @@ pub trait CatalogEntryVirtual: Send + Sync {
 
     /// 深拷贝此条目（C++: `virtual unique_ptr<CatalogEntry> Copy(ClientContext&) const`）。
     fn copy(&self) -> Result<Box<dyn CatalogEntryVirtual>, CatalogError> {
-        Err(CatalogError::other("Unsupported copy type for catalog entry!"))
+        Err(CatalogError::other(
+            "Unsupported copy type for catalog entry!",
+        ))
     }
 
     /// 获取条目的 `CreateInfo`（C++: `virtual unique_ptr<CreateInfo> GetInfo() const`）。
@@ -242,7 +245,10 @@ pub struct CatalogEntryChain {
 impl CatalogEntryChain {
     /// 构造链节点（C++: `CatalogEntry` 构造 + `child = nullptr`）。
     pub fn new(fields: CatalogEntryFields) -> Self {
-        Self { older: None, fields }
+        Self {
+            older: None,
+            fields,
+        }
     }
 
     /// 是否存在旧版本（C++: `bool HasChild() const`）。
