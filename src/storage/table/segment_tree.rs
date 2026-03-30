@@ -321,7 +321,7 @@ impl<T: Send + Sync> SegmentTree<T> {
         if nodes.is_empty() {
             return None;
         }
-        let (mut lo, mut hi) = (0usize, nodes.len() - 1);
+        let (lo, mut hi) = (0usize, nodes.len() - 1);
         while lo <= hi {
             let mid = (lo + hi) / 2;
             let n = &nodes[mid];

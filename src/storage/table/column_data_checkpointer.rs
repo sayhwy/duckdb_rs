@@ -186,7 +186,7 @@ impl ColumnDataCheckpointer {
 
     // ── 私有辅助 ───────────────────────────────────────────────────────────────
 
-    fn scan_segments<F>(&self, mut callback: F)
+    fn scan_segments<F>(&self, callback: F)
     where
         F: FnMut(&[u8], Idx),
     {

@@ -696,7 +696,7 @@ impl RowGroupCollection {
 
     fn append_row_group(&self, start_row: Idx) {
         let tree = self.owned_row_groups.lock();
-        let mut lock = tree.lock();
+        let lock = tree.lock();
         // row group count is self.types.len() columns
         let col_count = self.types.len();
         // RowGroup needs Weak to self — requires Arc<Self>

@@ -212,7 +212,7 @@ impl CatalogSet {
         &self,
         txn: &CatalogTransaction,
         name: &str,
-        mut node: Box<CatalogEntryNode>,
+        node: Box<CatalogEntryNode>,
         _dependencies: &LogicalDependencyList,
     ) -> Result<bool, CatalogError> {
         let lower = name.to_lowercase();
@@ -256,7 +256,7 @@ impl CatalogSet {
         &self,
         txn: &CatalogTransaction,
         name: &str,
-        mut node: Box<CatalogEntryNode>,
+        node: Box<CatalogEntryNode>,
         dependencies: &LogicalDependencyList,
     ) -> Result<bool, CatalogError> {
         let lower = name.to_lowercase();
@@ -308,7 +308,7 @@ impl CatalogSet {
         }
 
         // 生成新版本
-        let mut new_node = Box::new(existing.alter(info)?);
+        let new_node = Box::new(existing.alter(info)?);
         new_node.base.set_timestamp(txn.transaction_id);
         map.push_head(lower, new_node);
         Ok(())
@@ -354,7 +354,7 @@ impl CatalogSet {
         let entry_type = existing.base.entry_type;
         let catalog_name = existing.base.catalog_name.clone();
         let schema_name = existing.base.schema_name.clone();
-        let mut tombstone = Box::new(CatalogEntryNode::tombstone(
+        let tombstone = Box::new(CatalogEntryNode::tombstone(
             oid,
             name.to_string(),
             catalog_name,

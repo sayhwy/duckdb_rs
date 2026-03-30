@@ -706,7 +706,7 @@ impl WriteAheadLog {
             // 写空 flush 标记
             let mut writer_guard = self.writer.lock();
             if let Some(writer) = writer_guard.as_mut() {
-                let mut s = WalSerializer::begin(writer.as_mut(), WalType::WalFlush)?;
+                let s = WalSerializer::begin(writer.as_mut(), WalType::WalFlush)?;
                 s.end()?;
             }
         }

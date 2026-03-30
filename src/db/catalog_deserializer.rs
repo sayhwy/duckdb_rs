@@ -404,7 +404,7 @@ fn read_meta_block_pointer_nested(
 }
 
 fn read_table_storage_info(r: &mut BinaryDeserializer<'_>) -> io::Result<Option<MetaBlockPointer>> {
-    let mut table_pointer = None;
+    let table_pointer = None;
     loop {
         if r.stream.is_eof() {
             return Ok(table_pointer);

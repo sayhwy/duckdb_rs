@@ -75,6 +75,36 @@ impl NumericStats {
         data.has_max
     }
 
+    // ── BaseStatistics overloads (C++: NumericStats::HasMin/HasMax/GetMinUnsafe/GetMaxUnsafe) ──
+
+    /// C++: `NumericStats::HasMin(const BaseStatistics &stats)`
+    pub fn has_min_stats(stats: &super::BaseStatistics) -> bool {
+        stats.get_numeric_data().map_or(false, |d| d.has_min)
+    }
+
+    /// C++: `NumericStats::HasMax(const BaseStatistics &stats)`
+    pub fn has_max_stats(stats: &super::BaseStatistics) -> bool {
+        stats.get_numeric_data().map_or(false, |d| d.has_max)
+    }
+
+    /// C++: `NumericStats::GetMinUnsafe<uint32_t>(stats)` — reads min as u32.
+    /// # Safety
+    /// Caller must ensure the stats are numeric and the stored type matches u32 width.
+    pub fn get_min_unsafe_u32(stats: &super::BaseStatistics) -> u32 {
+        stats
+            .get_numeric_data()
+            .map_or(0, |d| unsafe { d.min.integer as u32 })
+    }
+
+    /// C++: `NumericStats::GetMaxUnsafe<uint32_t>(stats)` — reads max as u32.
+    /// # Safety
+    /// Same as `get_min_unsafe_u32`.
+    pub fn get_max_unsafe_u32(stats: &super::BaseStatistics) -> u32 {
+        stats
+            .get_numeric_data()
+            .map_or(0, |d| unsafe { d.max.integer as u32 })
+    }
+
     /// Check if the statistics represent a constant value (min == max)
     pub fn is_constant(data: &NumericStatsData) -> bool {
         if !Self::has_min_max(data) {

@@ -20,7 +20,7 @@ use std::process::Command;
 use duckdb_rs::common::types::{DataChunk, LogicalType};
 use duckdb_rs::db::DB;
 
-const DUCKDB_EXE: &str = "D:/duckdb.exe";
+const DUCKDB_EXE: &str = "/Users/liang/Documents/code/duckdb/cmake-build-debug/duckdb";
 const DB_PATH: &str = "student_mixed_types.db";
 const ROW_COUNT: usize = 100;
 

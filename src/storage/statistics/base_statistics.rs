@@ -1,6 +1,32 @@
 use crate::common::types::{LogicalType, LogicalTypeId, SelectionVector, Vector};
 use std::fmt;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// VariantStats auxiliary types (defined here to avoid circular deps)
+// Mirrors variant_stats.hpp: VariantStatsShreddingState / VariantStatsData
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Whether a VARIANT column uses shredding and its state.
+/// C++: `enum class VariantStatsShreddingState : uint8_t`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariantStatsShreddingState {
+    /// Initial state – not yet classified.
+    Uninitialized,
+    /// Column is stored without shredding.
+    NotShredded,
+    /// Column is stored with a consistent shredding schema.
+    Shredded,
+    /// Merged from incompatible shredding schemas.
+    Inconsistent,
+}
+
+/// Extra data stored inside `BaseStatistics` for VARIANT columns.
+/// C++: `struct VariantStatsData { VariantStatsShreddingState shredding_state; }`
+#[derive(Debug, Clone, Copy)]
+pub struct VariantStatsData {
+    pub shredding_state: VariantStatsShreddingState,
+}
+
 /// Statistics type enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatisticsType {
@@ -40,6 +66,7 @@ pub enum FilterPropagateResult {
 pub enum StatsData {
     Numeric(super::NumericStatsData),
     String(super::StringStatsData),
+    Variant(VariantStatsData),
     None,
 }
 
@@ -63,7 +90,8 @@ pub struct BaseStatistics {
     stats_data: StatsData,
 
     /// Child statistics for nested types (List, Struct, Array)
-    child_stats: Vec<Box<BaseStatistics>>,
+    /// C++: `unsafe_unique_array<BaseStatistics> child_stats`
+    pub child_stats: Vec<Box<BaseStatistics>>,
 }
 
 impl BaseStatistics {
@@ -73,6 +101,9 @@ impl BaseStatistics {
         let stats_data = match stats_type {
             StatisticsType::NumericStats => StatsData::Numeric(Default::default()),
             StatisticsType::StringStats => StatsData::String(Default::default()),
+            StatisticsType::VariantStats => StatsData::Variant(VariantStatsData {
+                shredding_state: VariantStatsShreddingState::Uninitialized,
+            }),
             _ => StatsData::None,
         };
 
@@ -102,6 +133,8 @@ impl BaseStatistics {
 
             LogicalTypeId::List => StatisticsType::ListStats,
             LogicalTypeId::Struct => StatisticsType::StructStats,
+            LogicalTypeId::Array => StatisticsType::ArrayStats,
+            LogicalTypeId::Variant => StatisticsType::VariantStats,
 
             _ => StatisticsType::BaseStats,
         }
@@ -232,6 +265,34 @@ impl BaseStatistics {
         &self.logical_type
     }
 
+    /// Set the logical type (used by VariantStats when resetting child type to INVALID).
+    pub fn set_type(&mut self, t: LogicalType) {
+        self.logical_type = t;
+    }
+
+    /// Consume self and return a boxed copy (C++: `BaseStatistics::ToUnique()`).
+    pub fn to_unique(self) -> Box<BaseStatistics> {
+        Box::new(self)
+    }
+
+    /// Immutable access to the VARIANT extra data.
+    /// C++: `VariantStats::GetDataUnsafe(const BaseStatistics &)`
+    pub fn get_variant_data(&self) -> &VariantStatsData {
+        match &self.stats_data {
+            StatsData::Variant(d) => d,
+            _ => panic!("get_variant_data called on non-variant stats"),
+        }
+    }
+
+    /// Mutable access to the VARIANT extra data.
+    /// C++: `VariantStats::GetDataUnsafe(BaseStatistics &)`
+    pub fn get_variant_data_mut(&mut self) -> &mut VariantStatsData {
+        match &mut self.stats_data {
+            StatsData::Variant(d) => d,
+            _ => panic!("get_variant_data_mut called on non-variant stats"),
+        }
+    }
+
     /// Get the statistics type
     pub fn get_stats_type(&self) -> StatisticsType {
         Self::get_stats_type_from_logical(&self.logical_type)
@@ -245,6 +306,14 @@ impl BaseStatistics {
     /// Get reference to stats data
     pub fn get_stats_data(&self) -> &StatsData {
         &self.stats_data
+    }
+
+    /// Get numeric data if this is a numeric stats object.
+    pub fn get_numeric_data(&self) -> Option<&super::NumericStatsData> {
+        match &self.stats_data {
+            StatsData::Numeric(d) => Some(d),
+            _ => None,
+        }
     }
 
     /// Verify that a vector matches the statistics
@@ -282,6 +351,7 @@ impl fmt::Display for BaseStatistics {
             StatsData::String(data) => {
                 write!(f, "{}", super::StringStats::to_string(data))?;
             }
+            StatsData::Variant(_) => {}
             StatsData::None => {}
         }
 

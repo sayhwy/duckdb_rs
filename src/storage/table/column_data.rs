@@ -880,9 +880,7 @@ impl ColumnDataKind {
             ctx: ColumnDataContext::new(
                 info,
                 column_index,
-                LogicalType {
-                    id: LogicalTypeId::Validity,
-                },
+                LogicalType::validity(),
                 data_type,
                 true, // validity columns always have a parent
             ),

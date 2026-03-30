@@ -514,7 +514,7 @@ impl LogicalType {
                 let w = data[pos];
                 let s = data[pos + 1];
                 pos += 2;
-                let mut t = LogicalType::decimal(w, s);
+                let t = LogicalType::decimal(w, s);
                 return Some((t, pos));
             }
             17 => LogicalTypeId::Uuid,

@@ -43,71 +43,123 @@
 /// DuckDB 逻辑类型（C++: `LogicalType`）。
 ///
 /// 包含类型 ID 及可选的嵌套/精度元数据。
-/// 当前简化为 `type_id: LogicalTypeId`，后续可扩展 `extra_info`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogicalType {
     /// 类型标识（C++: `LogicalTypeId`）。
     pub id: LogicalTypeId,
+    /// 子类型（用于 List、Array 等嵌套类型，C++: `child_type`）。
+    pub child_type: Option<Box<LogicalType>>,
+    /// Array 固定元素数量（仅 Array 类型有效，C++: `ArrayType::GetSize`）。
+    pub array_size: usize,
+    /// Struct 字段列表（仅 Struct/Variant 有效，C++: `StructType::GetChildTypes`）。
+    pub struct_fields: Vec<(String, LogicalType)>,
 }
 
 impl LogicalType {
+    // ── 基础构造 ──────────────────────────────────────────────────────────────
+
+    /// 通用构造（C++: `LogicalType(LogicalTypeId id)`）。
+    pub fn new(id: LogicalTypeId) -> Self {
+        Self { id, child_type: None, array_size: 0, struct_fields: Vec::new() }
+    }
+
     // ── 构造快捷方式 ──────────────────────────────────────────────────────────
 
-    pub fn boolean() -> Self {
+    pub fn boolean() -> Self { Self::new(LogicalTypeId::Boolean) }
+    pub fn tinyint() -> Self { Self::new(LogicalTypeId::TinyInt) }
+    pub fn smallint() -> Self { Self::new(LogicalTypeId::SmallInt) }
+    pub fn integer() -> Self { Self::new(LogicalTypeId::Integer) }
+    pub fn bigint() -> Self { Self::new(LogicalTypeId::BigInt) }
+    pub fn hugeint() -> Self { Self::new(LogicalTypeId::HugeInt) }
+    pub fn float() -> Self { Self::new(LogicalTypeId::Float) }
+    pub fn double() -> Self { Self::new(LogicalTypeId::Double) }
+    pub fn varchar() -> Self { Self::new(LogicalTypeId::Varchar) }
+    pub fn date() -> Self { Self::new(LogicalTypeId::Date) }
+    pub fn row_id() -> Self { Self::new(LogicalTypeId::BigInt) } // row_t = i64
+    pub fn validity() -> Self { Self::new(LogicalTypeId::Validity) }
+    pub fn new_invalid() -> Self { Self::new(LogicalTypeId::Invalid) }
+    pub fn uinteger() -> Self { Self::new(LogicalTypeId::UInteger) }
+    pub fn utinyint() -> Self { Self::new(LogicalTypeId::UTinyInt) }
+    pub fn usmallint() -> Self { Self::new(LogicalTypeId::USmallInt) }
+    pub fn ubigint() -> Self { Self::new(LogicalTypeId::UBigInt) }
+    pub fn blob() -> Self { Self::new(LogicalTypeId::Blob) }
+
+    /// LIST(child) 类型（C++: `LogicalType::LIST(child_type)`）。
+    pub fn list(child_type: LogicalType) -> Self {
         Self {
-            id: LogicalTypeId::Boolean,
+            id: LogicalTypeId::List,
+            child_type: Some(Box::new(child_type)),
+            array_size: 0,
+            struct_fields: Vec::new(),
         }
     }
-    pub fn tinyint() -> Self {
+
+    /// ARRAY(child, N) 类型（C++: `LogicalType::ARRAY(child_type, size)`）。
+    pub fn array(child_type: LogicalType, size: usize) -> Self {
         Self {
-            id: LogicalTypeId::TinyInt,
+            id: LogicalTypeId::Array,
+            child_type: Some(Box::new(child_type)),
+            array_size: size,
+            struct_fields: Vec::new(),
         }
     }
-    pub fn smallint() -> Self {
+
+    /// STRUCT({field_name: type, ...}) 类型（C++: `LogicalType::STRUCT(children)`）。
+    pub fn struct_type(fields: Vec<(String, LogicalType)>) -> Self {
         Self {
-            id: LogicalTypeId::SmallInt,
+            id: LogicalTypeId::Struct,
+            child_type: None,
+            array_size: 0,
+            struct_fields: fields,
         }
     }
-    pub fn integer() -> Self {
+
+    /// VARIANT 类型（内部存储为带固定 schema 的 STRUCT，C++: `LogicalType::VARIANT()`）。
+    pub fn variant() -> Self {
+        let children = vec![
+            ("keys".to_string(),     Self::list(Self::varchar())),
+            ("children".to_string(), Self::list(Self::struct_type(vec![
+                ("keys_index".to_string(),   Self::uinteger()),
+                ("values_index".to_string(), Self::uinteger()),
+            ]))),
+            ("values".to_string(), Self::list(Self::struct_type(vec![
+                ("type_id".to_string(),    Self::utinyint()),
+                ("byte_offset".to_string(), Self::uinteger()),
+            ]))),
+            ("data".to_string(), Self::blob()),
+        ];
         Self {
-            id: LogicalTypeId::Integer,
+            id: LogicalTypeId::Variant,
+            child_type: None,
+            array_size: 0,
+            struct_fields: children,
         }
     }
-    pub fn bigint() -> Self {
-        Self {
-            id: LogicalTypeId::BigInt,
-        }
+
+    /// 返回子类型引用（List/Array 类型，C++: `ArrayType::GetChildType` / `ListType::GetChildType`）。
+    pub fn get_child_type(&self) -> Option<&LogicalType> {
+        self.child_type.as_deref()
     }
-    pub fn hugeint() -> Self {
-        Self {
-            id: LogicalTypeId::HugeInt,
-        }
+
+    /// 返回 Array 的固定元素数量（C++: `ArrayType::GetSize`）。
+    pub fn get_array_size(&self) -> usize {
+        self.array_size
     }
-    pub fn float() -> Self {
-        Self {
-            id: LogicalTypeId::Float,
-        }
+
+    /// Struct 字段列表（C++: `StructType::GetChildTypes`）。
+    pub fn get_struct_fields(&self) -> &[(String, LogicalType)] {
+        &self.struct_fields
     }
-    pub fn double() -> Self {
-        Self {
-            id: LogicalTypeId::Double,
-        }
+
+    /// Struct 字段数量（C++: `StructType::GetChildCount`）。
+    pub fn get_struct_child_count(&self) -> usize {
+        self.struct_fields.len()
     }
-    pub fn varchar() -> Self {
-        Self {
-            id: LogicalTypeId::Varchar,
-        }
+
+    /// 按下标取 Struct 子类型（C++: `StructType::GetChildType(type, i)`）。
+    pub fn get_struct_child_type(&self, i: usize) -> Option<&LogicalType> {
+        self.struct_fields.get(i).map(|(_, t)| t)
     }
-    pub fn date() -> Self {
-        Self {
-            id: LogicalTypeId::Date,
-        }
-    }
-    pub fn row_id() -> Self {
-        Self {
-            id: LogicalTypeId::BigInt,
-        }
-    } // row_t = i64
 
     /// 该类型每个值占用的字节数（用于 flat vector 的缓冲区分配）。
     ///
@@ -149,6 +201,13 @@ impl LogicalType {
             LogicalTypeId::List => "LIST",
             LogicalTypeId::Struct => "STRUCT",
             LogicalTypeId::Map => "MAP",
+            LogicalTypeId::Array => "ARRAY",
+            LogicalTypeId::Variant => "VARIANT",
+            LogicalTypeId::UInteger => "UINTEGER",
+            LogicalTypeId::UTinyInt => "UTINYINT",
+            LogicalTypeId::USmallInt => "USMALLINT",
+            LogicalTypeId::UBigInt => "UBIGINT",
+            LogicalTypeId::Blob => "BLOB",
             LogicalTypeId::Invalid => "INVALID",
             LogicalTypeId::Validity => "VALIDITY",
         }
@@ -174,6 +233,13 @@ pub enum LogicalTypeId {
     List,
     Struct,
     Map,
+    Array,
+    Variant,
+    UInteger,
+    UTinyInt,
+    USmallInt,
+    UBigInt,
+    Blob,
     Invalid,
     Validity, // Added for NULL bitmask columns
 }
@@ -463,6 +529,22 @@ impl Vector {
         self.vector_type
     }
 
+    /// Get the child vector (for array/list vectors).
+    /// Mirrors `ArrayVector::GetEntry(vector)` / `ListVector::GetEntry(vector)`.
+    pub fn get_child(&self) -> Option<&Vector> {
+        self.child.as_deref()
+    }
+
+    /// Get the mutable child vector.
+    pub fn get_child_mut(&mut self) -> Option<&mut Vector> {
+        self.child.as_deref_mut()
+    }
+
+    /// Raw byte access to the data buffer (e.g. for reading `list_entry_t`).
+    pub fn raw_data(&self) -> &[u8] {
+        &self.data
+    }
+
     /// 将此向量变为引用 `other` 的 Dictionary 向量（恒等选择）
     /// （C++: `Vector::Reference(const Vector&)`）。
     pub fn reference(&mut self, other: &Vector) {
@@ -488,11 +570,6 @@ impl Vector {
     }
 
     // ── 数据访问 ──────────────────────────────────────────────────────────
-
-    /// 返回 Flat 向量的原始字节切片（只读）。
-    pub fn raw_data(&self) -> &[u8] {
-        &self.data
-    }
 
     /// 返回 Flat 向量的原始字节切片（可写）。
     pub fn raw_data_mut(&mut self) -> &mut [u8] {
