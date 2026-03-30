@@ -110,6 +110,17 @@ impl<'a> BinarySerializer<'a> {
         self.stream.write_data(bytes);
     }
 
+    /// 写入定长字节数组（blob）属性。
+    ///
+    /// 对应 C++ `BinarySerializer::WriteProperty(field_id, "name", data_ptr_t, count)`。
+    /// DuckDB 在反序列化时使用 `ReadDataPtr(ptr, count)` 验证长度，因此必须写入
+    /// 恰好 `bytes.len()` 字节并以 varint 编码长度。
+    pub fn write_bytes(&mut self, field_id: u16, bytes: &[u8]) {
+        self.write_field_id(field_id);
+        self.write_varint_raw(bytes.len() as u64);
+        self.stream.write_data(bytes);
+    }
+
     /// 写入可选字符串属性（如果为空则不写入）
     pub fn write_optional_string(&mut self, field_id: u16, value: Option<&str>) {
         if let Some(s) = value {

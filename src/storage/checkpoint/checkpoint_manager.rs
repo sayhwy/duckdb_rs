@@ -175,8 +175,11 @@ impl CheckpointManager {
         writer: &mut MetadataWriter<'_>,
         column: &std::sync::Arc<ColumnData>,
     ) -> MetaBlockPointer {
+        use crate::common::types::LogicalTypeId;
+
         let pointer = writer.get_meta_block_pointer();
         let data_pointers = self.write_column_segments(column);
+        let col_type = &column.ctx.logical_type;
 
         let mut serializer = BinarySerializer::new(writer as &mut dyn WriteStream);
 
@@ -186,12 +189,21 @@ impl CheckpointManager {
         serializer.begin_list(100, data_pointers.len());
         for data_pointer in &data_pointers {
             serializer.list_write_object(|s| {
-                write_data_pointer(
-                    s,
-                    data_pointer.tuple_count,
-                    data_pointer.block_id,
-                    data_pointer.offset,
-                );
+                if col_type.id == LogicalTypeId::Varchar {
+                    write_data_pointer_varchar(
+                        s,
+                        data_pointer.tuple_count,
+                        data_pointer.block_id,
+                        data_pointer.offset,
+                    );
+                } else {
+                    write_data_pointer(
+                        s,
+                        data_pointer.tuple_count,
+                        data_pointer.block_id,
+                        data_pointer.offset,
+                    );
+                }
             });
         }
         serializer.end_list();
@@ -259,7 +271,79 @@ impl CheckpointManager {
                     let block_id = self.block_manager.get_free_block_id_for_checkpoint();
                     let mut block = self.block_manager.create_block(block_id, None);
 
-                    if is_validity {
+                    let is_varchar = segment.logical_type.id == LogicalTypeId::Varchar;
+
+                    if is_varchar {
+                        // VARCHAR 列使用字符串字典格式（对应 DuckDB UncompressedStringStorage）
+                        //
+                        // 块布局（匹配 UncompressedStringStorage 扫描逻辑）:
+                        //   [0..4]             uint32_t dict_size  （字符串数据字节总数）
+                        //   [4..8]             uint32_t dict_end   （默认=block_alloc_size）
+                        //   [8..8+n*4]         int32_t[n] offsets  （逐行累计长度）
+                        //   [..]                字符串数据（通过 dict_pos=dict_end-dict_offset 定位）
+                        let block_alloc = self.block_manager.get_block_alloc_size() as usize;
+                        let n = tuple_count as usize;
+                        let buf = segment.buffer.lock();
+
+                        // 从 string_t (16字节) 提取字符串内容
+                        let mut str_data: Vec<Vec<u8>> = Vec::with_capacity(n);
+                        for i in 0..n {
+                            let base = i * 16;
+                            let len = u32::from_le_bytes(
+                                buf[base..base + 4].try_into().unwrap(),
+                            ) as usize;
+                            if len <= 12 {
+                                let bytes = buf[base + 4..base + 4 + len].to_vec();
+                                str_data.push(bytes);
+                            } else {
+                                // 超出 inline 长度，暂不支持，写入空串
+                                str_data.push(Vec::new());
+                            }
+                        }
+                        drop(buf);
+
+                        let dict_size: usize = str_data.iter().map(|s| s.len()).sum();
+                        let offset_section = 8 + n * 4;
+
+                        let payload = block.payload_mut();
+                        // Compact dictionary so that:
+                        //   dict_end = offset_section + dict_size
+                        // i.e. dictionary bytes start right after the offsets array.
+                        let total_size = offset_section + dict_size;
+                        let dict_end = total_size;
+                        assert!(
+                            dict_end <= payload.len(),
+                            "VARCHAR segment too large for one block"
+                        );
+
+                        // dict_size
+                        payload[0..4].copy_from_slice(&(dict_size as u32).to_le_bytes());
+                        // dict_end points to the end of the dictionary region.
+                        payload[4..8].copy_from_slice(&(dict_end as u32).to_le_bytes());
+
+                        // 写入累计偏移量
+                        let mut cumulative = 0u32;
+                        for (i, s) in str_data.iter().enumerate() {
+                            cumulative += s.len() as u32;
+                            let pos = 8 + i * 4;
+                            payload[pos..pos + 4]
+                                .copy_from_slice(&(cumulative as i32).to_le_bytes());
+                            if !s.is_empty() {
+                                // Place the string exactly like DuckDB:
+                                // dict_pos = dict_end - dict_offset (where dict_offset == cumulative).
+                                let dict_pos = dict_end - cumulative as usize;
+                                payload[dict_pos..dict_pos + s.len()].copy_from_slice(s);
+                            }
+                        }
+
+                        self.block_manager.write_block(&block, block_id);
+                        result.push(crate::storage::table::types::DataPointer {
+                            block_id,
+                            offset: 0,
+                            row_start,
+                            tuple_count,
+                        });
+                    } else if is_validity {
                         // Validity mask format:
                         // - Each vector (STANDARD_VECTOR_SIZE rows) uses 32 bytes (STANDARD_MASK_SIZE)
                         // - All bits set to 1 means all valid (0xFF bytes)
@@ -407,7 +491,8 @@ fn write_minimal_base_statistics(
         | LogicalTypeId::Integer
         | LogicalTypeId::BigInt
         | LogicalTypeId::Float
-        | LogicalTypeId::Double => {
+        | LogicalTypeId::Double
+        | LogicalTypeId::Date => {
             serializer.begin_object(200);
             serializer.write_bool(100, false);
             serializer.end_object();
@@ -416,11 +501,12 @@ fn write_minimal_base_statistics(
             serializer.end_object();
         }
         LogicalTypeId::Varchar => {
-            serializer.write_string(200, "");
-            serializer.write_string(201, "");
-            serializer.write_bool(202, false);
-            serializer.write_bool(203, true);
-            serializer.write_varint(204, 0);
+            // StringStats: min/max 均为 8 字节 blob（MAX_STRING_MINMAX_SIZE = 8）
+            serializer.write_bytes(200, &[0u8; 8]);   // min
+            serializer.write_bytes(201, &[0xFFu8; 8]); // max
+            serializer.write_bool(202, false);  // has_unicode
+            serializer.write_bool(203, true);   // has_max_string_length
+            serializer.write_varint(204, 0);    // max_string_length
         }
         _ => {}
     }
@@ -471,6 +557,46 @@ fn write_data_pointer(
     serializer.begin_object(201);
     serializer.write_bool(100, false);
     serializer.end_object();
+    serializer.end_object();
+    serializer.end_object();
+}
+
+/// VARCHAR 列的数据指针写入（使用 StringStats 格式代替 NumericStats）。
+///
+/// 对应 DuckDB `DataPointer::Serialize` + `StringStats::Serialize`。
+///
+/// # StringStats 格式
+/// DuckDB 的 `StringStats::Serialize` 用 `WriteProperty(id, name, data_ptr, 8)` 写入
+/// min/max，其中 `8 = StringStatsData::MAX_STRING_MINMAX_SIZE`。
+/// `BinaryDeserializer::ReadDataPtr` 会校验 varint 长度是否等于期望字节数，因此
+/// 必须写入精确 8 字节的 blob，而非普通 string。
+fn write_data_pointer_varchar(
+    serializer: &mut BinarySerializer<'_>,
+    tuple_count: Idx,
+    block_id: i64,
+    offset: u32,
+) {
+    // StringStatsData::MAX_STRING_MINMAX_SIZE = 8
+    const STR_STATS_SIZE: usize = 8;
+
+    serializer.write_varint(101, tuple_count);
+    serializer.begin_object(102);
+    serializer.write_signed_varint(100, block_id);
+    serializer.write_varint(101, offset as u64);
+    serializer.end_object();
+    serializer.write_u8(103, compression_tag(CompressionType::Uncompressed));
+    serializer.begin_object(104);
+    serializer.write_bool(100, false);  // has_null
+    serializer.write_bool(101, true);   // has_no_null
+    serializer.write_varint(102, 0);    // distinct_count
+    serializer.begin_object(103);       // type_specific stats (StringStats)
+    // Field 200: min — 8 字节 blob（全 0 表示最小值为空串）
+    serializer.write_bytes(200, &[0u8; STR_STATS_SIZE]);
+    // Field 201: max — 8 字节 blob（全 0xFF 表示最大值为最高字节序）
+    serializer.write_bytes(201, &[0xFFu8; STR_STATS_SIZE]);
+    serializer.write_bool(202, false);  // has_unicode
+    serializer.write_bool(203, true);   // has_max_string_length
+    serializer.write_varint(204, 0);    // max_string_length
     serializer.end_object();
     serializer.end_object();
 }

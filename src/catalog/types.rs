@@ -377,6 +377,9 @@ impl LogicalType {
     pub fn varchar() -> Self {
         Self::new(LogicalTypeId::Varchar)
     }
+    pub fn date() -> Self {
+        Self::new(LogicalTypeId::Date)
+    }
     pub fn integer() -> Self {
         Self::new(LogicalTypeId::Integer)
     }

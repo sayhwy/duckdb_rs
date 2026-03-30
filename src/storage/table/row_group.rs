@@ -959,8 +959,10 @@ fn logical_type_id_to_physical(id: crate::common::types::LogicalTypeId) -> Physi
         TinyInt => PhysicalType::Int8,
         SmallInt => PhysicalType::Int16,
         Integer => PhysicalType::Int32,
-        // BigInt, Date (days since epoch as i64), Time (μs as i64), Timestamp (μs as i64)
-        BigInt | Date | Time | Timestamp => PhysicalType::Int64,
+        // BigInt (i64), Time (μs as i64), Timestamp (μs as i64)
+        BigInt | Time | Timestamp => PhysicalType::Int64,
+        // Date is stored as int32 days since epoch (DuckDB date_t / PhysicalType::INT32).
+        Date => PhysicalType::Int32,
         HugeInt => PhysicalType::Int128,
         Float => PhysicalType::Float,
         Double => PhysicalType::Double,

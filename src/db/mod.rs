@@ -635,6 +635,7 @@ fn from_type_id_storage(type_id: u32) -> LogicalType {
         12 => LogicalType::smallint(),
         13 | 30 => LogicalType::integer(),
         14 | 31 => LogicalType::bigint(),
+        15 => LogicalType::date(),
         22 => LogicalType::float(),
         23 => LogicalType::double(),
         _ => LogicalType::varchar(),
@@ -647,6 +648,7 @@ fn from_type_id_catalog(type_id: u32) -> CatalogLogicalType {
         11 | 12 => CatalogLogicalType::integer(),
         13 | 30 => CatalogLogicalType::integer(),
         14 | 31 => CatalogLogicalType::bigint(),
+        15 => CatalogLogicalType::date(),
         22 | 23 => CatalogLogicalType::double(),
         _ => CatalogLogicalType::varchar(),
     }
@@ -661,6 +663,7 @@ fn to_catalog_type(ty: &LogicalType) -> CatalogLogicalType {
         crate::common::types::LogicalTypeId::BigInt => CatalogLogicalType::bigint(),
         crate::common::types::LogicalTypeId::Float => CatalogLogicalType::double(),
         crate::common::types::LogicalTypeId::Double => CatalogLogicalType::double(),
+        crate::common::types::LogicalTypeId::Date => CatalogLogicalType::date(),
         _ => CatalogLogicalType::varchar(),
     }
 }

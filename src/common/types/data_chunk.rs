@@ -98,6 +98,11 @@ impl LogicalType {
             id: LogicalTypeId::Varchar,
         }
     }
+    pub fn date() -> Self {
+        Self {
+            id: LogicalTypeId::Date,
+        }
+    }
     pub fn row_id() -> Self {
         Self {
             id: LogicalTypeId::BigInt,
@@ -105,15 +110,16 @@ impl LogicalType {
     } // row_t = i64
 
     /// 该类型每个值占用的字节数（用于 flat vector 的缓冲区分配）。
+    ///
+    /// DATE 对应 DuckDB `PhysicalType::INT32`（4 字节），与 C++ `date_t` 一致。
     pub fn physical_size(&self) -> usize {
         match self.id {
             LogicalTypeId::Boolean | LogicalTypeId::TinyInt => 1,
             LogicalTypeId::SmallInt => 2,
-            LogicalTypeId::Integer | LogicalTypeId::Float => 4,
+            LogicalTypeId::Integer | LogicalTypeId::Float | LogicalTypeId::Date => 4,
             LogicalTypeId::BigInt
             | LogicalTypeId::Double
             | LogicalTypeId::Timestamp
-            | LogicalTypeId::Date
             | LogicalTypeId::Time
             | LogicalTypeId::Interval => 8,
             LogicalTypeId::HugeInt => 16,
