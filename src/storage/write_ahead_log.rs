@@ -41,6 +41,7 @@ use std::io::{self, Write};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::metadata::MetaBlockPointer;
+use super::storage_info::{BLOCK_HEADER_SIZE, DatabaseHeader, FileOpenFlags, FileSystem, MainHeader};
 use super::storage_manager::StorageManager;
 
 // ─── WAL 版本常量 ──────────────────────────────────────────────────────────────
@@ -336,6 +337,11 @@ fn write_field_u64(w: &mut impl Write, field_id: u8, value: u64) -> io::Result<(
     w.write_all(&value.to_le_bytes())
 }
 
+fn write_field_u32(w: &mut impl Write, field_id: u8, value: u32) -> io::Result<()> {
+    w.write_all(&[field_id])?;
+    w.write_all(&value.to_le_bytes())
+}
+
 fn write_field_str(w: &mut impl Write, field_id: u8, value: &str) -> io::Result<()> {
     let bytes = value.as_bytes();
     w.write_all(&[field_id])?;
@@ -488,10 +494,8 @@ impl WriteAheadLog {
             let mut buf = Vec::new();
             let _ = write_field_u8(&mut buf, 100, WalType::WalVersion as u8);
             let _ = write_field_u64(&mut buf, 101, version);
-            if !db_identifier.is_empty() {
-                let _ = write_field_bytes(&mut buf, 102, db_identifier);
-                let _ = write_field_u64(&mut buf, 103, checkpoint_iteration);
-            }
+            let _ = write_field_bytes(&mut buf, 102, db_identifier);
+            let _ = write_field_u64(&mut buf, 103, checkpoint_iteration);
             let _ = writer.write_data(&buf);
         }
     }
@@ -696,7 +700,7 @@ impl WriteAheadLog {
         self.write_entry(WalType::Checkpoint, |s| {
             // MetaBlockPointer 序列化：block_pointer(8B) + offset(4B)
             s.write_u64(101, meta_block.block_pointer)?;
-            s.write_u64(102, meta_block.offset as u64)
+            write_field_u32(&mut s.checksum_writer, 102, meta_block.offset)
         })
     }
 
@@ -751,6 +755,20 @@ impl WriteAheadLog {
         let writer = writer_guard
             .as_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "WAL not initialized"))?;
+        if writer.file_size() == 0 {
+            let (db_identifier, checkpoint_iteration) = self.storage_manager_header_info()?;
+            let version = if self.storage_manager_uses_encryption() {
+                WAL_ENCRYPTED_VERSION_NUMBER
+            } else {
+                WAL_VERSION_NUMBER
+            };
+            drop(writer_guard);
+            self.write_header(version, &db_identifier, checkpoint_iteration);
+            writer_guard = self.writer.lock();
+        }
+        let writer = writer_guard
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "WAL not initialized"))?;
         let mut serializer = WalSerializer::begin(writer.as_mut(), wal_type)?;
         f(&mut serializer)?;
         serializer.end()
@@ -758,6 +776,39 @@ impl WriteAheadLog {
 
     fn storage_manager(&self) -> &dyn StorageManager {
         self.storage_manager
+    }
+
+    fn storage_manager_header_info(&self) -> io::Result<([u8; MainHeader::DB_IDENTIFIER_LEN], u64)> {
+        let path = self.storage_manager().db_path();
+        let fs = crate::storage::standard_file_system::LocalFileSystem;
+        let mut file = fs
+            .open_file(path, FileOpenFlags::READ)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+        let mut main_header_buf = vec![0u8; super::storage_info::FILE_HEADER_SIZE];
+        file.read_at(&mut main_header_buf, 0)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let main_header = MainHeader::deserialize(&main_header_buf[BLOCK_HEADER_SIZE..])
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid DuckDB main header"))?;
+
+        let mut header_buf = vec![0u8; super::storage_info::FILE_HEADER_SIZE];
+        file.read_at(&mut header_buf, super::storage_info::FILE_HEADER_SIZE as u64)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let h0 = DatabaseHeader::deserialize(
+            &header_buf[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + DatabaseHeader::SERIALIZED_SIZE],
+        );
+        file.read_at(&mut header_buf, (super::storage_info::FILE_HEADER_SIZE * 2) as u64)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let h1 = DatabaseHeader::deserialize(
+            &header_buf[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + DatabaseHeader::SERIALIZED_SIZE],
+        );
+        let headers = [h0, h1];
+        let checkpoint_iteration = headers[MainHeader::active_header_idx(&headers)].iteration;
+        Ok((main_header.db_identifier, checkpoint_iteration))
+    }
+
+    fn storage_manager_uses_encryption(&self) -> bool {
+        false
     }
 }
 

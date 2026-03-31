@@ -890,7 +890,12 @@ impl DataTable {
             if write_result.is_err() {
                 return;
             }
-            let payload = serialize_insert_chunk_payload(chunk);
+            let types = self.get_types();
+            let mut flat_chunk = DataChunk::new();
+            flat_chunk.initialize(&types, chunk.size().max(1));
+            chunk.copy_to(&mut flat_chunk, 0);
+            flat_chunk.flatten();
+            let payload = serialize_insert_chunk_payload(&flat_chunk);
             write_result = log.write_insert(&payload).map_err(StorageError::Io);
         });
         write_result?;

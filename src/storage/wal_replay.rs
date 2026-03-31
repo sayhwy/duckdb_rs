@@ -340,6 +340,7 @@ impl<T: Read + Seek> WalReader for T {}
 /// 由 `WalReplayer` 驱动，不直接持有 `ReplayState`。
 pub struct WalFrameReader<R: WalReader> {
     reader: R,
+    header_pending: bool,
     /// 当前使用的帧格式（C++: `state.wal_version`）。
     version: WalVersion,
     /// 文件总字节数（用于帧大小边界检查）。
@@ -356,6 +357,7 @@ impl<R: WalReader> WalFrameReader<R> {
         };
         Ok(Self {
             reader,
+            header_pending: true,
             version: WalVersion::V1,
             file_size,
         })
@@ -364,6 +366,8 @@ impl<R: WalReader> WalFrameReader<R> {
     /// 将读取器重置到文件头（C++: `reader.Reset()`）。
     pub fn reset(&mut self) -> io::Result<()> {
         self.reader.seek(SeekFrom::Start(0))?;
+        self.header_pending = true;
+        self.version = WalVersion::V1;
         Ok(())
     }
 
@@ -394,12 +398,16 @@ impl<R: WalReader> WalFrameReader<R> {
     pub fn read_frame(&mut self) -> WalResult<(u64, WalFrame)> {
         let offset = self.reader.stream_position()?;
 
+        if self.header_pending {
+            self.header_pending = false;
+            return Ok((offset, WalFrame::Header {
+                payload: self.read_header_payload()?,
+            }));
+        }
+
         let frame = match self.version {
             WalVersion::V1 => {
-                // v1：无帧头，直接读取整个剩余流作为一条 payload
-                // C++: WriteAheadLogDeserializer(state, stream, only) 直接从 stream 读
-                // Rust 侧通过 WalEntryDecoder 直接操作 reader，此处标记 V1 模式
-                WalFrame::V1
+                return Err(WalError::UnsupportedVersion(1));
             }
             WalVersion::V2 => {
                 let size = self.read_u64()?;
@@ -459,6 +467,40 @@ impl<R: WalReader> WalFrameReader<R> {
         Ok((offset, frame))
     }
 
+    fn read_header_payload(&mut self) -> WalResult<Vec<u8>> {
+        let mut payload = Vec::with_capacity(41);
+
+        let mut byte = [0u8; 1];
+        self.reader.read_exact(&mut byte)?;
+        payload.extend_from_slice(&byte);
+        self.reader.read_exact(&mut byte)?;
+        payload.extend_from_slice(&byte);
+
+        self.reader.read_exact(&mut byte)?;
+        payload.extend_from_slice(&byte);
+        let mut version = [0u8; 8];
+        self.reader.read_exact(&mut version)?;
+        payload.extend_from_slice(&version);
+
+        self.reader.read_exact(&mut byte)?;
+        payload.extend_from_slice(&byte);
+        let mut len = [0u8; 4];
+        self.reader.read_exact(&mut len)?;
+        payload.extend_from_slice(&len);
+        let db_id_len = u32::from_le_bytes(len) as usize;
+        let mut db_id = vec![0u8; db_id_len];
+        self.reader.read_exact(&mut db_id)?;
+        payload.extend_from_slice(&db_id);
+
+        self.reader.read_exact(&mut byte)?;
+        payload.extend_from_slice(&byte);
+        let mut checkpoint_iteration = [0u8; 8];
+        self.reader.read_exact(&mut checkpoint_iteration)?;
+        payload.extend_from_slice(&checkpoint_iteration);
+
+        Ok(payload)
+    }
+
     fn read_u64(&mut self) -> WalResult<u64> {
         let mut buf = [0u8; 8];
         self.reader.read_exact(&mut buf)?;
@@ -472,8 +514,8 @@ impl<R: WalReader> WalFrameReader<R> {
 ///
 /// 在 v3 加密模式下，payload 须先经过 `EncryptionOps::decrypt()` 还原明文。
 pub enum WalFrame {
-    /// v1 模式：payload 直接在流中，由外层 `WalEntryDecoder` 继续从同一流读取。
-    V1,
+    /// WAL 头部版本条目（未带 frame 头）。
+    Header { payload: Vec<u8> },
     /// v2 模式：已验证校验和的明文 payload。
     V2 { payload: Vec<u8> },
     /// v3 模式：加密帧，需外部解密后得到明文 payload。
@@ -490,6 +532,7 @@ impl WalFrame {
     /// 尝试取出明文 payload（v1/v2 可直接取；v3 加密帧需先解密，此处返回 None）。
     pub fn into_plaintext(self) -> Option<Vec<u8>> {
         match self {
+            Self::Header { payload } => Some(payload),
             Self::V2 { payload } => Some(payload),
             _ => None,
         }
@@ -620,7 +663,7 @@ impl<'a> WalEntryDecoder<'a> {
             WalType::Checkpoint => {
                 // MetaBlockPointer: block_pointer(8B) + offset(4B)
                 let block_pointer = self.read_field_u64(101)?;
-                let offset = self.read_field_u32(102)?;
+                let offset = self.read_field_u64(102)? as u32;
                 Ok(WalEntry::Checkpoint {
                     meta_block: MetaBlockPointer {
                         block_pointer,
@@ -1317,10 +1360,7 @@ impl<R: WalReader, C: CatalogOps> WalReplayer<R, C> {
     /// 将 `WalFrame` 转为明文 payload 字节（v3 调用 EncryptionOps 解密）。
     fn resolve_frame(&self, frame: WalFrame, _version: WalVersion) -> WalResult<Vec<u8>> {
         match frame {
-            WalFrame::V1 => {
-                // v1 不分帧，外层流直接包含整条条目（理论上不经此路径，见 read_frame 注释）
-                Ok(Vec::new())
-            }
+            WalFrame::Header { payload } => Ok(payload),
             WalFrame::V2 { payload } => Ok(payload),
             WalFrame::V3Encrypted {
                 plaintext_size,

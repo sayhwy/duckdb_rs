@@ -1,6 +1,8 @@
 pub mod catalog_deserializer;
 
 use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -25,6 +27,10 @@ use crate::storage::storage_info::{
 };
 use crate::storage::storage_manager::{SingleFileStorageManager, StorageManager, StorageOptions};
 use crate::storage::table::persistent_table_data::{PersistentStorageRuntime, PersistentTableData};
+use crate::storage::wal_replay::{
+    CatalogOps, DB_IDENTIFIER_LEN, ReplayIndexInfo, WalError, WalReplayer, WalResult,
+};
+use crate::storage::write_ahead_log::WalInitState;
 use crate::storage::{SingleFileBlockManager, StandardBufferManager};
 use crate::transaction::duck_transaction_manager::DuckTransactionManager;
 
@@ -116,6 +122,8 @@ impl DB {
         for (name, handle) in tables {
             instance.tables.lock().insert(name, handle);
         }
+
+        recover_database(&instance)?;
 
         Ok(Self {
             instance,
@@ -594,6 +602,529 @@ impl DB {
 
 fn normalize_name(name: &str) -> String {
     name.to_ascii_lowercase()
+}
+
+struct RecoveryCatalog {
+    db: Arc<DatabaseInstance>,
+    conn: Connection,
+}
+
+impl RecoveryCatalog {
+    fn new(db: Arc<DatabaseInstance>) -> Self {
+        let conn = Connection::new(db.clone());
+        conn.set_auto_commit(false);
+        Self { db, conn }
+    }
+
+    fn table_handle(&self, schema: &str, table: &str) -> WalResult<ConnectionTableHandle> {
+        let tables = self.db.tables.lock();
+        let handle = tables
+            .get(&normalize_name(table))
+            .cloned()
+            .ok_or_else(|| WalError::Corrupt(format!("table {}.{} not found during WAL replay", schema, table)))?;
+        if handle.catalog_entry.base.schema_name != schema {
+            return Err(WalError::Corrupt(format!(
+                "table {} resolved to schema {}, expected {}",
+                table,
+                handle.catalog_entry.base.schema_name,
+                schema
+            )));
+        }
+        Ok(handle)
+    }
+}
+
+impl CatalogOps for RecoveryCatalog {
+    fn create_table(&mut self, _payload: &[u8]) -> WalResult<()> {
+        Err(WalError::Corrupt("WAL CREATE TABLE replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn drop_table(&mut self, _schema: &str, _name: &str) -> WalResult<()> {
+        Err(WalError::Corrupt("WAL DROP TABLE replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn alter_table(
+        &mut self,
+        _payload: &[u8],
+        _index_storage_info: Option<&[u8]>,
+        _index_storage_data: Option<&[u8]>,
+    ) -> WalResult<Option<ReplayIndexInfo>> {
+        Err(WalError::Corrupt("WAL ALTER replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn create_schema(&mut self, _name: &str) -> WalResult<()> {
+        Err(WalError::Corrupt("WAL CREATE SCHEMA replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn drop_schema(&mut self, _name: &str) -> WalResult<()> {
+        Err(WalError::Corrupt("WAL DROP SCHEMA replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn create_view(&mut self, _payload: &[u8]) -> WalResult<()> {
+        Err(WalError::Corrupt("WAL CREATE VIEW replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn drop_view(&mut self, _schema: &str, _name: &str) -> WalResult<()> {
+        Err(WalError::Corrupt("WAL DROP VIEW replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn create_sequence(&mut self, _payload: &[u8]) -> WalResult<()> {
+        Err(WalError::Corrupt("WAL CREATE SEQUENCE replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn drop_sequence(&mut self, _schema: &str, _name: &str) -> WalResult<()> {
+        Err(WalError::Corrupt("WAL DROP SEQUENCE replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn update_sequence_value(
+        &mut self,
+        _schema: &str,
+        _name: &str,
+        _usage_count: u64,
+        _counter: i64,
+    ) -> WalResult<()> {
+        Err(WalError::Corrupt("WAL SEQUENCE replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn create_macro(&mut self, _payload: &[u8]) -> WalResult<()> {
+        Err(WalError::Corrupt("WAL CREATE MACRO replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn drop_macro(&mut self, _schema: &str, _name: &str) -> WalResult<()> {
+        Err(WalError::Corrupt("WAL DROP MACRO replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn create_table_macro(&mut self, _payload: &[u8]) -> WalResult<()> {
+        Err(WalError::Corrupt("WAL CREATE TABLE MACRO replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn drop_table_macro(&mut self, _schema: &str, _name: &str) -> WalResult<()> {
+        Err(WalError::Corrupt("WAL DROP TABLE MACRO replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn create_index(
+        &mut self,
+        _catalog_payload: &[u8],
+        _storage_info: &[u8],
+        _storage_data: &[u8],
+    ) -> WalResult<ReplayIndexInfo> {
+        Err(WalError::Corrupt("WAL CREATE INDEX replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn drop_index(&mut self, _schema: &str, _name: &str) -> WalResult<()> {
+        Err(WalError::Corrupt("WAL DROP INDEX replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn create_type(&mut self, _payload: &[u8]) -> WalResult<()> {
+        Err(WalError::Corrupt("WAL CREATE TYPE replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn drop_type(&mut self, _schema: &str, _name: &str) -> WalResult<()> {
+        Err(WalError::Corrupt("WAL DROP TYPE replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn append_chunk(&mut self, schema: &str, table: &str, chunk_payload: &[u8]) -> WalResult<()> {
+        let handle = self.table_handle(schema, table)?;
+        let mut chunk = decode_insert_chunk_payload(chunk_payload, &handle.storage.get_types())?;
+        self.conn
+            .insert_chunk(table, &mut chunk)
+            .map_err(WalError::Corrupt)
+    }
+
+    fn merge_row_group_data(
+        &mut self,
+        _schema: &str,
+        _table: &str,
+        _data_payload: &[u8],
+    ) -> WalResult<()> {
+        Err(WalError::Corrupt(
+            "WAL ROW_GROUP_DATA replay is not implemented in duckdb_rs yet".into(),
+        ))
+    }
+
+    fn delete_rows(&mut self, schema: &str, table: &str, chunk_payload: &[u8]) -> WalResult<()> {
+        self.table_handle(schema, table)?;
+        let row_ids = decode_delete_row_ids(chunk_payload)?;
+        self.conn
+            .delete_chunk(table, &row_ids)
+            .map(|_| ())
+            .map_err(WalError::Corrupt)
+    }
+
+    fn update_rows(
+        &mut self,
+        schema: &str,
+        table: &str,
+        column_indexes_payload: &[u8],
+        chunk_payload: &[u8],
+    ) -> WalResult<()> {
+        let handle = self.table_handle(schema, table)?;
+        let (row_ids, column_ids, mut updates) =
+            decode_update_payload(column_indexes_payload, chunk_payload, &handle)?;
+        self.conn
+            .update_chunk(table, &row_ids, &column_ids, &mut updates)
+            .map_err(WalError::Corrupt)
+    }
+
+    fn commit(&mut self) -> WalResult<()> {
+        self.conn.commit().map_err(|e| WalError::Corrupt(e.to_string()))
+    }
+
+    fn rollback(&mut self) -> WalResult<()> {
+        self.conn
+            .rollback()
+            .map_err(|e| WalError::Corrupt(e.to_string()))
+    }
+
+    fn begin_transaction(&mut self) -> WalResult<()> {
+        self.conn
+            .begin_transaction()
+            .map_err(|e| WalError::Corrupt(e.to_string()))
+    }
+
+    fn commit_indexes(&mut self, indexes: Vec<ReplayIndexInfo>) -> WalResult<()> {
+        if indexes.is_empty() {
+            return Ok(());
+        }
+        Err(WalError::Corrupt("WAL index replay is not implemented in duckdb_rs yet".into()))
+    }
+
+    fn verify_wal_version(
+        &self,
+        db_identifier: Option<[u8; DB_IDENTIFIER_LEN]>,
+        checkpoint_iteration: Option<u64>,
+    ) -> WalResult<Option<u64>> {
+        if db_identifier.is_none() || checkpoint_iteration.is_none() {
+            return Ok(None);
+        }
+        let (main_header, active_header) = read_main_and_active_headers(&self.db.path)
+            .map_err(|e| WalError::Corrupt(format!("failed to read database headers: {e:?}")))?;
+        let wal_db_identifier = db_identifier.expect("checked above");
+        if !MainHeader::compare_db_identifiers(&main_header.db_identifier, &wal_db_identifier) {
+            return Err(WalError::VersionMismatch("WAL db_identifier does not match database file".into()));
+        }
+        let wal_checkpoint_iteration = checkpoint_iteration.expect("checked above");
+        if active_header.iteration != wal_checkpoint_iteration {
+            if wal_checkpoint_iteration + 1 == active_header.iteration {
+                return Ok(Some(active_header.iteration));
+            }
+            return Err(WalError::VersionMismatch(format!(
+                "WAL checkpoint iteration {} does not match database iteration {}",
+                wal_checkpoint_iteration, active_header.iteration
+            )));
+        }
+        Ok(None)
+    }
+}
+
+fn decode_insert_chunk_payload(payload: &[u8], types: &[LogicalType]) -> WalResult<DataChunk> {
+    if payload.len() < 8 {
+        return Err(WalError::Corrupt("insert payload is truncated".into()));
+    }
+    let row_count = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
+    let column_count = u32::from_le_bytes(payload[4..8].try_into().unwrap()) as usize;
+    if column_count != types.len() {
+        return Err(WalError::Corrupt(format!(
+            "insert payload column count {} does not match table column count {}",
+            column_count,
+            types.len()
+        )));
+    }
+
+    let mut chunk = DataChunk::new();
+    chunk.initialize(types, row_count.max(1));
+    let mut pos = 8usize;
+    for (column, ty) in chunk.data.iter_mut().zip(types.iter()) {
+        if pos + 4 > payload.len() {
+            return Err(WalError::Corrupt("insert payload missing column size".into()));
+        }
+        let byte_len = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        let expected = ty.physical_size() * row_count;
+        if byte_len != expected {
+            return Err(WalError::Corrupt(format!(
+                "insert payload byte length {} does not match expected {} for {:?}",
+                byte_len, expected, ty.id
+            )));
+        }
+        if pos + byte_len > payload.len() {
+            return Err(WalError::Corrupt("insert payload column bytes truncated".into()));
+        }
+        column.raw_data_mut()[..byte_len].copy_from_slice(&payload[pos..pos + byte_len]);
+        pos += byte_len;
+    }
+    if pos != payload.len() {
+        return Err(WalError::Corrupt("insert payload has trailing bytes".into()));
+    }
+    chunk.set_cardinality(row_count);
+    Ok(chunk)
+}
+
+fn decode_delete_row_ids(payload: &[u8]) -> WalResult<Vec<i64>> {
+    if payload.len() < 4 {
+        return Err(WalError::Corrupt("delete payload is truncated".into()));
+    }
+    let count = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
+    let expected = 4 + count * 8;
+    if payload.len() != expected {
+        return Err(WalError::Corrupt(format!(
+            "delete payload length {} does not match expected {}",
+            payload.len(),
+            expected
+        )));
+    }
+    let mut row_ids = Vec::with_capacity(count);
+    for idx in 0..count {
+        let start = 4 + idx * 8;
+        row_ids.push(i64::from_le_bytes(payload[start..start + 8].try_into().unwrap()));
+    }
+    Ok(row_ids)
+}
+
+fn decode_update_payload(
+    column_indexes_payload: &[u8],
+    chunk_payload: &[u8],
+    table: &ConnectionTableHandle,
+) -> WalResult<(Vec<i64>, Vec<u64>, DataChunk)> {
+    if column_indexes_payload.len() < 4 || chunk_payload.len() < 4 {
+        return Err(WalError::Corrupt("update payload is truncated".into()));
+    }
+    let column_count = u32::from_le_bytes(column_indexes_payload[0..4].try_into().unwrap()) as usize;
+    let expected_column_bytes = 4 + column_count * 8;
+    if column_indexes_payload.len() != expected_column_bytes {
+        return Err(WalError::Corrupt("update column index payload length mismatch".into()));
+    }
+    let mut column_ids = Vec::with_capacity(column_count);
+    let mut column_types = Vec::with_capacity(column_count);
+    for idx in 0..column_count {
+        let start = 4 + idx * 8;
+        let column_id = u64::from_le_bytes(column_indexes_payload[start..start + 8].try_into().unwrap());
+        let ty = table
+            .storage
+            .column_definitions
+            .get(column_id as usize)
+            .ok_or(WalError::ColumnIndexOutOfBounds)?
+            .logical_type
+            .clone();
+        column_ids.push(column_id);
+        column_types.push(ty);
+    }
+
+    let row_count = u32::from_le_bytes(chunk_payload[0..4].try_into().unwrap()) as usize;
+    let row_id_bytes = row_count * 8;
+    if chunk_payload.len() < 4 + row_id_bytes {
+        return Err(WalError::Corrupt("update payload row ids truncated".into()));
+    }
+    let mut row_ids = Vec::with_capacity(row_count);
+    for idx in 0..row_count {
+        let start = 4 + idx * 8;
+        row_ids.push(i64::from_le_bytes(chunk_payload[start..start + 8].try_into().unwrap()));
+    }
+
+    let values_payload = &chunk_payload[4 + row_id_bytes..];
+    let updates = decode_fixed_width_values(values_payload, &column_types, row_count)?;
+    Ok((row_ids, column_ids, updates))
+}
+
+fn decode_fixed_width_values(payload: &[u8], types: &[LogicalType], row_count: usize) -> WalResult<DataChunk> {
+    let mut chunk = DataChunk::new();
+    chunk.initialize(types, row_count.max(1));
+    let mut pos = 0usize;
+    for (column, ty) in chunk.data.iter_mut().zip(types.iter()) {
+        let byte_len = ty.physical_size() * row_count;
+        if pos + byte_len > payload.len() {
+            return Err(WalError::Corrupt("update payload values truncated".into()));
+        }
+        column.raw_data_mut()[..byte_len].copy_from_slice(&payload[pos..pos + byte_len]);
+        pos += byte_len;
+    }
+    if pos != payload.len() {
+        return Err(WalError::Corrupt("update payload has trailing bytes".into()));
+    }
+    chunk.set_cardinality(row_count);
+    Ok(chunk)
+}
+
+fn recover_database(instance: &Arc<DatabaseInstance>) -> StorageResult<()> {
+    if instance.path == SingleFileStorageManager::IN_MEMORY_PATH {
+        return Ok(());
+    }
+
+    let wal_path = instance.storage_manager.wal_path();
+    let checkpoint_wal_path = instance.storage_manager.checkpoint_wal_path();
+    let wal_exists = std::path::Path::new(&wal_path).exists();
+    let checkpoint_exists = std::path::Path::new(&checkpoint_wal_path).exists();
+    if !wal_exists && !checkpoint_exists {
+        instance
+            .storage_manager
+            .install_recovered_wal(0, WalInitState::NoWal);
+        return Ok(());
+    }
+
+    let recovery = recover_wal_files(instance, &wal_path, &checkpoint_wal_path)?;
+    instance
+        .storage_manager
+        .install_recovered_wal(recovery.wal_size, recovery.init_state);
+    Ok(())
+}
+
+struct RecoveryOutcome {
+    wal_size: u64,
+    init_state: WalInitState,
+}
+
+fn recover_wal_files(
+    instance: &Arc<DatabaseInstance>,
+    wal_path: &str,
+    checkpoint_wal_path: &str,
+) -> StorageResult<RecoveryOutcome> {
+    let wal_exists = std::path::Path::new(wal_path).exists();
+    let checkpoint_exists = std::path::Path::new(checkpoint_wal_path).exists();
+
+    if !wal_exists {
+        if checkpoint_exists {
+            let outcome = replay_single_wal(instance, checkpoint_wal_path, true)?;
+            fs::rename(checkpoint_wal_path, wal_path).or_else(|_| {
+                let bytes = fs::read(checkpoint_wal_path)?;
+                fs::write(wal_path, bytes)?;
+                fs::remove_file(checkpoint_wal_path)
+            })?;
+            return Ok(outcome);
+        }
+        return Ok(RecoveryOutcome {
+            wal_size: 0,
+            init_state: WalInitState::NoWal,
+        });
+    }
+
+    let inspect = inspect_wal(instance, wal_path, false)?;
+    if let Some(checkpoint_id) = inspect.checkpoint_id {
+        let checkpoint_was_successful = instance.storage_manager.is_checkpoint_clean(checkpoint_id);
+        if !checkpoint_exists {
+            if checkpoint_was_successful {
+                return Ok(RecoveryOutcome {
+                    wal_size: 0,
+                    init_state: WalInitState::NoWal,
+                });
+            }
+            return replay_single_wal(instance, wal_path, false);
+        }
+
+        if checkpoint_was_successful {
+            let outcome = replay_single_wal(instance, checkpoint_wal_path, true)?;
+            fs::rename(checkpoint_wal_path, wal_path).or_else(|_| {
+                let bytes = fs::read(checkpoint_wal_path)?;
+                fs::write(wal_path, bytes)?;
+                fs::remove_file(checkpoint_wal_path)
+            })?;
+            return Ok(outcome);
+        }
+
+        let merged_path = format!("{}.recovery", wal_path);
+        merge_recovery_wals(wal_path, checkpoint_wal_path, &merged_path, inspect.checkpoint_position)?;
+        let outcome = replay_single_wal(instance, &merged_path, true)?;
+        fs::rename(&merged_path, wal_path).or_else(|_| {
+            let bytes = fs::read(&merged_path)?;
+            fs::write(wal_path, bytes)?;
+            fs::remove_file(&merged_path)
+        })?;
+        let _ = fs::remove_file(checkpoint_wal_path);
+        return Ok(outcome);
+    }
+
+    if inspect.expected_checkpoint_id.is_some() {
+        return Err(StorageError::Corrupt {
+            msg: "WAL checkpoint iteration is ahead of database header but no checkpoint marker was found".into(),
+        });
+    }
+
+    replay_single_wal(instance, wal_path, false)
+}
+
+fn inspect_wal(
+    instance: &Arc<DatabaseInstance>,
+    path: &str,
+    is_checkpoint_wal: bool,
+) -> StorageResult<crate::storage::wal_replay::WalScanResult> {
+    let file = File::open(path)?;
+    let catalog = RecoveryCatalog::new(instance.clone());
+    let mut replayer = WalReplayer::new(file, catalog, None)?;
+    replayer
+        .inspect(is_checkpoint_wal)
+        .map_err(|e| StorageError::Corrupt { msg: e.to_string() })
+}
+
+fn replay_single_wal(
+    instance: &Arc<DatabaseInstance>,
+    path: &str,
+    is_checkpoint_wal: bool,
+) -> StorageResult<RecoveryOutcome> {
+    let file = File::open(path)?;
+    let catalog = RecoveryCatalog::new(instance.clone());
+    let mut replayer = WalReplayer::new(file, catalog, None)?;
+    let result = replayer
+        .replay(is_checkpoint_wal)
+        .map_err(|e| StorageError::Corrupt { msg: e.to_string() })?;
+    Ok(RecoveryOutcome {
+        wal_size: result.last_success_offset,
+        init_state: if result.all_succeeded {
+            WalInitState::Uninitialized
+        } else {
+            WalInitState::UninitializedRequiresTruncate
+        },
+    })
+}
+
+fn merge_recovery_wals(
+    wal_path: &str,
+    checkpoint_wal_path: &str,
+    merged_path: &str,
+    checkpoint_position: Option<u64>,
+) -> StorageResult<()> {
+    let copy_end = checkpoint_position.ok_or_else(|| StorageError::Corrupt {
+        msg: "main WAL contains checkpoint marker but checkpoint_position is missing".into(),
+    })?;
+
+    let mut output = File::create(merged_path)?;
+
+    let mut main_wal = File::open(wal_path)?;
+    std::io::copy(&mut std::io::Read::by_ref(&mut main_wal).take(copy_end), &mut output)?;
+
+    let checkpoint_header_len = wal_header_len(checkpoint_wal_path)?;
+    let mut checkpoint_wal = File::open(checkpoint_wal_path)?;
+    checkpoint_wal.seek(SeekFrom::Start(checkpoint_header_len as u64))?;
+    std::io::copy(&mut checkpoint_wal, &mut output)?;
+    output.flush()?;
+    Ok(())
+}
+
+fn wal_header_len(path: &str) -> StorageResult<usize> {
+    let mut file = File::open(path)?;
+    let mut fixed = [0u8; 16];
+    file.read_exact(&mut fixed)?;
+    if fixed[0] != 100 || fixed[2] != 101 || fixed[11] != 102 {
+        return Err(StorageError::Corrupt {
+            msg: format!("unexpected WAL header layout in {}", path),
+        });
+    }
+    let len = u32::from_le_bytes(fixed[12..16].try_into().unwrap()) as usize;
+    Ok(16 + len + 1 + 8)
+}
+
+fn read_main_and_active_headers(path: &str) -> StorageResult<(MainHeader, DatabaseHeader)> {
+    let fs = Arc::new(LocalFileSystem);
+    let mut file = fs.open_file(path, FileOpenFlags::READ)?;
+
+    let mut main_header_buf = vec![0u8; FILE_HEADER_SIZE];
+    file.read_at(&mut main_header_buf, 0)?;
+    let main_header = MainHeader::deserialize(&main_header_buf[BLOCK_HEADER_SIZE..]).ok_or_else(|| {
+        StorageError::Corrupt {
+            msg: "Invalid DuckDB main header".to_string(),
+        }
+    })?;
+
+    let active_header = read_active_header(&*fs, path)?;
+    Ok((main_header, active_header))
 }
 
 fn build_table_handle(

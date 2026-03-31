@@ -879,6 +879,20 @@ impl SingleFileStorageManager {
         let headers = [h0, h1];
         Ok(headers[MainHeader::active_header_idx(&headers)].clone())
     }
+
+    pub fn install_recovered_wal(&self, wal_size: u64, init_state: WalInitState) {
+        if self.in_memory() || self.read_only {
+            return;
+        }
+        let wal_path = self.wal_path();
+        self.wal_state.lock().wal = Some(Arc::new(WriteAheadLog::new(
+            self,
+            wal_path,
+            wal_size,
+            init_state,
+            None,
+        )));
+    }
 }
 
 struct NoopBlockAllocator;
