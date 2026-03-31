@@ -310,7 +310,9 @@ impl RowGroup {
     pub fn get_or_create_version_info(&self) -> Arc<RowVersionManager> {
         let mut guard = self.version_info.lock();
         if guard.is_none() {
-            *guard = Some(Arc::new(RowVersionManager::new()));
+            let version_info = Arc::new(RowVersionManager::new());
+            RowVersionManager::register(&version_info);
+            *guard = Some(version_info);
         }
         Arc::clone(guard.as_ref().unwrap())
     }
@@ -722,7 +724,9 @@ impl RowGroup {
     /// some rows were already deleted by an earlier transaction).
     pub fn delete(
         &self,
+        transaction_handle: Option<&Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle>>,
         transaction: TransactionData,
+        table: Option<&crate::storage::data_table::DataTable>,
         row_ids: &mut [RowId],
         count: Idx,
         row_group_start: Idx,
@@ -760,6 +764,17 @@ impl RowGroup {
                         n,
                     );
                     total_deleted += deleted;
+                    if deleted > 0 {
+                        push_delete_undo(
+                            transaction_handle,
+                            table,
+                            &vi,
+                            current_vector_idx,
+                            &chunk_rows,
+                            deleted,
+                            row_group_start + current_vector_idx * STANDARD_VECTOR_SIZE,
+                        );
+                    }
                     chunk_rows.clear();
                 }
                 current_vector_idx = vector_idx;
@@ -777,6 +792,17 @@ impl RowGroup {
                 n,
             );
             total_deleted += deleted;
+            if deleted > 0 {
+                push_delete_undo(
+                    transaction_handle,
+                    table,
+                    &vi,
+                    current_vector_idx,
+                    &chunk_rows,
+                    deleted,
+                    row_group_start + current_vector_idx * STANDARD_VECTOR_SIZE,
+                );
+            }
         }
 
         self.has_changes.store(true, Ordering::Relaxed);
@@ -945,6 +971,39 @@ impl RowGroup {
             has_changes: AtomicBool::new(self.has_changes()),
         })
     }
+}
+
+fn push_delete_undo(
+    transaction_handle: Option<&Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle>>,
+    table: Option<&crate::storage::data_table::DataTable>,
+    version_info: &Arc<RowVersionManager>,
+    vector_idx: Idx,
+    rows: &[RowId],
+    actual_delete_count: Idx,
+    base_row: Idx,
+) {
+    let (Some(handle), Some(table)) = (transaction_handle, table) else {
+        return;
+    };
+    let rows = &rows[..actual_delete_count as usize];
+    let is_consecutive = rows
+        .iter()
+        .enumerate()
+        .all(|(idx, row)| *row == idx as RowId);
+    let delete_info = crate::transaction::delete_info::DeleteInfo {
+        table_id: table.info.table_id(),
+        version_info_id: version_info.version_info_id,
+        vector_idx,
+        count: actual_delete_count,
+        base_row,
+        is_consecutive,
+        rows: if is_consecutive {
+            None
+        } else {
+            Some(rows.iter().map(|row| *row as u16).collect())
+        },
+    };
+    handle.lock_inner().push_delete(delete_info);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

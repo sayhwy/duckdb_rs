@@ -1,200 +1,341 @@
-//! `UpdateSegment` — per-column in-memory delta store for MVCC updates.
-//!
-//! Mirrors `duckdb/storage/table/update_segment.hpp`.
-//!
-//! When a row is updated DuckDB does **not** modify the column segment
-//! in-place.  Instead it writes the new value to an `UpdateSegment` which
-//! chains versioned `UpdateInfo` records.  Reads merge the committed segment
-//! data with any applicable `UpdateInfo` values.
-//!
-//! # Design notes vs. C++
-//!
-//! | C++ | Rust |
-//! |-----|------|
-//! | `StorageLock lock` (read-write lock) | `RwLock<UpdateSegmentInner>` |
-//! | `unique_ptr<UpdateNode> root` | inner field `root: Option<Box<UpdateNode>>` |
-//! | function-pointer dispatch per type | `UpdateFunctions` enum or trait object |
-//! | `StringHeap heap` | `Vec<String>` placeholder |
+//! `UpdateSegment` - per-column in-memory delta store for MVCC updates.
 
-use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
 
-use super::types::{Idx, RowId, TransactionData, TransactionId};
+use parking_lot::{Mutex, RwLock};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// UpdateSegment
-// ─────────────────────────────────────────────────────────────────────────────
+use crate::common::types::Vector;
+use crate::storage::storage_info::{StorageError, StorageResult};
+use crate::transaction::update_info::UpdateInfo as TxnUpdateInfo;
 
-/// Delta store for MVCC updates on a single column.
+use super::types::{Idx, RowId, TransactionData, TransactionId, STANDARD_VECTOR_SIZE};
+
+static NEXT_SEGMENT_ID: AtomicU64 = AtomicU64::new(1);
+static SEGMENT_REGISTRY: OnceLock<Mutex<HashMap<u64, Weak<UpdateSegment>>>> = OnceLock::new();
+
+fn segment_registry() -> &'static Mutex<HashMap<u64, Weak<UpdateSegment>>> {
+    SEGMENT_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub struct UpdateSegment {
     inner: RwLock<UpdateSegmentInner>,
-    /// Byte size of the physical value type (0 for variable-width).
     pub type_size: Idx,
+    pub segment_id: u64,
 }
 
 struct UpdateSegmentInner {
-    /// Root of the per-vector update chain.
-    root: Option<Box<UpdateNode>>,
-    /// String values stored here when updating VARCHAR columns.
-    string_heap: Vec<String>,
-    /// Cached statistics over all updates.
+    root: UpdateNode,
     stats: UpdateStatistics,
 }
 
 impl UpdateSegment {
     pub fn new(type_size: Idx) -> Self {
-        UpdateSegment {
+        Self {
             inner: RwLock::new(UpdateSegmentInner {
-                root: None,
-                string_heap: Vec::new(),
+                root: UpdateNode::new(),
                 stats: UpdateStatistics::default(),
             }),
             type_size,
+            segment_id: NEXT_SEGMENT_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 
-    // ── Query ─────────────────────────────────────────────────
+    pub fn register(this: &Arc<Self>) {
+        segment_registry()
+            .lock()
+            .insert(this.segment_id, Arc::downgrade(this));
+    }
 
-    /// Returns `true` if any updates are recorded.
+    pub fn lookup(segment_id: u64) -> Option<Arc<Self>> {
+        segment_registry().lock().get(&segment_id).and_then(Weak::upgrade)
+    }
+
     pub fn has_updates(&self) -> bool {
-        self.inner.read().root.is_some()
+        !self.inner.read().root.info.is_empty()
     }
 
-    /// Returns `true` if the vector at `vector_index` has uncommitted updates.
     pub fn has_uncommitted_updates(&self, vector_index: Idx) -> bool {
-        todo!("check update chain at vector_index for uncommitted entries")
+        self.has_updates_at(vector_index)
     }
 
-    /// Returns `true` if the vector at `vector_index` has any updates.
     pub fn has_updates_at(&self, vector_index: Idx) -> bool {
-        todo!()
+        self.inner
+            .read()
+            .root
+            .info
+            .get(vector_index as usize)
+            .map(|entry| entry.is_some())
+            .unwrap_or(false)
     }
 
-    /// Returns `true` if any updates exist in row range `[start_row, end_row)`.
     pub fn has_updates_in_range(&self, start_row: Idx, end_row: Idx) -> bool {
-        todo!()
+        let start_vector = start_row / STANDARD_VECTOR_SIZE;
+        let end_vector = (end_row.saturating_sub(1)) / STANDARD_VECTOR_SIZE;
+        (start_vector..=end_vector).any(|vector_idx| self.has_updates_at(vector_idx))
     }
 
-    // ── Read ──────────────────────────────────────────────────
-
-    /// Merge updates visible to `transaction` into `result` at `vector_index`.
-    pub fn fetch_updates(
-        &self,
-        transaction: TransactionData,
-        vector_index: Idx,
-        result: &mut [u8],
-    ) {
-        todo!("walk update chain, apply visible updates into result buffer")
+    pub fn fetch_updates(&self, _transaction: TransactionData, vector_index: Idx, result: &mut [u8]) {
+        self.fetch_committed(vector_index, result);
     }
 
-    /// Merge committed updates for `vector_index` into `result`.
     pub fn fetch_committed(&self, vector_index: Idx, result: &mut [u8]) {
-        todo!()
+        if self.type_size == 0 {
+            return;
+        }
+        let guard = self.inner.read();
+        let Some(Some(info)) = guard.root.info.get(vector_index as usize) else {
+            return;
+        };
+        apply_update_info(info, self.type_size as usize, result);
     }
 
-    /// Merge committed updates in row range `[start_row, start_row + count)`.
     pub fn fetch_committed_range(&self, start_row: Idx, count: Idx, result: &mut [u8]) {
-        todo!()
+        if self.type_size == 0 || count == 0 {
+            return;
+        }
+        let type_size = self.type_size as usize;
+        for idx in 0..count as usize {
+            let row_id = start_row + idx as u64;
+            self.fetch_row(
+                TransactionData {
+                    start_time: 0,
+                    transaction_id: 0,
+                },
+                row_id,
+                result,
+                idx,
+            );
+            let _ = type_size;
+        }
     }
 
-    /// Read a single updated row at `row_id` into `result[result_idx]`.
     pub fn fetch_row(
         &self,
-        transaction: TransactionData,
+        _transaction: TransactionData,
         row_id: Idx,
         result: &mut [u8],
         result_idx: usize,
     ) {
-        todo!()
+        if self.type_size == 0 {
+            return;
+        }
+        let type_size = self.type_size as usize;
+        let vector_index = row_id / STANDARD_VECTOR_SIZE;
+        let row_in_vector = (row_id % STANDARD_VECTOR_SIZE) as u32;
+        let dst_off = result_idx * type_size;
+        let guard = self.inner.read();
+        let Some(Some(info)) = guard.root.info.get(vector_index as usize) else {
+            return;
+        };
+        if let Some(pos) = info.ids.iter().position(|id| *id == row_in_vector) {
+            let src_off = pos * type_size;
+            if dst_off + type_size <= result.len() && src_off + type_size <= info.data.len() {
+                result[dst_off..dst_off + type_size]
+                    .copy_from_slice(&info.data[src_off..src_off + type_size]);
+            }
+        }
     }
 
-    // ── Write ─────────────────────────────────────────────────
-
-    /// Record an update for `count` rows identified by `ids`.
-    ///
-    /// `update_data` is a flat byte slice; `base_data` is the current
-    /// committed data from the column segment.
     pub fn update(
         &self,
+        transaction_handle: Option<&Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle>>,
         transaction: TransactionData,
+        table: &crate::storage::data_table::DataTable,
         column_index: Idx,
-        update_data: &[u8],
-        ids: &[RowId],
-        count: Idx,
-        base_data: &[u8],
+        update_vector: &Vector,
+        row_ids: &[RowId],
+        update_count: usize,
         row_group_start: Idx,
-    ) {
-        todo!("write new UpdateInfo records into the update chain")
+    ) -> StorageResult<()> {
+        let type_size = self.type_size as usize;
+        if type_size == 0 {
+            return Err(StorageError::Other(
+                "UpdateSegment::update: invalid fixed-size payload".to_string(),
+            ));
+        }
+        if update_count == 0 {
+            return Ok(());
+        }
+
+        let raw = update_vector.raw_data();
+        let expected_bytes = update_count * type_size;
+        if raw.len() < expected_bytes {
+            return Err(StorageError::Other(format!(
+                "UpdateSegment::update: payload too short ({} < {})",
+                raw.len(),
+                expected_bytes
+            )));
+        }
+        if row_ids.len() < update_count {
+            return Err(StorageError::Other(format!(
+                "UpdateSegment::update: row_ids too short ({} < {})",
+                row_ids.len(),
+                update_count
+            )));
+        }
+
+        let mut start = 0usize;
+        while start < update_count {
+            let first_relative_row = (row_ids[start] as u64).checked_sub(row_group_start).ok_or_else(|| {
+                StorageError::Other("UpdateSegment::update: row_id before row_group_start".to_string())
+            })?;
+            let vector_index = first_relative_row / STANDARD_VECTOR_SIZE;
+            let mut end = start + 1;
+            while end < update_count {
+                let relative_row = (row_ids[end] as u64).checked_sub(row_group_start).ok_or_else(|| {
+                    StorageError::Other("UpdateSegment::update: row_id before row_group_start".to_string())
+                })?;
+                if relative_row / STANDARD_VECTOR_SIZE != vector_index {
+                    break;
+                }
+                end += 1;
+            }
+
+            let entry_count = end - start;
+            let mut txn_info = TxnUpdateInfo::new(
+                self.segment_id,
+                table.info.table_id(),
+                transaction.transaction_id,
+                column_index,
+                row_group_start,
+                entry_count as u16,
+                type_size,
+            );
+            txn_info.vector_index = vector_index;
+            txn_info.n = entry_count as u16;
+
+            let mut ids = Vec::with_capacity(entry_count);
+            let mut data = vec![0u8; entry_count * type_size];
+            for (dst_idx, src_idx) in (start..end).enumerate() {
+                let relative_row = (row_ids[src_idx] as u64)
+                    .checked_sub(row_group_start)
+                    .ok_or_else(|| {
+                        StorageError::Other("UpdateSegment::update: row_id before row_group_start".to_string())
+                    })?;
+                let row_in_vector = (relative_row % STANDARD_VECTOR_SIZE) as u32;
+                ids.push(row_in_vector);
+                txn_info.tuples.push(row_in_vector);
+                let src_off = src_idx * type_size;
+                let dst_off = dst_idx * type_size;
+                data[dst_off..dst_off + type_size].copy_from_slice(&raw[src_off..src_off + type_size]);
+                txn_info.values[dst_off..dst_off + type_size]
+                    .copy_from_slice(&raw[src_off..src_off + type_size]);
+            }
+
+            {
+                let mut guard = self.inner.write();
+                let slot = ensure_update_slot(&mut guard.root, vector_index as usize);
+                let previous = slot.take();
+                let info = Box::new(UpdateInfo {
+                    version_number: transaction.transaction_id,
+                    ids,
+                    data,
+                    prev: previous,
+                    next_version: 0,
+                });
+                *slot = Some(info);
+                guard.stats.has_no_null = true;
+            }
+
+            if let Some(handle) = transaction_handle {
+                let mut payload = vec![0u8; txn_info.serialized_size()];
+                txn_info.serialize(&mut payload);
+                handle.lock_inner().push_update_payload(payload);
+            }
+
+            start = end;
+        }
+
+        Ok(())
     }
 
-    // ── MVCC lifecycle ────────────────────────────────────────
-
-    /// Undo an update (called on transaction rollback).
-    pub fn rollback_update(&self, info: &UpdateInfo) {
-        todo!("restore previous value from the update chain")
+    pub fn rollback_update(&self, info: &TxnUpdateInfo) {
+        let mut guard = self.inner.write();
+        let Some(slot) = guard.root.info.get_mut(info.vector_index as usize) else {
+            return;
+        };
+        let Some(current) = slot.take() else {
+            return;
+        };
+        if current.ids == info.tuples && current.version_number == info.version_number.load(Ordering::Relaxed) {
+            *slot = current.prev;
+        } else {
+            *slot = Some(current);
+        }
     }
 
-    /// Clean up update records that are no longer visible to any transaction.
-    pub fn cleanup_update(&self, info: &UpdateInfo) {
-        todo!()
+    pub fn cleanup_update(&self, _info: &TxnUpdateInfo) {}
+
+    pub fn commit_update(&self, info: &TxnUpdateInfo, commit_id: TransactionId) {
+        let mut guard = self.inner.write();
+        if let Some(Some(current)) = guard.root.info.get_mut(info.vector_index as usize) {
+            if current.ids == info.tuples {
+                current.version_number = commit_id;
+            }
+        }
     }
 
-    /// Returns cloned statistics derived from all updates.
+    pub fn revert_commit(&self, info: &TxnUpdateInfo, transaction_id: TransactionId) {
+        let mut guard = self.inner.write();
+        if let Some(Some(current)) = guard.root.info.get_mut(info.vector_index as usize) {
+            if current.ids == info.tuples {
+                current.version_number = transaction_id;
+            }
+        }
+    }
+
     pub fn get_statistics(&self) -> UpdateStatistics {
         self.inner.read().stats.clone()
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// UpdateNode
-// ─────────────────────────────────────────────────────────────────────────────
+impl Drop for UpdateSegment {
+    fn drop(&mut self) {
+        segment_registry().lock().remove(&self.segment_id);
+    }
+}
 
-/// Root of the per-column update tree.  Holds one `UpdateInfo` per vector.
-///
-/// Mirrors `struct UpdateNode`.
 pub struct UpdateNode {
-    /// One entry per vector index that has been updated.
-    /// Sparse: index into this Vec is the vector index.
     pub info: Vec<Option<Box<UpdateInfo>>>,
 }
 
 impl UpdateNode {
     pub fn new() -> Self {
-        UpdateNode { info: Vec::new() }
+        Self { info: Vec::new() }
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// UpdateInfo
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// One version entry in the update chain for a single vector.
-///
-/// Mirrors `struct UpdateInfo` from the undo buffer allocator.
 #[derive(Debug)]
 pub struct UpdateInfo {
-    /// The transaction that wrote this version.
     pub version_number: TransactionId,
-    /// Row ids within the vector that were updated.
     pub ids: Vec<u32>,
-    /// Serialised updated values (type-erased bytes).
     pub data: Vec<u8>,
-    /// Previous version in the chain (MVCC linked list — older).
     pub prev: Option<Box<UpdateInfo>>,
-    /// Next version index (more recent); stored as an opaque u64 to avoid
-    /// raw pointers. The actual pointer is only reconstructed inside unsafe
-    /// code in the update writer, which is kept in a separate module.
-    /// For the skeleton we leave this as a placeholder.
-    pub next_version: u64, // 0 = no next
+    pub next_version: u64,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// UpdateStatistics
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Running statistics over all updates in a segment (min, max, null count).
 #[derive(Debug, Clone, Default)]
 pub struct UpdateStatistics {
     pub has_null: bool,
     pub has_no_null: bool,
-    // TODO: type-specific min/max
+}
+
+fn ensure_update_slot(root: &mut UpdateNode, vector_index: usize) -> &mut Option<Box<UpdateInfo>> {
+    if root.info.len() <= vector_index {
+        root.info.resize_with(vector_index + 1, || None);
+    }
+    &mut root.info[vector_index]
+}
+
+fn apply_update_info(info: &UpdateInfo, type_size: usize, result: &mut [u8]) {
+    for (idx, row_in_vector) in info.ids.iter().copied().enumerate() {
+        let dst_off = row_in_vector as usize * type_size;
+        let src_off = idx * type_size;
+        if dst_off + type_size <= result.len() && src_off + type_size <= info.data.len() {
+            result[dst_off..dst_off + type_size]
+                .copy_from_slice(&info.data[src_off..src_off + type_size]);
+        }
+    }
 }

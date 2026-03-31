@@ -151,6 +151,11 @@ impl DuckTxnHandle {
         self.inner.lock()
     }
 
+    pub fn transaction_data(&self) -> super::duck_transaction::TransactionData {
+        let txn = self.inner.lock();
+        super::duck_transaction::TransactionData::from_transaction(&txn)
+    }
+
     /// 获取事务 ID（不进行完整锁定的快速路径）。
     ///
     /// `transaction_id` 在创建后不再修改，因此可以通过锁读取。

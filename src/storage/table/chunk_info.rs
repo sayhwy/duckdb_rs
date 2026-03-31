@@ -333,16 +333,18 @@ impl ChunkVectorInfo {
         count: usize,
     ) -> Idx {
         let mut deleted = 0;
-        for row in rows.iter().take(count) {
-            if *row < 0 {
+        for idx_in_rows in 0..count {
+            let row = rows[idx_in_rows];
+            if row < 0 {
                 continue;
             }
-            let idx = *row as usize;
+            let idx = row as usize;
             if idx >= self.deleted.len() {
                 continue;
             }
             if self.deleted[idx] == NOT_DELETED_ID {
                 self.deleted[idx] = transaction_id;
+                rows[deleted as usize] = row;
                 deleted += 1;
             }
         }
@@ -359,6 +361,21 @@ impl ChunkVectorInfo {
             }
         } else {
             self.constant_insert_id = commit_id;
+        }
+    }
+
+    pub fn set_deleted_rows(&mut self, rows: &[u16], delete_id: TransactionId) {
+        for row in rows {
+            let idx = *row as usize;
+            if idx < self.deleted.len() {
+                self.deleted[idx] = delete_id;
+            }
+        }
+    }
+
+    pub fn set_consecutive_deleted(&mut self, count: usize, delete_id: TransactionId) {
+        for idx in 0..count.min(self.deleted.len()) {
+            self.deleted[idx] = delete_id;
         }
     }
 

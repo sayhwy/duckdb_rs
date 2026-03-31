@@ -224,6 +224,25 @@ impl DB {
             .map_err(|e| StorageError::Corrupt { msg: e })
     }
 
+    /// 更新表中指定行（便捷方法，使用自动提交模式）。
+    pub fn update_chunk(
+        &self,
+        table_name: &str,
+        row_ids: &[i64],
+        column_ids: &[u64],
+        updates: &mut DataChunk,
+    ) -> StorageResult<()> {
+        let conn = self.connect();
+        conn.update_chunk(table_name, row_ids, column_ids, updates)
+            .map_err(|e| StorageError::Corrupt { msg: e })
+    }
+
+    pub fn delete_chunk(&self, table_name: &str, row_ids: &[i64]) -> StorageResult<usize> {
+        let conn = self.connect();
+        conn.delete_chunk(table_name, row_ids)
+            .map_err(|e| StorageError::Corrupt { msg: e })
+    }
+
     /// 扫描表数据（便捷方法，打印输出）。
     pub fn scan_chunks(
         &self,

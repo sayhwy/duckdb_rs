@@ -153,6 +153,11 @@ impl LocalTableStorage {
         // 写入器仅用该上下文读取写缓冲阈值（默认 2），无副作用。
         let ctx = Arc::new(Mutex::new(ClientContext {
             local_storage: LocalStorage::new(),
+            transaction: None,
+            transaction_data: TransactionData {
+                start_time: 0,
+                transaction_id: 0,
+            },
         }));
 
         // C++: optimistic_writer(context, table)
@@ -1111,7 +1116,7 @@ impl LocalStorage {
         // C++: idx_t delete_count = storage->GetCollection().Delete(TransactionData(0,0), table, ids, count);
         //      storage->deleted_rows += delete_count;
         let collection = Arc::clone(&storage.row_groups.collection);
-        let delete_count = collection.delete(transaction, row_ids, count);
+        let delete_count = collection.delete(None, transaction, None, row_ids, count);
         storage.deleted_rows += delete_count;
         delete_count
     }
@@ -1121,7 +1126,7 @@ impl LocalStorage {
         &self,
         table_id: u64,
         row_ids: &[RowId],
-        column_ids: &[u64],
+        column_ids: &[crate::catalog::PhysicalIndex],
         updates: &DataChunk,
         transaction: TransactionData,
     ) {
@@ -1132,7 +1137,7 @@ impl LocalStorage {
             None => panic!("LocalStorage::update: no storage for table_id={}", table_id),
         };
         let collection = storage_arc.lock().get_collection();
-        collection.update(transaction, row_ids, column_ids, updates);
+        let _ = collection.update(None, transaction, None, row_ids, column_ids, updates);
     }
 
     // ── 提交/回滚 ─────────────────────────────────────────────────────────────

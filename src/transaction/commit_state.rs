@@ -14,7 +14,9 @@
 
 use super::append_info::AppendInfo;
 use super::delete_info::DeleteInfo;
+use super::update_info::UpdateInfo;
 use super::types::{ActiveTransactionState, CommitMode, NOT_DELETED_ID, TransactionId, UndoFlags};
+use std::sync::atomic::Ordering;
 
 // ─── IndexDataRemover ──────────────────────────────────────────────────────────
 
@@ -169,8 +171,12 @@ impl CommitState {
     }
 
     fn commit_delete(&mut self, payload: &[u8]) {
-        // 反序列化 DeleteInfo
         let info = DeleteInfo::deserialize(payload);
+        if let Some(version_info) =
+            crate::storage::table::row_version_manager::RowVersionManager::lookup(info.version_info_id)
+        {
+            version_info.commit_delete(&info, self.commit_id);
+        }
 
         // 在完整实现中：
         // 1. 将 ChunkVectorInfo 中对应行的版本号从 transaction_id 改为 commit_id
@@ -191,11 +197,11 @@ impl CommitState {
         }
     }
 
-    fn commit_update(&mut self, _payload: &[u8]) {
-        // 在完整实现中：
-        // 反序列化 UpdateInfo
-        // 将 version_number 从 transaction_id 原子改写为 commit_id
-        // 当前简化实现跳过
+    fn commit_update(&mut self, payload: &[u8]) {
+        let info = UpdateInfo::deserialize_auto(payload);
+        if let Some(segment) = crate::storage::table::update_segment::UpdateSegment::lookup(info.segment_id) {
+            segment.commit_update(&info, self.commit_id);
+        }
     }
 
     fn commit_append(&mut self, payload: &[u8]) {
@@ -215,8 +221,11 @@ impl CommitState {
         // 将 ChunkVectorInfo 中行版本号从 commit_id 改回 transaction_id
     }
 
-    fn revert_update(&mut self, _payload: &[u8]) {
-        // 将 UpdateInfo.version_number 从 commit_id 改回 transaction_id
+    fn revert_update(&mut self, payload: &[u8]) {
+        let info = UpdateInfo::deserialize_auto(payload);
+        if let Some(segment) = crate::storage::table::update_segment::UpdateSegment::lookup(info.segment_id) {
+            segment.revert_commit(&info, info.version_number.load(Ordering::Relaxed));
+        }
     }
 
     fn revert_append(&mut self, payload: &[u8]) {

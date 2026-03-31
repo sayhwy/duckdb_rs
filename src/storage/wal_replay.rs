@@ -1010,6 +1010,23 @@ impl<R: WalReader, C: CatalogOps> WalReplayer<R, C> {
 
     // ── 阶段1：扫描 ──────────────────────────────────────────────────────────
 
+    pub fn inspect(&mut self, is_checkpoint_wal: bool) -> WalResult<WalScanResult> {
+        let mut scan_state = ReplayState::new();
+        self.scan_phase(&mut scan_state)?;
+
+        if is_checkpoint_wal && scan_state.checkpoint_id.is_some() {
+            return Err(WalError::InvalidCheckpointWal(
+                "checkpoint WAL cannot contain a checkpoint marker".into(),
+            ));
+        }
+
+        Ok(WalScanResult {
+            checkpoint_id: scan_state.checkpoint_id,
+            checkpoint_position: scan_state.checkpoint_position,
+            expected_checkpoint_id: scan_state.expected_checkpoint_id,
+        })
+    }
+
     fn scan_phase(&mut self, state: &mut ReplayState) -> WalResult<()> {
         loop {
             if self.frame_reader.is_finished().map_err(WalError::Io)? {
@@ -1341,6 +1358,13 @@ pub struct WalReplayResult {
 
     /// CHECKPOINT 条目在文件中的字节偏移（C++: `checkpoint_state.checkpoint_position`）。
     pub checkpoint_position: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WalScanResult {
+    pub checkpoint_id: Option<MetaBlockPointer>,
+    pub checkpoint_position: Option<u64>,
+    pub expected_checkpoint_id: Option<u64>,
 }
 
 // ─── 校验和 ────────────────────────────────────────────────────────────────────

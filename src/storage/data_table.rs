@@ -30,15 +30,17 @@
 //! Rust 层完全实现的类型，因此复杂逻辑体保留为 `todo!()` 存根。
 //! 结构字段、公开 API 签名、版本控制逻辑和简单查询方法已完整实现。
 
-use crate::catalog::TableCatalogEntry;
-use crate::common::types::{DataChunk, LogicalType};
+use crate::catalog::{PhysicalIndex, TableCatalogEntry};
+use crate::common::types::{DataChunk, LogicalType, Vector};
 use crate::storage::local_storage::LocalStorage;
+use crate::storage::local_storage::MAX_ROW_ID;
 use crate::storage::storage_info::{StorageError, StorageResult};
 use crate::storage::storage_lock::StorageLockKey;
 use crate::storage::storage_manager::StorageCommitState;
 use crate::storage::table::append_state::TableAppendState as PhysicalTableAppendState;
 use crate::storage::table::append_state::{BoundConstraint, ConstraintState, LocalAppendState};
 use crate::storage::table::data_table_info::{DataTableInfo, IndexStorageInfo};
+use crate::storage::table::delete_state::TableDeleteState;
 use crate::storage::table::persistent_table_data::PersistentTableData;
 use crate::storage::table::row_group_collection::RowGroupCollection;
 use crate::storage::table::scan_state::{ColumnFetchState, ParallelTableScanState, TableScanState};
@@ -69,6 +71,8 @@ use std::sync::{
 pub struct ClientContext {
     /// 当前事务的本地写入缓冲区（C++: 通过 `LocalStorage::Get(context, db)` 访问）。
     pub local_storage: LocalStorage,
+    pub transaction: Option<Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle>>,
+    pub transaction_data: TransactionData,
 }
 
 /// 列定义（C++: `ColumnDefinition`）。
@@ -134,11 +138,7 @@ pub struct LegacyTableAppendState {
     pub current_row: i64,
 }
 
-/// 表删除状态（C++: `TableDeleteState`）。
-pub struct TableDeleteState;
-
-/// 表更新状态（C++: `TableUpdateState`）。
-pub struct TableUpdateState;
+pub use crate::storage::table::update_state::TableUpdateState;
 
 // ConstraintState 现在从 storage::table::append_state 导入，此处不再重复定义。
 
@@ -920,18 +920,76 @@ impl DataTable {
         // C++: info->BindIndexes(context);
         //      result->has_delete_constraints = TableHasDeleteConstraints(table);
         //      if (has_delete_constraints) { /* initialise verify_chunk and constraint_state */ }
-        Box::new(TableDeleteState)
+        Box::new(TableDeleteState::new())
     }
 
     /// 删除行（C++: `Delete()`）。
     ///
     /// Full implementation requires row_id vectors and the MVCC delete path;
     /// returns 0 until RowGroupCollection::delete is implemented.
-    pub fn delete(&self, _state: &mut TableDeleteState, _count: Idx) -> Idx {
-        // C++: splits row_identifiers into transaction-local (id >= MAX_ROW_ID) vs global batches,
-        //      calls local_storage.Delete or row_groups->Delete accordingly.
-        // RowGroupCollection::delete is not yet implemented.
-        0
+    pub fn delete(
+        &self,
+        _state: &mut TableDeleteState,
+        context: &ClientContext,
+        row_identifiers: &mut Vector,
+        count: Idx,
+    ) -> StorageResult<Idx> {
+        if count == 0 {
+            return Ok(0);
+        }
+        if !self.is_main_table() {
+            return Err(StorageError::Corrupt {
+                msg: format!(
+                    "Transaction conflict: attempting to delete from table \"{}\" but it has been {} by a different transaction",
+                    self.get_table_name(),
+                    self.table_modification(),
+                ),
+            });
+        }
+
+        row_identifiers.flatten(count as usize);
+        let flat_row_ids = extract_row_ids(row_identifiers, count as usize)?;
+
+        let mut pos = 0usize;
+        let mut delete_count = 0;
+        while pos < count as usize {
+            let start = pos;
+            let is_transaction_delete = flat_row_ids[pos] >= MAX_ROW_ID;
+            pos += 1;
+            while pos < count as usize {
+                if (flat_row_ids[pos] >= MAX_ROW_ID) != is_transaction_delete {
+                    break;
+                }
+                pos += 1;
+            }
+
+            let current_count = (pos - start) as Idx;
+            let mut offset_ids = flat_row_ids[start..pos].to_vec();
+
+            if is_transaction_delete {
+                delete_count += context.local_storage.delete(
+                    self.info.table_id(),
+                    &mut offset_ids,
+                    current_count,
+                    TransactionData {
+                        start_time: 0,
+                        transaction_id: 0,
+                    },
+                );
+            } else {
+                if let Some(txn) = &context.transaction {
+                    txn.lock_inner().modify_table(self.info.table_id());
+                }
+                delete_count += self.row_groups.delete(
+                    context.transaction.as_ref(),
+                    context.transaction_data,
+                    Some(self),
+                    &mut offset_ids,
+                    current_count,
+                );
+            }
+        }
+        Ok(delete_count)
     }
 
     // ── Update ───────────────────────────────────────────────────────────────
@@ -951,13 +1009,25 @@ impl DataTable {
         }
         // C++: info->BindIndexes(context);
         //      result->constraint_state = InitializeConstraintState(table, bound_constraints);
-        Ok(Box::new(TableUpdateState))
+        Ok(Box::new(TableUpdateState::new()))
     }
 
     /// 更新行（C++: `Update()`）。
     ///
-    /// Full implementation requires RowGroupCollection::update and constraint verification.
-    pub fn update(&self, _state: &mut TableUpdateState) -> StorageResult<()> {
+    /// Current implementation supports in-place updates on transient segments only.
+    ///
+    /// Parameters mirror DuckDB C++:
+    /// - `row_ids`: row identifiers (we treat them as 0-based physical row numbers)
+    /// - `column_ids`: physical column indexes to update
+    /// - `updates`: a DataChunk with one column per `column_ids`, and `updates.size() == row_ids.len()`
+    pub fn update(
+        &self,
+        _state: &mut TableUpdateState,
+        context: &ClientContext,
+        row_ids: &mut Vector,
+        column_ids: &[PhysicalIndex],
+        updates: &mut DataChunk,
+    ) -> StorageResult<()> {
         if !self.is_main_table() {
             return Err(StorageError::Corrupt {
                 msg: format!(
@@ -967,9 +1037,70 @@ impl DataTable {
                 ),
             });
         }
-        // C++: VerifyUpdateConstraints(*state.constraint_state, context, updates, column_ids);
-        //      row_groups->Update(transaction, *this, row_ids, column_ids, updates_slice);
-        // RowGroupCollection::update is not yet implemented.
+        updates.flatten();
+        row_ids.flatten(updates.size());
+
+        let flat_row_ids = extract_row_ids(row_ids, updates.size())?;
+        if flat_row_ids.is_empty() || updates.size() == 0 {
+            return Ok(());
+        }
+        if updates.size() != flat_row_ids.len() {
+            return Err(StorageError::Other(format!(
+                "DataTable::update: updates.size()={} must equal row_ids.len()={}",
+                updates.size(),
+                flat_row_ids.len()
+            )));
+        }
+        if updates.column_count() != column_ids.len() {
+            return Err(StorageError::Other(format!(
+                "DataTable::update: updates.column_count()={} must equal column_ids.len()={}",
+                updates.column_count(),
+                column_ids.len()
+            )));
+        }
+
+        let mut local_sel = crate::common::types::SelectionVector::default();
+        let mut global_sel = crate::common::types::SelectionVector::default();
+        for (idx, row_id) in flat_row_ids.iter().copied().enumerate() {
+            if row_id >= MAX_ROW_ID {
+                local_sel.indices.push(idx as u32);
+            } else {
+                global_sel.indices.push(idx as u32);
+            }
+        }
+
+        if !local_sel.indices.is_empty() {
+            let row_ids_slice = slice_row_ids(&flat_row_ids, &local_sel);
+            let updates_slice = slice_updates(updates, &local_sel.indices)?;
+            context.local_storage.update(
+                self.info.table_id(),
+                &row_ids_slice,
+                column_ids,
+                &updates_slice,
+                TransactionData {
+                    start_time: 0,
+                    transaction_id: 0,
+                },
+            );
+        }
+
+        if !global_sel.indices.is_empty() {
+            if let Some(txn) = &context.transaction {
+                txn.lock_inner().modify_table(self.info.table_id());
+            }
+
+            let row_ids_slice = slice_row_ids(&flat_row_ids, &global_sel);
+            let updates_slice = slice_updates(updates, &global_sel.indices)?;
+            self.row_groups
+                .update(
+                    context.transaction.as_ref(),
+                    context.transaction_data,
+                    Some(self),
+                    &row_ids_slice,
+                    column_ids,
+                    &updates_slice,
+                )?;
+        }
         Ok(())
     }
 
@@ -1346,6 +1477,48 @@ fn serialize_insert_chunk_payload(chunk: &DataChunk) -> Vec<u8> {
         out.extend_from_slice(&column.raw_data()[..byte_len as usize]);
     }
     out
+}
+
+fn extract_row_ids(row_ids: &Vector, count: usize) -> StorageResult<Vec<RowId>> {
+    let raw = row_ids.raw_data();
+    if raw.len() < count * 8 {
+        return Err(StorageError::Other(format!(
+            "DataTable::update: row_ids buffer too small ({} < {})",
+            raw.len(),
+            count * 8
+        )));
+    }
+    let mut result = Vec::with_capacity(count);
+    for i in 0..count {
+        let base = i * 8;
+        result.push(i64::from_le_bytes(
+            raw[base..base + 8]
+                .try_into()
+                .expect("row id bytes must be 8 bytes"),
+        ));
+    }
+    Ok(result)
+}
+
+fn slice_updates(updates: &DataChunk, indices: &[u32]) -> StorageResult<DataChunk> {
+    let mut out = DataChunk::new();
+    let types: Vec<LogicalType> = updates.data.iter().map(|v| v.logical_type.clone()).collect();
+    out.initialize(&types, indices.len());
+    let sel = crate::common::types::SelectionVector {
+        indices: indices.to_vec(),
+    };
+    for (dst, src) in out.data.iter_mut().zip(updates.data.iter()) {
+        dst.copy_from_sel(src, &sel, indices.len(), 0);
+    }
+    out.set_cardinality(indices.len());
+    Ok(out)
+}
+
+fn slice_row_ids(row_ids: &[RowId], sel: &crate::common::types::SelectionVector) -> Vec<RowId> {
+    sel.indices
+        .iter()
+        .map(|&idx| row_ids[idx as usize])
+        .collect()
 }
 
 fn serialize_row_group_data_payload(

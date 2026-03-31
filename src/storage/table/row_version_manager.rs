@@ -6,6 +6,9 @@
 //! tracking which rows were inserted/deleted by which transaction.
 
 use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
 
 use super::chunk_info::{ChunkConstantInfo, ChunkInfo, ChunkVectorInfo, SelectionVector};
 use super::types::{
@@ -31,6 +34,7 @@ use super::types::{
 /// | `vector<MetaBlockPointer> storage_pointers` | `inner.storage_pointers` |
 pub struct RowVersionManager {
     inner: Mutex<RvmInner>,
+    pub version_info_id: u64,
 }
 
 struct RvmInner {
@@ -38,6 +42,13 @@ struct RvmInner {
     vector_info: Vec<Option<ChunkInfo>>,
     has_unserialized_changes: bool,
     storage_pointers: Vec<MetaBlockPointer>,
+}
+
+static NEXT_VERSION_INFO_ID: AtomicU64 = AtomicU64::new(1);
+static VERSION_INFO_REGISTRY: OnceLock<Mutex<HashMap<u64, Weak<RowVersionManager>>>> = OnceLock::new();
+
+fn version_info_registry() -> &'static Mutex<HashMap<u64, Weak<RowVersionManager>>> {
+    VERSION_INFO_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 impl RowVersionManager {
@@ -48,7 +59,21 @@ impl RowVersionManager {
                 has_unserialized_changes: false,
                 storage_pointers: Vec::new(),
             }),
+            version_info_id: NEXT_VERSION_INFO_ID.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    pub fn register(this: &Arc<Self>) {
+        version_info_registry()
+            .lock()
+            .insert(this.version_info_id, Arc::downgrade(this));
+    }
+
+    pub fn lookup(version_info_id: u64) -> Option<Arc<Self>> {
+        version_info_registry()
+            .lock()
+            .get(&version_info_id)
+            .and_then(Weak::upgrade)
     }
 
     // ── Query ─────────────────────────────────────────────────
@@ -333,6 +358,21 @@ impl RowVersionManager {
         }
     }
 
+    pub fn rollback_delete(&self, info: &crate::transaction::delete_info::DeleteInfo) {
+        self.update_delete_ids(info, super::types::NOT_DELETED_ID);
+    }
+
+    pub fn commit_delete(&self, info: &crate::transaction::delete_info::DeleteInfo, commit_id: TransactionId) {
+        self.update_delete_ids(info, commit_id);
+    }
+
+    pub fn cleanup_delete(
+        &self,
+        _info: &crate::transaction::delete_info::DeleteInfo,
+        _lowest_active_transaction: TransactionId,
+    ) {
+    }
+
     // ── Persistence ───────────────────────────────────────────
 
     /// Serialise to metadata blocks; returns written block pointers.
@@ -368,10 +408,43 @@ impl RowVersionManager {
         }
         inner.vector_info[idx].as_mut().unwrap()
     }
+
+    fn update_delete_ids(
+        &self,
+        info: &crate::transaction::delete_info::DeleteInfo,
+        delete_id: TransactionId,
+    ) {
+        let mut inner = self.inner.lock();
+        let Some(entry) = inner
+            .vector_info
+            .get_mut(info.vector_idx as usize)
+            .and_then(|entry| entry.as_mut())
+        else {
+            return;
+        };
+        match entry {
+            ChunkInfo::Constant(constant) => {
+                constant.delete_id = delete_id;
+            }
+            ChunkInfo::Vector(vector) => {
+                if info.is_consecutive {
+                    vector.set_consecutive_deleted(info.count as usize, delete_id);
+                } else if let Some(rows) = &info.rows {
+                    vector.set_deleted_rows(rows, delete_id);
+                }
+            }
+        }
+    }
 }
 
 impl Default for RowVersionManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for RowVersionManager {
+    fn drop(&mut self) {
+        version_info_registry().lock().remove(&self.version_info_id);
     }
 }

@@ -202,6 +202,16 @@ impl UpdateInfo {
         }
     }
 
+    pub fn deserialize_auto(bytes: &[u8]) -> Self {
+        assert!(bytes.len() >= 84, "UpdateInfo payload too short");
+        let n = u16::from_le_bytes(bytes[80..82].try_into().unwrap()) as usize;
+        let fixed_size = 84usize;
+        let tuples_size = n * 4;
+        let values_size = bytes.len().saturating_sub(fixed_size + tuples_size);
+        let value_type_size = if n == 0 { 0 } else { values_size / n };
+        Self::deserialize(bytes, value_type_size)
+    }
+
     /// 序列化到 UndoBuffer 载荷字节。
     pub fn serialize(&self, out: &mut [u8]) {
         let fixed_size = 8 + 8 + 8 + 8 + 8 + 8 + 8 + 4 + 2 + 2;

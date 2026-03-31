@@ -39,6 +39,7 @@ use super::transaction::Transaction;
 use super::types::{
     ActiveTransactionState, Idx, MAXIMUM_QUERY_ID, NOT_DELETED_ID, TransactionId, UndoFlags,
 };
+use super::update_info::UpdateInfo;
 use super::undo_buffer::{CommitInfo, IteratorState, UndoBuffer, UndoBufferProperties};
 use crate::storage::local_storage::LocalStorage;
 use crate::storage::storage_lock::{StorageLock, StorageLockKey};
@@ -405,6 +406,24 @@ impl DuckTransaction {
         //   table_id, transaction_id=self.transaction_id, row_group_start
         let _ = (table_id, entries, row_group_start);
         entry_ref
+    }
+
+    pub fn push_update_payload(&mut self, payload: Vec<u8>) {
+        self.modify_table(u64::from_le_bytes(
+            payload[8..16]
+                .try_into()
+                .expect("UpdateInfo payload must include table_id"),
+        ));
+        let entry_ref = self
+            .undo_buffer
+            .create_entry(UndoFlags::UpdateTuple, payload.len());
+        self.undo_buffer.write_payload(
+            entry_ref
+                .slab_index
+                .expect("Update undo entry must have a slab index"),
+            entry_ref.position,
+            &payload,
+        );
     }
 
     /// 记录序列使用（C++: `DuckTransaction::PushSequenceUsage()`）。

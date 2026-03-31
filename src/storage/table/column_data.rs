@@ -1164,7 +1164,7 @@ impl ColumnDataKind {
     /// - Only uncompressed transient segments are supported.
     pub fn scan(
         &self,
-        _transaction: TransactionData,
+        transaction: TransactionData,
         vector_index: Idx,
         state: &mut ColumnScanState,
         result: &mut Vector,
@@ -1173,8 +1173,19 @@ impl ColumnDataKind {
         let target_count = self.ctx.get_vector_count(vector_index);
         // Determine scan type based on whether we need to scan across segments
         let scan_type = self.ctx.get_vector_scan_type(state, target_count);
-        self.ctx
-            .scan_vector(state, result, target_count, scan_type, 0)
+        let scanned = self
+            .ctx
+            .scan_vector(state, result, target_count, scan_type, 0);
+        if scanned > 0 {
+            if let Some(update_segment) = self.ctx.updates.lock().as_ref() {
+                update_segment.fetch_updates(
+                    transaction,
+                    vector_index,
+                    &mut result.raw_data_mut()[..(scanned as usize * self.ctx.logical_type.physical_size())],
+                );
+            }
+        }
+        scanned
     }
 
     /// Advance the scan cursor by one vector without producing output.
@@ -1190,6 +1201,54 @@ impl ColumnDataKind {
     /// Merge segment stats into the row-group-level `TableStatistics`.
     pub fn merge_into_statistics(&self, stats: &TableStatistics) {
         self.ctx.merge_into_statistics(stats);
+    }
+
+    // ── Update (in-place, transient only) ─────────────────────────────────────
+    /// In-place update of a single row for **transient/uncompressed** segments.
+    ///
+    /// This is a simplified stand-in for DuckDB's MVCC UpdateSegment mechanism.
+    /// It is sufficient to support `UPDATE` on in-memory tables and on unflushed
+    /// transaction-local storage.
+    pub fn update_in_place_transient(
+        &self,
+        row_in_column: Idx,
+        value_bytes: &[u8],
+    ) -> crate::storage::storage_info::StorageResult<()> {
+        use crate::storage::storage_info::StorageError;
+        use crate::storage::table::column_segment::ColumnSegmentType;
+
+        let mut wrote = false;
+        self.ctx.for_each_segment(|segment, seg_row_start| {
+            if wrote {
+                return;
+            }
+            let seg_count = segment.count();
+            if row_in_column < seg_row_start || row_in_column >= seg_row_start + seg_count {
+                return;
+            }
+            if segment.segment_type != ColumnSegmentType::Transient {
+                // Persistent updates require MVCC + block manager rewrite logic.
+                return;
+            }
+            let type_size = segment.type_size as usize;
+            if type_size == 0 || value_bytes.len() != type_size {
+                return;
+            }
+            let offset_in_seg = (row_in_column - seg_row_start) as usize;
+            let byte_off = offset_in_seg * type_size;
+            let mut buf = segment.buffer.lock();
+            if byte_off + type_size <= buf.len() {
+                buf[byte_off..byte_off + type_size].copy_from_slice(value_bytes);
+                wrote = true;
+            }
+        });
+
+        if !wrote {
+            return Err(StorageError::Other(
+                "update_in_place_transient: row not found or non-transient segment".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 

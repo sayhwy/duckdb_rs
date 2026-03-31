@@ -18,6 +18,7 @@
 use super::append_info::AppendInfo;
 use super::commit_state::{IndexDataRemover, IndexRemovalType};
 use super::delete_info::DeleteInfo;
+use super::update_info::UpdateInfo;
 use super::types::{ActiveTransactionState, TransactionId, UndoFlags};
 
 // ─── CleanupState ──────────────────────────────────────────────────────────────
@@ -73,6 +74,11 @@ impl CleanupState {
 
     fn cleanup_delete(&mut self, payload: &[u8]) {
         let info = DeleteInfo::deserialize(payload);
+        if let Some(version_info) =
+            crate::storage::table::row_version_manager::RowVersionManager::lookup(info.version_info_id)
+        {
+            version_info.cleanup_delete(&info, self.lowest_active_transaction);
+        }
 
         // 若没有其他活跃事务，不需要特殊清理
         if self.transaction_state == ActiveTransactionState::NoActiveTransactions {
@@ -86,12 +92,11 @@ impl CleanupState {
         let _ = info;
     }
 
-    fn cleanup_update(&mut self, _payload: &[u8]) {
-        // 在完整实现中：
-        // 1. 反序列化 UpdateInfo
-        // 2. 若所有活跃事务的 start_time > commit_id（版本不可见）
-        // 3. 从版本链中解链并将 version_number 设为 NOT_DELETED_ID
-        // 当前简化实现跳过
+    fn cleanup_update(&mut self, payload: &[u8]) {
+        let info = UpdateInfo::deserialize_auto(payload);
+        if let Some(segment) = crate::storage::table::update_segment::UpdateSegment::lookup(info.segment_id) {
+            segment.cleanup_update(&info);
+        }
     }
 
     fn cleanup_append(&mut self, payload: &[u8]) {

@@ -650,20 +650,170 @@ impl RowGroupCollection {
 
     // ── Delete ────────────────────────────────────────────────
 
-    pub fn delete(&self, transaction: TransactionData, ids: &mut [RowId], count: Idx) -> Idx {
-        todo!("group row ids by row group, call row_group.delete on each")
+    pub fn delete(
+        &self,
+        transaction_handle: Option<&Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle>>,
+        transaction: TransactionData,
+        table: Option<&crate::storage::data_table::DataTable>,
+        ids: &mut [RowId],
+        count: Idx,
+    ) -> Idx {
+        if count == 0 {
+            return 0;
+        }
+        let tree = self.get_row_groups();
+        let lock = tree.lock();
+        let mut pos = 0usize;
+        let mut delete_count = 0;
+
+        while pos < count as usize {
+            let row_id = ids[pos] as Idx;
+            let Some(node) = lock.0.iter().find(|node| {
+                let start = node.row_start();
+                let end = start + node.node().count();
+                row_id >= start && row_id < end
+            }) else {
+                break;
+            };
+
+            let row_group = node.arc();
+            let row_start = node.row_start();
+            let row_end = row_start + node.node().count();
+
+            let start = pos;
+            pos += 1;
+            while pos < count as usize {
+                let current_row = ids[pos] as Idx;
+                if current_row < row_start || current_row >= row_end {
+                    break;
+                }
+                pos += 1;
+            }
+
+            delete_count += row_group.delete(
+                transaction_handle,
+                transaction,
+                table,
+                &mut ids[start..pos],
+                (pos - start) as Idx,
+                row_start,
+            );
+        }
+        delete_count
     }
 
     // ── Update ────────────────────────────────────────────────
 
     pub fn update(
         &self,
+        transaction_handle: Option<&Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle>>,
         transaction: TransactionData,
+        table: Option<&crate::storage::data_table::DataTable>,
         ids: &[RowId],
-        column_ids: &[u64],
+        column_ids: &[crate::catalog::PhysicalIndex],
         updates: &crate::common::types::DataChunk,
-    ) {
-        todo!("group ids by row group, call row_group.update")
+    ) -> crate::storage::storage_info::StorageResult<()> {
+        if ids.is_empty() || updates.size() == 0 {
+            return Ok(());
+        }
+        debug_assert_eq!(ids.len(), updates.size(), "ids must match updates.size()");
+        debug_assert_eq!(
+            column_ids.len(),
+            updates.column_count(),
+            "column_ids must match updates.column_count()"
+        );
+
+        let tree = self.get_row_groups();
+        let lock = tree.lock();
+        let mut start = 0usize;
+        while start < ids.len() {
+            let row_id = ids[start];
+            let Some(node) = lock.0.iter().find(|node| {
+                let start = node.row_start();
+                let end = start + node.node().count();
+                row_id as Idx >= start && (row_id as Idx) < end
+            }) else {
+                return Err(crate::storage::storage_info::StorageError::Other(format!(
+                    "RowGroupCollection::update: row_id {} not found in any row group",
+                    row_id
+                )));
+            };
+            let rg = node.arc();
+            let rg_row_start = node.row_start();
+            let rg_row_end = rg_row_start + node.node().count();
+
+            let mut end = start + 1;
+            while end < ids.len() {
+                let next_row = ids[end] as Idx;
+                if next_row < rg_row_start || next_row >= rg_row_end {
+                    break;
+                }
+                end += 1;
+            }
+
+            let batch_count = end - start;
+            let batch_sel = crate::common::types::SelectionVector {
+                indices: (start..end).map(|idx| idx as u32).collect(),
+            };
+            let batch_row_ids = &ids[start..end];
+
+            for (u_col_idx, &col_id) in column_ids.iter().enumerate() {
+                let col_usize = col_id.0;
+                let col = rg.get_column(col_usize);
+                let type_size = col.ctx.logical_type.physical_size() as usize;
+                if type_size == 0 {
+                    return Err(crate::storage::storage_info::StorageError::Other(format!(
+                        "RowGroupCollection::update: unsupported variable-width update on column {}",
+                        col_usize
+                    )));
+                }
+
+                let mut update_vector = crate::common::types::Vector::with_capacity(
+                    updates.data[u_col_idx].logical_type.clone(),
+                    batch_count,
+                );
+                update_vector.copy_from_sel(&updates.data[u_col_idx], &batch_sel, batch_count, 0);
+                update_vector.flatten(batch_count);
+
+                if col.ctx.is_persistent() {
+                    let table = table.ok_or_else(|| {
+                        crate::storage::storage_info::StorageError::Other(
+                            "RowGroupCollection::update: persistent updates require table metadata".to_string(),
+                        )
+                    })?;
+                    let update_segment = {
+                        let _update_lock = col.ctx.update_lock.lock();
+                        let mut updates_guard = col.ctx.updates.lock();
+                        Arc::clone(updates_guard.get_or_insert_with(|| {
+                            let segment =
+                                Arc::new(super::update_segment::UpdateSegment::new(type_size as Idx));
+                            super::update_segment::UpdateSegment::register(&segment);
+                            segment
+                        }))
+                    };
+                    update_segment.update(
+                        transaction_handle,
+                        transaction,
+                        table,
+                        col_usize as Idx,
+                        &update_vector,
+                        batch_row_ids,
+                        batch_count,
+                        rg.row_start(),
+                    )?;
+                } else {
+                    let raw = update_vector.raw_data();
+                    for (row_idx, &row_id) in batch_row_ids.iter().enumerate() {
+                        let local_row = row_id as Idx - rg.row_start();
+                        let off = row_idx * type_size;
+                        col.update_in_place_transient(local_row, &raw[off..off + type_size])?;
+                    }
+                }
+            }
+
+            start = end;
+        }
+        Ok(())
     }
 
     // ── Checkpoint ───────────────────────────────────────────

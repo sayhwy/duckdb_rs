@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::Mutex;
 
 use crate::catalog::TableCatalogEntry;
+use crate::catalog::PhysicalIndex;
 use crate::common::types::{DataChunk, LogicalType, STANDARD_VECTOR_SIZE};
 use crate::storage::data_table::DataTable;
 use crate::storage::storage_manager::StorageManager;
@@ -523,6 +524,134 @@ impl Connection {
         &self,
     ) -> &Arc<crate::storage::storage_manager::SingleFileStorageManager> {
         &self.db.storage_manager
+    }
+
+    /// 更新表中指定行（简化版 UPDATE）。
+    ///
+    /// - `row_ids`: 0-based 物理行号数组（长度必须等于 `updates.size()`）
+    /// - `column_ids`: 需要更新的列 id（物理列序号，长度必须等于 `updates.column_count()`）
+    /// - `updates`: 每一行对应 row_ids 的新值（只包含 column_ids 对应的列）
+    ///
+    /// 当前仅支持更新 **内存/未落盘**（transient）段；对持久化段需要 MVCC/Undo 支持后再补齐。
+    pub fn update_chunk(
+        &self,
+        table_name: &str,
+        row_ids: &[i64],
+        column_ids: &[u64],
+        updates: &mut DataChunk,
+    ) -> Result<(), String> {
+        let tables = self.db.tables.lock();
+        let table = tables
+            .get(&table_name.to_ascii_lowercase())
+            .ok_or_else(|| format!("Table '{}' not found", table_name))?
+            .clone();
+        drop(tables);
+
+        // Auto-commit behavior matches insert_chunk.
+        let auto_commit = self.is_auto_commit();
+        if auto_commit && !self.has_active_transaction() {
+            self.begin_transaction().map_err(|e| e.to_string())?;
+        }
+
+        // Get write transaction
+        let context_guard = self.context.lock();
+        let txn = context_guard.transaction.get_or_create_write_transaction();
+
+        let txn_data = txn.transaction_data();
+        let storage_txn_data = crate::storage::table::types::TransactionData {
+            start_time: txn_data.start_time,
+            transaction_id: txn_data.transaction_id,
+        };
+        let mut storage_context = crate::storage::data_table::ClientContext {
+            local_storage: crate::storage::local_storage::LocalStorage::new(),
+            transaction: Some(txn.clone()),
+            transaction_data: storage_txn_data,
+        };
+        let mut row_id_vector = crate::common::types::Vector::with_capacity(
+            crate::common::types::LogicalType::bigint(),
+            row_ids.len(),
+        );
+        for (idx, row_id) in row_ids.iter().copied().enumerate() {
+            let base = idx * 8;
+            row_id_vector.raw_data_mut()[base..base + 8].copy_from_slice(&row_id.to_le_bytes());
+        }
+        let physical_column_ids: Vec<PhysicalIndex> = column_ids
+            .iter()
+            .copied()
+            .map(|idx| PhysicalIndex(idx as usize))
+            .collect();
+
+        let mut state = crate::storage::table::update_state::TableUpdateState::new();
+        table
+            .storage
+            .update(
+                &mut state,
+                &storage_context,
+                &mut row_id_vector,
+                &physical_column_ids,
+                updates,
+            )
+            .map_err(|e| format!("Update failed: {:?}", e))?;
+
+        drop(context_guard);
+        drop(txn);
+
+        if auto_commit {
+            let context_guard = self.context.lock();
+            context_guard.commit().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_chunk(&self, table_name: &str, row_ids: &[i64]) -> Result<usize, String> {
+        let tables = self.db.tables.lock();
+        let table = tables
+            .get(&table_name.to_ascii_lowercase())
+            .ok_or_else(|| format!("Table '{}' not found", table_name))?
+            .clone();
+        drop(tables);
+
+        let auto_commit = self.is_auto_commit();
+        if auto_commit && !self.has_active_transaction() {
+            self.begin_transaction().map_err(|e| e.to_string())?;
+        }
+
+        let context_guard = self.context.lock();
+        let txn = context_guard.transaction.get_or_create_write_transaction();
+
+        let txn_data = txn.transaction_data();
+        let storage_txn_data = crate::storage::table::types::TransactionData {
+            start_time: txn_data.start_time,
+            transaction_id: txn_data.transaction_id,
+        };
+        let storage_context = crate::storage::data_table::ClientContext {
+            local_storage: crate::storage::local_storage::LocalStorage::new(),
+            transaction: Some(txn.clone()),
+            transaction_data: storage_txn_data,
+        };
+        let mut row_id_vector = crate::common::types::Vector::with_capacity(
+            crate::common::types::LogicalType::bigint(),
+            row_ids.len(),
+        );
+        for (idx, row_id) in row_ids.iter().copied().enumerate() {
+            let base = idx * 8;
+            row_id_vector.raw_data_mut()[base..base + 8].copy_from_slice(&row_id.to_le_bytes());
+        }
+
+        let mut state = crate::storage::table::delete_state::TableDeleteState::new();
+        let deleted = table
+            .storage
+            .delete(&mut state, &storage_context, &mut row_id_vector, row_ids.len() as u64)
+            .map_err(|e| format!("Delete failed: {:?}", e))?;
+
+        drop(context_guard);
+        drop(txn);
+
+        if auto_commit {
+            let context_guard = self.context.lock();
+            context_guard.commit().map_err(|e| e.to_string())?;
+        }
+        Ok(deleted as usize)
     }
 }
 
