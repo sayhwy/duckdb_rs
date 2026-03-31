@@ -1,25 +1,25 @@
-// ============================================================
-// checkpoint_manager.rs — Checkpoint 管理器
-// 对应 C++: duckdb/storage/checkpoint_manager.hpp/.cpp
+﻿// ============================================================
+// checkpoint_manager.rs 鈥?Checkpoint 绠＄悊鍣?
+// 瀵瑰簲 C++: duckdb/storage/checkpoint_manager.hpp/.cpp
 // ============================================================
 //
-// Checkpoint 流程：
-// 1. 创建 MetadataWriter 用于写入 catalog
-// 2. 遍历所有 catalog entries（schema, table, view 等）
-// 3. 对每个表，写入表数据和表元数据
-// 4. 序列化 catalog 到 metadata
-// 5. 更新 DatabaseHeader 的 meta_block 指针
+// Checkpoint 娴佺▼锛?
+// 1. 鍒涘缓 MetadataWriter 鐢ㄤ簬鍐欏叆 catalog
+// 2. 閬嶅巻鎵€鏈?catalog entries锛坰chema, table, view 绛夛級
+// 3. 瀵规瘡涓〃锛屽啓鍏ヨ〃鏁版嵁鍜岃〃鍏冩暟鎹?
+// 4. 搴忓垪鍖?catalog 鍒?metadata
+// 5. 鏇存柊 DatabaseHeader 鐨?meta_block 鎸囬拡
 
 use std::sync::Arc;
 
-use crate::catalog::TableCatalogEntry;
+use crate::catalog::{ColumnDefinition, LogicalType, TableCatalogEntry};
 use crate::common::types::LogicalTypeId;
+use crate::common::serializer::BinarySerializer;
 use crate::storage::buffer::BlockManager;
-use crate::storage::checkpoint::binary_serializer::BinarySerializer;
-use crate::storage::checkpoint::catalog_serializer;
 use crate::storage::data_table::DataTable;
 use crate::storage::metadata::WriteStream;
 use crate::storage::metadata::{MetaBlockPointer, MetadataManager, MetadataWriter};
+use crate::storage::serialization as storage_serialization;
 use crate::storage::storage_info::{DatabaseHeader, INVALID_BLOCK, StorageResult};
 use crate::storage::table::column_data::ColumnData;
 use crate::storage::table::column_segment::ColumnSegmentType;
@@ -27,13 +27,13 @@ use crate::storage::table::row_group::RowGroupPointer;
 use crate::storage::table::segment_base::SegmentBase;
 use crate::storage::table::types::{CompressionType, Idx, STANDARD_VECTOR_SIZE};
 
-/// Checkpoint 管理器
+/// Checkpoint 绠＄悊鍣?
 pub struct CheckpointManager {
     block_manager: Arc<dyn BlockManager>,
     metadata_manager: Arc<MetadataManager>,
 }
 
-/// 表信息
+/// 琛ㄤ俊鎭?
 pub struct TableInfo {
     pub entry: Arc<TableCatalogEntry>,
     pub storage: Arc<DataTable>,
@@ -50,9 +50,9 @@ impl CheckpointManager {
         }
     }
 
-    /// 创建 checkpoint
+    /// 鍒涘缓 checkpoint
     ///
-    /// 返回新的 DatabaseHeader
+    /// 杩斿洖鏂扮殑 DatabaseHeader
     pub fn create_checkpoint(&self, tables: &[TableInfo]) -> DatabaseHeader {
         self.create_checkpoint_with_meta(tables, |_| Ok(()))
             .expect("checkpoint creation without WAL hook should not fail")
@@ -85,7 +85,7 @@ impl CheckpointManager {
         }
 
         // 4. ??? catalog
-        catalog_serializer::write_catalog(&mut metadata_writer, &table_data);
+        write_catalog(&mut metadata_writer, &table_data);
 
         // 5. Flush metadata writers
         metadata_writer.flush();
@@ -108,7 +108,7 @@ impl CheckpointManager {
         Ok(header)
     }
 
-    /// 写入表数据
+    /// 鍐欏叆琛ㄦ暟鎹?
     fn write_table_data(
         &self,
         writer: &mut MetadataWriter<'_>,
@@ -134,7 +134,7 @@ impl CheckpointManager {
         let table_pointer = writer.get_meta_block_pointer();
 
         // Step 3: Write TableStatistics
-        write_minimal_table_statistics(writer, table.columns(), total_rows);
+        storage_serialization::write_minimal_table_statistics(writer, table.columns(), total_rows);
 
         // Step 4: Write row_group_count (uint64)
         writer.write_u64(row_group_pointers.len() as u64);
@@ -143,7 +143,7 @@ impl CheckpointManager {
         for pointer in row_group_pointers.iter() {
             let mut serializer = BinarySerializer::new(writer as &mut dyn WriteStream);
             serializer.begin_root_object();
-            write_row_group_pointer(&mut serializer, pointer);
+            storage_serialization::write_row_group_pointer(&mut serializer, pointer);
             serializer.end_object();
         }
 
@@ -190,14 +190,14 @@ impl CheckpointManager {
         for data_pointer in &data_pointers {
             serializer.list_write_object(|s| {
                 if col_type.id == LogicalTypeId::Varchar {
-                    write_data_pointer_varchar(
+                    storage_serialization::write_data_pointer_varchar(
                         s,
                         data_pointer.tuple_count,
                         data_pointer.block_id,
                         data_pointer.offset,
                     );
                 } else {
-                    write_data_pointer(
+                    storage_serialization::write_data_pointer(
                         s,
                         data_pointer.tuple_count,
                         data_pointer.block_id,
@@ -274,18 +274,18 @@ impl CheckpointManager {
                     let is_varchar = segment.logical_type.id == LogicalTypeId::Varchar;
 
                     if is_varchar {
-                        // VARCHAR 列使用字符串字典格式（对应 DuckDB UncompressedStringStorage）
+                        // VARCHAR 鍒椾娇鐢ㄥ瓧绗︿覆瀛楀吀鏍煎紡锛堝搴?DuckDB UncompressedStringStorage锛?
                         //
-                        // 块布局（匹配 UncompressedStringStorage 扫描逻辑）:
-                        //   [0..4]             uint32_t dict_size  （字符串数据字节总数）
-                        //   [4..8]             uint32_t dict_end   （默认=block_alloc_size）
-                        //   [8..8+n*4]         int32_t[n] offsets  （逐行累计长度）
-                        //   [..]                字符串数据（通过 dict_pos=dict_end-dict_offset 定位）
+                        // 鍧楀竷灞€锛堝尮閰?UncompressedStringStorage 鎵弿閫昏緫锛?
+                        //   [0..4]             uint32_t dict_size  锛堝瓧绗︿覆鏁版嵁瀛楄妭鎬绘暟锛?
+                        //   [4..8]             uint32_t dict_end   锛堥粯璁?block_alloc_size锛?
+                        //   [8..8+n*4]         int32_t[n] offsets  锛堥€愯绱闀垮害锛?
+                        //   [..]                瀛楃涓叉暟鎹紙閫氳繃 dict_pos=dict_end-dict_offset 瀹氫綅锛?
                         let block_alloc = self.block_manager.get_block_alloc_size() as usize;
                         let n = tuple_count as usize;
                         let buf = segment.buffer.lock();
 
-                        // 从 string_t (16字节) 提取字符串内容
+                        // 浠?string_t (16瀛楄妭) 鎻愬彇瀛楃涓插唴瀹?
                         let mut str_data: Vec<Vec<u8>> = Vec::with_capacity(n);
                         for i in 0..n {
                             let base = i * 16;
@@ -296,7 +296,7 @@ impl CheckpointManager {
                                 let bytes = buf[base + 4..base + 4 + len].to_vec();
                                 str_data.push(bytes);
                             } else {
-                                // 超出 inline 长度，暂不支持，写入空串
+                                // 瓒呭嚭 inline 闀垮害锛屾殏涓嶆敮鎸侊紝鍐欏叆绌轰覆
                                 str_data.push(Vec::new());
                             }
                         }
@@ -321,7 +321,7 @@ impl CheckpointManager {
                         // dict_end points to the end of the dictionary region.
                         payload[4..8].copy_from_slice(&(dict_end as u32).to_le_bytes());
 
-                        // 写入累计偏移量
+                        // 鍐欏叆绱鍋忕Щ閲?
                         let mut cumulative = 0u32;
                         for (i, s) in str_data.iter().enumerate() {
                             cumulative += s.len() as u32;
@@ -422,197 +422,202 @@ fn write_data_pointer_with_compression(
     serializer.end_object();
 }
 
-fn write_minimal_table_statistics(
-    writer: &mut MetadataWriter<'_>,
-    columns: &[crate::storage::data_table::ColumnDefinition],
-    total_rows: Idx,
-) {
-    let mut serializer = BinarySerializer::new(writer as &mut dyn WriteStream);
 
-    // Field 100: column_stats (list of ColumnStatistics)
-    serializer.begin_list(100, columns.len());
-    for column in columns {
-        serializer.list_write_nullable_object(true, |s| {
-            // Field 100: BaseStatistics
-            s.write_field_id(100);
-            write_minimal_base_statistics(s, &column.logical_type, total_rows);
-            s.end_object();
-        });
+mod catalog_type {
+    pub const TABLE_ENTRY: u8 = 1;
+    pub const SCHEMA_ENTRY: u8 = 2;
+}
+
+mod logical_type_tag {
+    pub const BOOLEAN: u8 = 10;
+    pub const TINYINT: u8 = 11;
+    pub const SMALLINT: u8 = 12;
+    pub const INTEGER: u8 = 13;
+    pub const BIGINT: u8 = 14;
+    pub const DATE: u8 = 15;
+    pub const TIME: u8 = 16;
+    pub const TIMESTAMP: u8 = 19;
+    pub const DECIMAL: u8 = 21;
+    pub const FLOAT: u8 = 22;
+    pub const DOUBLE: u8 = 23;
+    pub const VARCHAR: u8 = 25;
+    pub const BLOB: u8 = 26;
+}
+
+mod table_column_type {
+    pub const STANDARD: u8 = 0;
+    pub const GENERATED: u8 = 1;
+}
+
+mod on_create_conflict {
+    pub const ERROR_ON_CONFLICT: u8 = 0;
+}
+
+fn write_catalog<W: WriteStream>(
+    stream: &mut W,
+    entries: &[(&TableCatalogEntry, Option<MetaBlockPointer>, u64)],
+) {
+    let mut serializer = BinarySerializer::new(stream);
+    let mut schemas: Vec<(String, String)> = Vec::new();
+    for (entry, _, _) in entries {
+        let schema_name = entry.base.parent_schema().to_string();
+        let catalog_name = entry.base.parent_catalog().to_string();
+        if !schemas.iter().any(|(schema, _)| schema == &schema_name) {
+            schemas.push((schema_name, catalog_name));
+        }
+    }
+
+    serializer.begin_list(100, schemas.len() + entries.len());
+    for (schema_name, catalog_name) in &schemas {
+        serializer.list_write_object(|s| write_schema_entry(s, catalog_name, schema_name));
+    }
+    for (entry, table_pointer, total_rows) in entries {
+        serializer.list_write_object(|s| write_catalog_entry(s, entry, *table_pointer, *total_rows));
     }
     serializer.end_list();
-
-    // Field 101: table_sample (optional BlockingSample)
-    serializer.write_nullable_field(101, false);
-
     serializer.end_object();
 }
 
-fn write_empty_distinct_statistics(
+fn write_schema_entry(
     serializer: &mut BinarySerializer<'_>,
-    logical_type: &crate::common::types::LogicalType,
+    catalog_name: &str,
+    schema_name: &str,
 ) {
-    match logical_type.id {
-        LogicalTypeId::Boolean
-        | LogicalTypeId::TinyInt
-        | LogicalTypeId::SmallInt
-        | LogicalTypeId::Integer
-        | LogicalTypeId::BigInt
-        | LogicalTypeId::Float
-        | LogicalTypeId::Double
-        | LogicalTypeId::Varchar => {
-            // ColumnStatistics::Serialize writes:
-            // - Field 101: distinct (DistinctStatistics, nullable)
-            // DistinctStatistics::Serialize writes:
-            // - Field 100: sample_count
-            // - Field 101: total_count
-            // - Field 102: log (HyperLogLog)
-            //
-            // For now, skip writing DistinctStatistics entirely.
-            // This will write null for the distinct_stats field.
-            // If needed, we can add proper HyperLogLog serialization later.
-        }
-        _ => {}
+    serializer.write_u8(99, catalog_type::SCHEMA_ENTRY);
+    serializer.begin_nullable_object(100);
+    write_create_schema_info(serializer, catalog_name, schema_name);
+    serializer.end_object();
+    serializer.end_nullable_object();
+}
+
+fn write_create_schema_info(
+    serializer: &mut BinarySerializer<'_>,
+    catalog_name: &str,
+    schema_name: &str,
+) {
+    serializer.begin_root_object();
+    serializer.write_u8(100, catalog_type::SCHEMA_ENTRY);
+    let _ = catalog_name;
+    if !schema_name.is_empty() {
+        serializer.write_string(102, schema_name);
+    }
+    serializer.write_u8(105, on_create_conflict::ERROR_ON_CONFLICT);
+}
+
+fn write_catalog_entry(
+    serializer: &mut BinarySerializer<'_>,
+    entry: &TableCatalogEntry,
+    table_pointer: Option<MetaBlockPointer>,
+    total_rows: u64,
+) {
+    serializer.write_u8(99, catalog_type::TABLE_ENTRY);
+    write_table(serializer, entry, table_pointer, total_rows);
+}
+
+fn write_table(
+    serializer: &mut BinarySerializer<'_>,
+    entry: &TableCatalogEntry,
+    table_pointer: Option<MetaBlockPointer>,
+    total_rows: u64,
+) {
+    serializer.begin_nullable_object(100);
+    write_create_table_info(serializer, entry);
+    serializer.end_object();
+    serializer.end_nullable_object();
+
+    if let Some(pointer) = table_pointer {
+        write_table_storage_info(serializer, pointer, total_rows);
     }
 }
 
-fn write_minimal_base_statistics(
-    serializer: &mut BinarySerializer<'_>,
-    logical_type: &crate::common::types::LogicalType,
-    total_rows: Idx,
-) {
-    serializer.write_bool(100, false);
-    serializer.write_bool(101, total_rows > 0);
-    serializer.write_varint(102, 0);
-    serializer.begin_object(103);
-    match logical_type.id {
-        LogicalTypeId::Boolean
-        | LogicalTypeId::TinyInt
-        | LogicalTypeId::SmallInt
-        | LogicalTypeId::Integer
-        | LogicalTypeId::BigInt
-        | LogicalTypeId::Float
-        | LogicalTypeId::Double
-        | LogicalTypeId::Date => {
-            serializer.begin_object(200);
-            serializer.write_bool(100, false);
-            serializer.end_object();
-            serializer.begin_object(201);
-            serializer.write_bool(100, false);
-            serializer.end_object();
-        }
-        LogicalTypeId::Varchar => {
-            // StringStats: min/max 均为 8 字节 blob（MAX_STRING_MINMAX_SIZE = 8）
-            serializer.write_bytes(200, &[0u8; 8]);   // min
-            serializer.write_bytes(201, &[0xFFu8; 8]); // max
-            serializer.write_bool(202, false);  // has_unicode
-            serializer.write_bool(203, true);   // has_max_string_length
-            serializer.write_varint(204, 0);    // max_string_length
-        }
-        _ => {}
+fn write_create_table_info(serializer: &mut BinarySerializer<'_>, entry: &TableCatalogEntry) {
+    serializer.begin_root_object();
+    serializer.write_u8(100, catalog_type::TABLE_ENTRY);
+
+    let catalog = entry.base.parent_catalog();
+    if !catalog.is_empty() {
+        serializer.write_string(101, catalog);
     }
+
+    let schema = entry.base.parent_schema();
+    if !schema.is_empty() {
+        serializer.write_string(102, schema);
+    }
+
+    serializer.write_u8(105, on_create_conflict::ERROR_ON_CONFLICT);
+    serializer.write_string(200, &entry.base.fields().name);
+
+    serializer.write_field_id(201);
+    write_column_list(serializer, &entry.columns);
     serializer.end_object();
 }
 
-fn write_row_group_pointer(serializer: &mut BinarySerializer<'_>, pointer: &RowGroupPointer) {
-    serializer.write_varint(100, pointer.row_start);
-    serializer.write_varint(101, pointer.tuple_count);
-    serializer.begin_list(102, pointer.column_pointers.len());
-    for column_pointer in &pointer.column_pointers {
-        // Write MetaBlockPointer - only write non-default fields
-        // WritePropertyWithDefault for idx_t/uint32_t only writes if non-zero
-        serializer.list_write_object(|s| {
-            if column_pointer.block_pointer != 0 {
-                s.write_varint(100, column_pointer.block_pointer);
-            }
-            if column_pointer.offset != 0 {
-                s.write_varint(101, column_pointer.offset as u64);
-            }
-        });
+fn write_column_list(
+    serializer: &mut BinarySerializer<'_>,
+    columns: &crate::catalog::ColumnList,
+) {
+    serializer.begin_list(100, columns.columns.len());
+    for column in &columns.columns {
+        serializer.list_write_object(|s| write_column_definition(s, column));
     }
     serializer.end_list();
+}
+
+fn write_column_definition(serializer: &mut BinarySerializer<'_>, column: &ColumnDefinition) {
+    serializer.write_string(100, &column.name);
+    serializer.write_field_id(101);
+    write_logical_type(serializer, &column.logical_type);
+    serializer.write_u8(
+        103,
+        if column.is_generated() {
+            table_column_type::GENERATED
+        } else {
+            table_column_type::STANDARD
+        },
+    );
+    serializer.write_u8(104, 0);
+}
+
+fn write_logical_type(serializer: &mut BinarySerializer<'_>, logical_type: &LogicalType) {
+    serializer.begin_root_object();
+    serializer.write_u8(100, logical_type_id_from(logical_type));
+    serializer.end_object();
+}
+
+fn logical_type_id_from(logical_type: &LogicalType) -> u8 {
+    use crate::catalog::LogicalTypeId;
+
+    match logical_type.id {
+        LogicalTypeId::Boolean => logical_type_tag::BOOLEAN,
+        LogicalTypeId::TinyInt => logical_type_tag::TINYINT,
+        LogicalTypeId::SmallInt => logical_type_tag::SMALLINT,
+        LogicalTypeId::Integer => logical_type_tag::INTEGER,
+        LogicalTypeId::BigInt => logical_type_tag::BIGINT,
+        LogicalTypeId::Float => logical_type_tag::FLOAT,
+        LogicalTypeId::Double => logical_type_tag::DOUBLE,
+        LogicalTypeId::Varchar => logical_type_tag::VARCHAR,
+        LogicalTypeId::Date => logical_type_tag::DATE,
+        LogicalTypeId::Time => logical_type_tag::TIME,
+        LogicalTypeId::Timestamp => logical_type_tag::TIMESTAMP,
+        LogicalTypeId::Blob => logical_type_tag::BLOB,
+        LogicalTypeId::Decimal => logical_type_tag::DECIMAL,
+        _ => 0,
+    }
+}
+
+fn write_table_storage_info(
+    serializer: &mut BinarySerializer<'_>,
+    table_pointer: MetaBlockPointer,
+    total_rows: u64,
+) {
+    serializer.write_field_id(101);
+    storage_serialization::write_meta_block_pointer(serializer, &table_pointer);
+    serializer.write_terminator();
+    serializer.write_varint(102, total_rows);
     serializer.begin_list(103, 0);
     serializer.end_list();
+    serializer.begin_list(104, 0);
+    serializer.end_list();
 }
 
-fn write_data_pointer(
-    serializer: &mut BinarySerializer<'_>,
-    tuple_count: Idx,
-    block_id: i64,
-    offset: u32,
-) {
-    serializer.write_varint(101, tuple_count);
-    serializer.begin_object(102);
-    serializer.write_signed_varint(100, block_id);
-    serializer.write_varint(101, offset as u64);
-    serializer.end_object();
-    serializer.write_u8(103, compression_tag(CompressionType::Uncompressed));
-    serializer.begin_object(104);
-    serializer.write_bool(100, false);
-    serializer.write_bool(101, true);
-    serializer.write_varint(102, 0);
-    serializer.begin_object(103);
-    serializer.begin_object(200);
-    serializer.write_bool(100, false);
-    serializer.end_object();
-    serializer.begin_object(201);
-    serializer.write_bool(100, false);
-    serializer.end_object();
-    serializer.end_object();
-    serializer.end_object();
-}
 
-/// VARCHAR 列的数据指针写入（使用 StringStats 格式代替 NumericStats）。
-///
-/// 对应 DuckDB `DataPointer::Serialize` + `StringStats::Serialize`。
-///
-/// # StringStats 格式
-/// DuckDB 的 `StringStats::Serialize` 用 `WriteProperty(id, name, data_ptr, 8)` 写入
-/// min/max，其中 `8 = StringStatsData::MAX_STRING_MINMAX_SIZE`。
-/// `BinaryDeserializer::ReadDataPtr` 会校验 varint 长度是否等于期望字节数，因此
-/// 必须写入精确 8 字节的 blob，而非普通 string。
-fn write_data_pointer_varchar(
-    serializer: &mut BinarySerializer<'_>,
-    tuple_count: Idx,
-    block_id: i64,
-    offset: u32,
-) {
-    // StringStatsData::MAX_STRING_MINMAX_SIZE = 8
-    const STR_STATS_SIZE: usize = 8;
-
-    serializer.write_varint(101, tuple_count);
-    serializer.begin_object(102);
-    serializer.write_signed_varint(100, block_id);
-    serializer.write_varint(101, offset as u64);
-    serializer.end_object();
-    serializer.write_u8(103, compression_tag(CompressionType::Uncompressed));
-    serializer.begin_object(104);
-    serializer.write_bool(100, false);  // has_null
-    serializer.write_bool(101, true);   // has_no_null
-    serializer.write_varint(102, 0);    // distinct_count
-    serializer.begin_object(103);       // type_specific stats (StringStats)
-    // Field 200: min — 8 字节 blob（全 0 表示最小值为空串）
-    serializer.write_bytes(200, &[0u8; STR_STATS_SIZE]);
-    // Field 201: max — 8 字节 blob（全 0xFF 表示最大值为最高字节序）
-    serializer.write_bytes(201, &[0xFFu8; STR_STATS_SIZE]);
-    serializer.write_bool(202, false);  // has_unicode
-    serializer.write_bool(203, true);   // has_max_string_length
-    serializer.write_varint(204, 0);    // max_string_length
-    serializer.end_object();
-    serializer.end_object();
-}
-
-fn compression_tag(compression: CompressionType) -> u8 {
-    match compression {
-        CompressionType::Uncompressed => 1,
-        CompressionType::Constant => 2,
-        CompressionType::Rle => 3,
-        CompressionType::BitPacking => 4,
-        CompressionType::Dictionary => 5,
-        CompressionType::Fsst => 6,
-        CompressionType::Chimp => 7,
-        CompressionType::Patas => 8,
-        CompressionType::Alprd => 9,
-        CompressionType::ZStd => 10,
-        CompressionType::Auto => 0,
-    }
-}

@@ -43,7 +43,7 @@ use super::types::{
     TransactionData, TransactionId,
 };
 use crate::common::types::{DataChunk, Vector};
-use crate::storage::checkpoint::binary_metadata_deserializer::{
+use crate::common::serializer::{
     BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID,
 };
 use crate::storage::table::column_segment::ColumnSegment;
@@ -679,11 +679,13 @@ impl RowGroup {
     }
 
     pub fn append_version_info(&self, transaction: TransactionData, count: Idx) {
+        let row_group_end = self.row_end();
+        let row_group_start = row_group_end.saturating_sub(count);
         self.get_or_create_version_info().append_version_info(
             transaction,
             count,
-            self.row_start,
-            self.row_end(),
+            row_group_start,
+            row_group_end,
         );
         self.has_changes.store(true, Ordering::Relaxed);
     }

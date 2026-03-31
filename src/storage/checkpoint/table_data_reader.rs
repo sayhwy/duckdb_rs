@@ -1,9 +1,10 @@
-use crate::catalog::{CreateTableInfo, LogicalTypeId};
-use crate::storage::checkpoint::binary_metadata_deserializer::{
+use crate::catalog::{CreateTableInfo, LogicalType as CatalogLogicalType, LogicalTypeId};
+use crate::common::serializer::{
     BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID,
 };
 use crate::storage::metadata::{MetaBlockPointer, MetadataReader, ReadStream};
 use crate::storage::table::persistent_table_data::PersistentTableData;
+use crate::storage::table::table_statistics::TableStatistics;
 
 pub struct BoundCreateTableInfo {
     pub base: CreateTableInfo,
@@ -34,36 +35,27 @@ impl<'a, 'mgr> TableDataReader<'a, 'mgr> {
     }
 
     pub fn read_table_data(&mut self) {
-        let column_types: Vec<LogicalTypeId> = self
-            .info
-            .base
-            .columns
-            .columns
-            .iter()
-            .map(|col| col.logical_type.id.clone())
-            .collect();
-
         let data = self
             .info
             .data
             .as_mut()
             .expect("TableDataReader::new must initialize PersistentTableData");
 
-        // Skip TableStatistics
+        // Read TableStatistics
         {
             let mut deserializer = BinaryMetadataDeserializer::new(self.reader);
-            skip_table_statistics(&mut deserializer, &column_types)
-                .expect("failed to skip table statistics");
+            let storage_types: Vec<crate::common::types::LogicalType> = self
+                .info
+                .base
+                .columns
+                .columns
+                .iter()
+                .map(|col| catalog_type_to_storage_type(&col.logical_type))
+                .collect();
+            data.table_stats =
+                TableStatistics::deserialize_checkpoint(&mut deserializer, &storage_types)
+                    .expect("failed to deserialize table statistics");
 
-            let terminator = deserializer
-                .next_field()
-                .expect("failed to read terminator");
-            if terminator != MESSAGE_TERMINATOR_FIELD_ID {
-                panic!(
-                    "expected TableStatistics terminator, got field {}",
-                    terminator
-                );
-            }
         }
 
         // Read row_group_count
@@ -81,6 +73,25 @@ impl<'a, 'mgr> TableDataReader<'a, 'mgr> {
                 .unwrap_or_else(|e| panic!("failed to read row group pointer {}: {}", i, e));
             data.row_group_pointers.push(pointer);
         }
+    }
+}
+
+fn catalog_type_to_storage_type(
+    logical_type: &CatalogLogicalType,
+) -> crate::common::types::LogicalType {
+    use crate::common::types::{LogicalType as StorageLogicalType, LogicalTypeId as StorageTypeId};
+    match logical_type.id {
+        LogicalTypeId::Boolean => StorageLogicalType::boolean(),
+        LogicalTypeId::TinyInt => StorageLogicalType::tinyint(),
+        LogicalTypeId::SmallInt => StorageLogicalType::smallint(),
+        LogicalTypeId::Integer => StorageLogicalType::integer(),
+        LogicalTypeId::BigInt => StorageLogicalType::bigint(),
+        LogicalTypeId::Float => StorageLogicalType::float(),
+        LogicalTypeId::Double => StorageLogicalType::double(),
+        LogicalTypeId::Varchar => StorageLogicalType::varchar(),
+        LogicalTypeId::Date => StorageLogicalType::date(),
+        LogicalTypeId::Timestamp => StorageLogicalType::new(StorageTypeId::Timestamp),
+        _ => StorageLogicalType::new(StorageTypeId::Invalid),
     }
 }
 

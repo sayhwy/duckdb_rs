@@ -232,6 +232,10 @@ impl ChunkVectorInfo {
         self.deleted.iter().any(|&d| d != TransactionId::MAX)
     }
 
+    pub fn set_all_deleted(&mut self, delete_id: TransactionId) {
+        self.deleted.fill(delete_id);
+    }
+
     pub fn any_deleted(&self) -> bool {
         self.has_deletes()
     }
@@ -301,7 +305,23 @@ impl ChunkVectorInfo {
 
     /// Marks rows `[start, end)` as inserted with `commit_id`.
     pub fn append(&mut self, start: Idx, end: Idx, commit_id: TransactionId) {
-        todo!("set insert ids for [start, end)")
+        if start >= end {
+            return;
+        }
+        let local_start = start.saturating_sub(self.start) as usize;
+        let local_end = end.saturating_sub(self.start) as usize;
+        let capacity = self.deleted.len();
+        if local_start >= capacity {
+            return;
+        }
+        let local_end = local_end.min(capacity);
+        if self.inserted.is_none() {
+            self.inserted = Some(vec![self.constant_insert_id; capacity]);
+        }
+        let inserted = self.inserted.as_mut().unwrap();
+        for idx in local_start..local_end {
+            inserted[idx] = commit_id;
+        }
     }
 
     /// Marks rows in `rows[..count]` as deleted by `transaction_id`.
@@ -312,15 +332,46 @@ impl ChunkVectorInfo {
         rows: &mut [RowId],
         count: usize,
     ) -> Idx {
-        todo!("mark rows as deleted, return actual delete count")
+        let mut deleted = 0;
+        for row in rows.iter().take(count) {
+            if *row < 0 {
+                continue;
+            }
+            let idx = *row as usize;
+            if idx >= self.deleted.len() {
+                continue;
+            }
+            if self.deleted[idx] == NOT_DELETED_ID {
+                self.deleted[idx] = transaction_id;
+                deleted += 1;
+            }
+        }
+        deleted
     }
 
     pub fn commit_append(&mut self, commit_id: TransactionId, start: Idx, end: Idx) {
-        todo!("commit insert ids for [start, end)")
+        if let Some(inserted) = self.inserted.as_mut() {
+            let local_start = start.saturating_sub(self.start) as usize;
+            let local_end = end.saturating_sub(self.start) as usize;
+            let local_end = local_end.min(inserted.len());
+            for idx in local_start.min(inserted.len())..local_end {
+                inserted[idx] = commit_id;
+            }
+        } else {
+            self.constant_insert_id = commit_id;
+        }
     }
 
     pub fn can_cleanup(&self, lowest_transaction: TransactionId) -> bool {
-        todo!("true when all inserts and deletes are < lowest_transaction")
+        let inserts_old = match &self.inserted {
+            Some(inserted) => inserted.iter().all(|&id| id < lowest_transaction),
+            None => self.constant_insert_id < lowest_transaction,
+        };
+        let deletes_old = self
+            .deleted
+            .iter()
+            .all(|&id| id == NOT_DELETED_ID || id < lowest_transaction);
+        inserts_old && deletes_old
     }
 
     pub fn get_committed_sel_vector(
@@ -330,6 +381,42 @@ impl ChunkVectorInfo {
         sel_vector: &mut SelectionVector,
         max_count: Idx,
     ) -> Idx {
-        todo!()
+        let _ = min_transaction_id;
+        sel_vector.sel.clear();
+        let max_count = max_count.min(self.deleted.len() as Idx) as usize;
+        let mut visible = 0;
+        match &self.inserted {
+            None => {
+                let committed_inserted = self.constant_insert_id < TRANSACTION_ID_START
+                    && self.constant_insert_id < min_start_id;
+                if !committed_inserted {
+                    return 0;
+                }
+                for idx in 0..max_count {
+                    let delete_id = self.deleted[idx];
+                    let committed_deleted =
+                        delete_id != NOT_DELETED_ID && delete_id < TRANSACTION_ID_START && delete_id < min_start_id;
+                    if !committed_deleted {
+                        sel_vector.sel.push(idx as u32);
+                        visible += 1;
+                    }
+                }
+            }
+            Some(inserted) => {
+                for idx in 0..max_count {
+                    let insert_id = inserted[idx];
+                    let delete_id = self.deleted[idx];
+                    let committed_inserted =
+                        insert_id < TRANSACTION_ID_START && insert_id < min_start_id;
+                    let committed_deleted =
+                        delete_id != NOT_DELETED_ID && delete_id < TRANSACTION_ID_START && delete_id < min_start_id;
+                    if committed_inserted && !committed_deleted {
+                        sel_vector.sel.push(idx as u32);
+                        visible += 1;
+                    }
+                }
+            }
+        }
+        visible
     }
 }

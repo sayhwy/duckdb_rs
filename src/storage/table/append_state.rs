@@ -95,6 +95,8 @@ pub struct TableAppendState {
     pub total_append_count: Idx,
     /// Row offset at the start of the current row group.
     pub row_group_start: Idx,
+    /// Index of the first row group touched by this append.
+    pub start_row_group: Option<usize>,
 
     /// Transaction performing the append.
     pub transaction: Option<TransactionData>,
@@ -114,6 +116,7 @@ impl TableAppendState {
             current_row: 0,
             total_append_count: 0,
             row_group_start: 0,
+            start_row_group: None,
             transaction: None,
             stats: TableStatistics::new(),
             hashes: Vec::new(),

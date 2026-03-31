@@ -32,7 +32,7 @@ use duckdb_rs::db::DB;
 // ─── 常量 ──────────────────────────────────────────────────────────────────────
 
 const DB_PATH: &str = "million_students_txn.db";
-const TOTAL_STUDENTS: usize = 1_000_000;
+const TOTAL_STUDENTS: usize = 2_000_000;
 const BATCH_SIZE: usize = 2048;
 
 // ─── 辅助函数 ─────────────────────────────────────────────────────────────────

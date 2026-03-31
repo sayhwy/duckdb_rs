@@ -1,5 +1,10 @@
 use crate::common::types::{LogicalType, LogicalTypeId, SelectionVector, Vector};
+use crate::common::serializer::{
+    BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID,
+};
+use crate::common::serializer::BinarySerializer;
 use std::fmt;
+use std::io;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // VariantStats auxiliary types (defined here to avoid circular deps)
@@ -325,6 +330,259 @@ impl BaseStatistics {
     ) -> Result<(), String> {
         // TODO: Implement verification logic
         Ok(())
+    }
+
+    pub fn serialize_checkpoint(&self, serializer: &mut BinarySerializer<'_>) {
+        serializer.write_bool(100, self.has_null);
+        serializer.write_bool(101, self.has_no_null);
+        serializer.write_varint(102, self.distinct_count);
+        serializer.begin_object(103);
+        match &self.stats_data {
+            StatsData::Numeric(data) => {
+                Self::serialize_numeric_value(serializer, 200, data.has_min, data.min, &self.logical_type);
+                Self::serialize_numeric_value(serializer, 201, data.has_max, data.max, &self.logical_type);
+            }
+            StatsData::String(data) => {
+                serializer.write_bytes(200, &data.min);
+                serializer.write_bytes(201, &data.max);
+                serializer.write_bool(202, data.has_unicode);
+                serializer.write_bool(203, data.has_max_string_length);
+                serializer.write_varint(204, data.max_string_length as u64);
+            }
+            StatsData::Variant(data) => {
+                serializer.write_u8(204, data.shredding_state as u8);
+            }
+            StatsData::None => {}
+        }
+        serializer.end_object();
+    }
+
+    pub fn deserialize_checkpoint(
+        de: &mut BinaryMetadataDeserializer<'_>,
+        logical_type: LogicalType,
+    ) -> io::Result<Self> {
+        let mut result = BaseStatistics::new(logical_type.clone());
+        loop {
+            match de.next_field()? {
+                100 => result.has_null = de.read_u8() != 0,
+                101 => result.has_no_null = de.read_u8() != 0,
+                102 => result.distinct_count = de.read_varint()?,
+                103 => result.stats_data = Self::deserialize_type_stats(de, &logical_type)?,
+                MESSAGE_TERMINATOR_FIELD_ID => return Ok(result),
+                other => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unexpected BaseStatistics field {other}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn serialize_numeric_value(
+        serializer: &mut BinarySerializer<'_>,
+        field_id: u16,
+        present: bool,
+        value: super::NumericValueUnion,
+        logical_type: &LogicalType,
+    ) {
+        serializer.begin_object(field_id);
+        serializer.write_bool(100, present);
+        if present {
+            match logical_type.id {
+                LogicalTypeId::Float => serializer.write_field_id(101),
+                LogicalTypeId::Double => serializer.write_field_id(101),
+                _ => serializer.write_field_id(101),
+            }
+            match logical_type.id {
+                LogicalTypeId::Boolean => serializer.write_varint_raw(unsafe { value.boolean as u64 }),
+                LogicalTypeId::TinyInt => serializer.write_signed_varint_raw(unsafe { value.tinyint as i64 }),
+                LogicalTypeId::SmallInt => serializer.write_signed_varint_raw(unsafe { value.smallint as i64 }),
+                LogicalTypeId::Integer | LogicalTypeId::Date => {
+                    serializer.write_signed_varint_raw(unsafe { value.integer as i64 })
+                }
+                LogicalTypeId::BigInt | LogicalTypeId::Time | LogicalTypeId::Timestamp => {
+                    serializer.write_signed_varint_raw(unsafe { value.bigint })
+                }
+                LogicalTypeId::HugeInt => {
+                    serializer.write_signed_varint_raw(unsafe { value.hugeint as i64 })
+                }
+                LogicalTypeId::Float => {
+                    serializer.write_f32_raw(unsafe { value.float });
+                }
+                LogicalTypeId::Double => {
+                    serializer.write_f64_raw(unsafe { value.double });
+                }
+                _ => serializer.write_varint_raw(0),
+            }
+        }
+        serializer.end_object();
+    }
+
+    fn deserialize_type_stats(
+        de: &mut BinaryMetadataDeserializer<'_>,
+        logical_type: &LogicalType,
+    ) -> io::Result<StatsData> {
+        let mut result = match Self::get_stats_type_from_logical(logical_type) {
+            StatisticsType::NumericStats => StatsData::Numeric(Default::default()),
+            StatisticsType::StringStats => StatsData::String(Default::default()),
+            StatisticsType::VariantStats => StatsData::Variant(VariantStatsData {
+                shredding_state: VariantStatsShreddingState::Uninitialized,
+            }),
+            _ => StatsData::None,
+        };
+        loop {
+            match de.next_field()? {
+                200 if matches!(result, StatsData::Numeric(_)) => {
+                    if let StatsData::Numeric(ref mut data) = result {
+                        Self::deserialize_numeric_value(de, logical_type, true, data)?;
+                    }
+                }
+                201 if matches!(result, StatsData::Numeric(_)) => {
+                    if let StatsData::Numeric(ref mut data) = result {
+                        Self::deserialize_numeric_value(de, logical_type, false, data)?;
+                    }
+                }
+                200 if matches!(result, StatsData::String(_)) => {
+                    if let StatsData::String(ref mut data) = result {
+                        let bytes = de.read_sized_bytes(8)?;
+                        data.min.copy_from_slice(&bytes);
+                    }
+                }
+                201 if matches!(result, StatsData::String(_)) => {
+                    if let StatsData::String(ref mut data) = result {
+                        let bytes = de.read_sized_bytes(8)?;
+                        data.max.copy_from_slice(&bytes);
+                    }
+                }
+                202 if matches!(result, StatsData::String(_)) => {
+                    if let StatsData::String(ref mut data) = result {
+                        data.has_unicode = de.read_u8() != 0;
+                    }
+                }
+                203 if matches!(result, StatsData::String(_)) => {
+                    if let StatsData::String(ref mut data) = result {
+                        data.has_max_string_length = de.read_u8() != 0;
+                    }
+                }
+                204 if matches!(result, StatsData::String(_)) => {
+                    if let StatsData::String(ref mut data) = result {
+                        data.max_string_length = de.read_varint()? as u32;
+                    }
+                }
+                204 if matches!(result, StatsData::Variant(_)) => {
+                    if let StatsData::Variant(ref mut data) = result {
+                        data.shredding_state = match de.read_u8() {
+                            1 => VariantStatsShreddingState::NotShredded,
+                            2 => VariantStatsShreddingState::Shredded,
+                            3 => VariantStatsShreddingState::Inconsistent,
+                            _ => VariantStatsShreddingState::Uninitialized,
+                        };
+                    }
+                }
+                MESSAGE_TERMINATOR_FIELD_ID => return Ok(result),
+                other => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unexpected type statistics field {other}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn deserialize_numeric_value(
+        de: &mut BinaryMetadataDeserializer<'_>,
+        logical_type: &LogicalType,
+        is_min: bool,
+        data: &mut super::NumericStatsData,
+    ) -> io::Result<()> {
+        let mut has_value = false;
+        loop {
+            match de.next_field()? {
+                100 => has_value = de.read_u8() != 0,
+                101 => {
+                    if has_value {
+                        match logical_type.id {
+                            LogicalTypeId::Boolean => {
+                                let value = de.read_varint()? != 0;
+                                if is_min {
+                                    super::NumericStats::set_min(data, value, logical_type);
+                                } else {
+                                    super::NumericStats::set_max(data, value, logical_type);
+                                }
+                            }
+                            LogicalTypeId::TinyInt => {
+                                let value = de.read_i64_varint()? as i8;
+                                if is_min {
+                                    super::NumericStats::set_min(data, value, logical_type);
+                                } else {
+                                    super::NumericStats::set_max(data, value, logical_type);
+                                }
+                            }
+                            LogicalTypeId::SmallInt => {
+                                let value = de.read_i64_varint()? as i16;
+                                if is_min {
+                                    super::NumericStats::set_min(data, value, logical_type);
+                                } else {
+                                    super::NumericStats::set_max(data, value, logical_type);
+                                }
+                            }
+                            LogicalTypeId::Integer | LogicalTypeId::Date => {
+                                let value = de.read_i64_varint()? as i32;
+                                if is_min {
+                                    super::NumericStats::set_min(data, value, logical_type);
+                                } else {
+                                    super::NumericStats::set_max(data, value, logical_type);
+                                }
+                            }
+                            LogicalTypeId::BigInt | LogicalTypeId::Time | LogicalTypeId::Timestamp => {
+                                let value = de.read_i64_varint()?;
+                                if is_min {
+                                    super::NumericStats::set_min(data, value, logical_type);
+                                } else {
+                                    super::NumericStats::set_max(data, value, logical_type);
+                                }
+                            }
+                            LogicalTypeId::HugeInt => {
+                                let value = de.read_i64_varint()? as i128;
+                                if is_min {
+                                    super::NumericStats::set_min(data, value, logical_type);
+                                } else {
+                                    super::NumericStats::set_max(data, value, logical_type);
+                                }
+                            }
+                            LogicalTypeId::Float => {
+                                let value = de.read_f32();
+                                if is_min {
+                                    super::NumericStats::set_min(data, value, logical_type);
+                                } else {
+                                    super::NumericStats::set_max(data, value, logical_type);
+                                }
+                            }
+                            LogicalTypeId::Double => {
+                                let value = de.read_f64();
+                                if is_min {
+                                    super::NumericStats::set_min(data, value, logical_type);
+                                } else {
+                                    super::NumericStats::set_max(data, value, logical_type);
+                                }
+                            }
+                            _ => {
+                                let _ = de.read_varint()?;
+                            }
+                        }
+                    }
+                }
+                MESSAGE_TERMINATOR_FIELD_ID => return Ok(()),
+                other => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unexpected numeric stats value field {other}"),
+                    ));
+                }
+            }
+        }
     }
 }
 

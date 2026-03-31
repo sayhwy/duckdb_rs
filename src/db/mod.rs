@@ -12,8 +12,8 @@ use crate::catalog::{
 use crate::common::types::{DataChunk, LogicalType, STANDARD_VECTOR_SIZE};
 use crate::connection::{Connection, DatabaseInstance, TableHandle as ConnectionTableHandle};
 use crate::storage::buffer::{BlockAllocator, BlockManager, BufferPool};
-use crate::storage::checkpoint::TableInfo;
 use crate::storage::checkpoint::table_data_reader::{BoundCreateTableInfo, TableDataReader};
+use crate::storage::checkpoint_manager::TableInfo;
 use crate::storage::data_table::{
     ClientContext, ColumnDefinition as StorageColumnDefinition, DataTable,
 };

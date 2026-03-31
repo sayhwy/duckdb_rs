@@ -1,9 +1,10 @@
 use crate::catalog::TableCatalogEntry;
-use crate::storage::data_pointer::RowGroupPointer;
-use crate::storage::metadata::{MetaBlockPointer, MetadataManager, MetadataWriter};
+use crate::common::serializer::BinarySerializer;
+use crate::storage::metadata::{MetaBlockPointer, MetadataManager, MetadataWriter, WriteStream};
 use crate::storage::storage_manager::CheckpointOptions;
 use crate::storage::table::data_table_info::DataTableInfo;
 use crate::storage::table::row_group_collection::RowGroupCollection;
+use crate::storage::table::row_group::RowGroupPointer;
 use crate::storage::table::table_statistics::TableStatistics;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -45,10 +46,7 @@ impl TableDataWriter {
         }
     }
 
-    pub fn write_table_data(&mut self) {
-        // C++ 这里会调用 table.GetStorage().Checkpoint(*this, metadata_serializer)。
-        // 当前项目的持久化写盘链路尚未完成，因此这里只保留入口。
-    }
+    pub fn write_table_data(&mut self) {}
 
     pub fn add_row_group(&mut self, row_group_pointer: RowGroupPointer) {
         self.row_group_pointers.push(row_group_pointer);
@@ -112,10 +110,7 @@ impl<'writer, 'mgr> SingleFileTableDataWriter<'writer, 'mgr> {
         self.existing_rows = Some(total_rows);
     }
 
-    pub fn flush_partial_blocks(&mut self) {
-        // 对应 C++ checkpoint_manager.partial_block_manager.FlushPartialBlocks()。
-        // 当前项目还没有真正的 PartialBlockManager 实现。
-    }
+    pub fn flush_partial_blocks(&mut self) {}
 
     pub fn finalize_table(
         &mut self,
@@ -123,8 +118,6 @@ impl<'writer, 'mgr> SingleFileTableDataWriter<'writer, 'mgr> {
         _info: &DataTableInfo,
         _collection: &RowGroupCollection,
     ) -> (MetaBlockPointer, u64) {
-        let _ = global_stats;
-
         if let Some(pointer) = self.existing_pointer {
             return (pointer, self.existing_rows.unwrap_or(0));
         }
@@ -138,9 +131,45 @@ impl<'writer, 'mgr> SingleFileTableDataWriter<'writer, 'mgr> {
             .max()
             .unwrap_or(0);
 
-        // C++ 这里会序列化 TableStatistics、RowGroupPointer、index_storage_infos，
-        // 并把 table_pointer / total_rows 写回 catalog serializer。
-        // 现阶段只保留 table 元数据根指针和总行数计算。
+        {
+            let mut serializer = BinarySerializer::new(self.table_data_writer as &mut dyn WriteStream);
+            serializer.begin_root_object();
+            global_stats.serialize_checkpoint(&mut serializer);
+            serializer.end_object();
+        }
+        self.table_data_writer
+            .write_u64(self.base.row_group_pointers.len() as u64);
+        for row_group_pointer in &self.base.row_group_pointers {
+            let mut serializer = BinarySerializer::new(self.table_data_writer as &mut dyn WriteStream);
+            serializer.begin_root_object();
+            serializer.write_varint(100, row_group_pointer.row_start);
+            serializer.write_varint(101, row_group_pointer.tuple_count);
+            serializer.begin_list(102, row_group_pointer.column_pointers.len());
+            for column_pointer in &row_group_pointer.column_pointers {
+                serializer.list_write_object(|s| {
+                    if column_pointer.block_pointer != 0 {
+                        s.write_varint(100, column_pointer.block_pointer);
+                    }
+                    if column_pointer.offset != 0 {
+                        s.write_varint(101, column_pointer.offset as u64);
+                    }
+                });
+            }
+            serializer.end_list();
+            serializer.begin_list(103, row_group_pointer.deletes_pointers.len());
+            for delete_pointer in &row_group_pointer.deletes_pointers {
+                serializer.list_write_object(|s| {
+                    if delete_pointer.block_pointer != 0 {
+                        s.write_varint(100, delete_pointer.block_pointer);
+                    }
+                    if delete_pointer.offset != 0 {
+                        s.write_varint(101, delete_pointer.offset as u64);
+                    }
+                });
+            }
+            serializer.end_list();
+            serializer.end_object();
+        }
         (pointer, total_rows)
     }
 }

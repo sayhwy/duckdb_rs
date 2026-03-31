@@ -1,5 +1,10 @@
 use super::{BaseStatistics, DistinctStatistics};
 use crate::common::types::LogicalType;
+use crate::common::serializer::{
+    BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID,
+};
+use crate::common::serializer::BinarySerializer;
+use std::io;
 use std::sync::Arc;
 
 /// Column-level statistics
@@ -113,6 +118,53 @@ impl ColumnStatistics {
             result.push_str(&format!(" {}", distinct.to_string()));
         }
         result
+    }
+
+    pub fn serialize_checkpoint(&self, serializer: &mut BinarySerializer<'_>) {
+        serializer.begin_object(100);
+        self.stats.serialize_checkpoint(serializer);
+        serializer.end_object();
+        serializer.write_nullable_field(101, self.distinct_stats.is_some());
+        if let Some(distinct) = &self.distinct_stats {
+            distinct.serialize_checkpoint(serializer);
+            serializer.end_object();
+            serializer.end_nullable_object();
+        }
+    }
+
+    pub fn deserialize_checkpoint(
+        de: &mut BinaryMetadataDeserializer<'_>,
+        logical_type: LogicalType,
+    ) -> io::Result<Option<Self>> {
+        let present = de.read_u8();
+        if present == 0 {
+            return Ok(None);
+        }
+        let mut stats = None;
+        let mut distinct = None;
+        loop {
+            match de.next_field()? {
+                100 => stats = Some(BaseStatistics::deserialize_checkpoint(de, logical_type.clone())?),
+                101 => {
+                    let distinct_present = de.read_u8();
+                    if distinct_present != 0 {
+                        distinct = Some(DistinctStatistics::deserialize_checkpoint(de)?);
+                    }
+                }
+                MESSAGE_TERMINATOR_FIELD_ID => {
+                    return Ok(Some(ColumnStatistics::with_distinct(
+                        stats.unwrap_or_else(|| BaseStatistics::create_empty(logical_type)),
+                        distinct,
+                    )));
+                }
+                other => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unexpected ColumnStatistics field {other}"),
+                    ));
+                }
+            }
+        }
     }
 }
 

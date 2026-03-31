@@ -1,4 +1,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
+use crate::common::serializer::{
+    BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID,
+};
+use crate::common::serializer::BinarySerializer;
+use std::io;
 
 /// Sample rate for integral types (higher sampling rate)
 const INTEGRAL_SAMPLE_RATE: f64 = 0.1;
@@ -80,6 +85,29 @@ impl HyperLogLog {
         HyperLogLog {
             registers: self.registers.clone(),
             precision: self.precision,
+        }
+    }
+
+    fn serialize_checkpoint(&self, serializer: &mut BinarySerializer<'_>) {
+        serializer.write_varint(100, self.precision as u64);
+        serializer.write_bytes(101, &self.registers);
+    }
+
+    fn deserialize_checkpoint(de: &mut BinaryMetadataDeserializer<'_>) -> io::Result<Self> {
+        let mut precision = 14u8;
+        let mut registers = Vec::new();
+        loop {
+            match de.next_field()? {
+                100 => precision = de.read_varint()? as u8,
+                101 => registers = de.read_bytes()?,
+                MESSAGE_TERMINATOR_FIELD_ID => return Ok(Self { registers, precision }),
+                other => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unexpected HyperLogLog field {other}"),
+                    ));
+                }
+            }
         }
     }
 }
@@ -196,6 +224,38 @@ impl DistinctStatistics {
     /// Convert to string representation
     pub fn to_string(&self) -> String {
         format!("[Approx Unique: {}]", self.get_count())
+    }
+
+    pub fn serialize_checkpoint(&self, serializer: &mut BinarySerializer<'_>) {
+        serializer.write_varint(100, self.sample_count.load(Ordering::Relaxed));
+        serializer.write_varint(101, self.total_count.load(Ordering::Relaxed));
+        serializer.begin_object(102);
+        self.log.serialize_checkpoint(serializer);
+        serializer.end_object();
+    }
+
+    pub fn deserialize_checkpoint(de: &mut BinaryMetadataDeserializer<'_>) -> io::Result<Self> {
+        let mut result = DistinctStatistics::new();
+        loop {
+            match de.next_field()? {
+                100 => {
+                    result
+                        .sample_count
+                        .store(de.read_varint()?, Ordering::Relaxed);
+                }
+                101 => {
+                    result.total_count.store(de.read_varint()?, Ordering::Relaxed);
+                }
+                102 => result.log = HyperLogLog::deserialize_checkpoint(de)?,
+                MESSAGE_TERMINATOR_FIELD_ID => return Ok(result),
+                other => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unexpected DistinctStatistics field {other}"),
+                    ));
+                }
+            }
+        }
     }
 }
 

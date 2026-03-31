@@ -1,6 +1,6 @@
 use std::io;
 
-use crate::storage::checkpoint::binary_metadata_deserializer::MESSAGE_TERMINATOR_FIELD_ID;
+use crate::common::serializer::MESSAGE_TERMINATOR_FIELD_ID;
 use crate::storage::metadata::MetaBlockPointer;
 use crate::storage::metadata::ReadStream;
 

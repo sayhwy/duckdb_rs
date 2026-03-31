@@ -123,8 +123,11 @@ impl RowGroupCollection {
             tree.append_segment(&mut seg_lock, row_group, pointer.row_start);
         }
         drop(seg_lock);
-        let mut stats = self.stats.clone();
-        stats.initialize_empty(&self.types);
+        if data.table_stats.is_empty() {
+            self.stats.initialize_empty(&self.types);
+        } else {
+            self.stats.set_stats(&data.table_stats);
+        }
     }
 
     /// Bootstrap an empty table (no rows, one empty row group).
@@ -355,6 +358,7 @@ impl RowGroupCollection {
         };
 
         state.row_group_append_state.row_group_index = Some(target_idx);
+        state.start_row_group = Some(target_idx);
         state.row_group_start = row_group_start;
         target.initialize_append(&mut state.row_group_append_state);
     }
@@ -485,9 +489,39 @@ impl RowGroupCollection {
 
     /// Finalise the append (release append lock, update total_rows).
     pub fn finalize_append(&self, transaction: TransactionData, state: &mut TableAppendState) {
+        let _ = transaction;
+        let append_start = state.row_start as Idx;
+        let append_end = append_start.saturating_add(state.total_append_count);
+        let mut row_group_index = state.start_row_group;
+
+        while let Some(idx) = row_group_index {
+            if append_start >= append_end {
+                break;
+            }
+
+            let row_group = {
+                let tree = self.get_row_groups();
+                let lock = tree.lock();
+                let Some(node) = lock.0.get(idx) else {
+                    break;
+                };
+                node.arc()
+            };
+
+            let rg_start = row_group.row_start();
+            let rg_end = row_group.row_end();
+            let overlap_start = append_start.max(rg_start);
+            let overlap_end = append_end.min(rg_end);
+            let append_count = overlap_end.saturating_sub(overlap_start);
+
+            row_group.append_version_info(transaction, append_count);
+            row_group_index = Some(idx + 1);
+        }
         self.total_rows
             .fetch_add(state.total_append_count, Ordering::SeqCst);
-        let _ = transaction;
+        let local_stats = state.stats.clone();
+        self.stats.merge_stats(&local_stats);
+        state.total_append_count = 0;
     }
 
     /// Merge another RowGroupCollection into this one (C++: `RowGroupCollection::MergeStorage`).
@@ -555,7 +589,7 @@ impl RowGroupCollection {
             .fetch_add(total_merged_rows, Ordering::SeqCst);
 
         // Merge statistics
-        // TODO: Implement stats.MergeStats(source.stats)
+        self.stats.merge_stats(&source.stats);
 
         Ok(())
     }
@@ -673,10 +707,11 @@ impl RowGroupCollection {
     /// Copy statistics for one column (C++: `CopyStats`).
     pub fn copy_stats(
         &self,
-        _column_id: Idx,
+        column_id: Idx,
     ) -> Option<crate::storage::statistics::BaseStatistics> {
-        // TODO: obtain stats from per-row-group statistics once TableStatistics is complete.
-        None
+        self.stats
+            .copy_column_stats(column_id as usize)
+            .map(|stats| stats.statistics().clone())
     }
 
     // ── Debug info ────────────────────────────────────────────

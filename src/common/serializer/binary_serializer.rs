@@ -96,6 +96,14 @@ impl<'a> BinarySerializer<'a> {
         self.write_varint_raw(value);
     }
 
+    pub fn write_f32_raw(&mut self, value: f32) {
+        self.stream.write_data(&value.to_le_bytes());
+    }
+
+    pub fn write_f64_raw(&mut self, value: f64) {
+        self.stream.write_data(&value.to_le_bytes());
+    }
+
     /// 写入有符号 varint 属性
     pub fn write_signed_varint(&mut self, field_id: u16, value: i64) {
         self.write_field_id(field_id);

@@ -831,7 +831,7 @@ impl SingleFileStorageManager {
         *self.db_instance.lock() = Some(db_instance);
     }
 
-    fn checkpoint_tables(&self) -> StorageResult<Vec<crate::storage::checkpoint::TableInfo>> {
+    fn checkpoint_tables(&self) -> StorageResult<Vec<crate::storage::checkpoint_manager::TableInfo>> {
         let db_instance = self
             .db_instance
             .lock()
@@ -844,7 +844,7 @@ impl SingleFileStorageManager {
         let tables = db_instance.tables.lock();
         Ok(tables
             .values()
-            .map(|handle| crate::storage::checkpoint::TableInfo {
+            .map(|handle| crate::storage::checkpoint_manager::TableInfo {
                 entry: Arc::new(handle.catalog_entry.clone()),
                 storage: handle.storage.clone(),
             })
@@ -1213,7 +1213,7 @@ impl StorageManager for SingleFileStorageManager {
         block_manager.set_metadata_manager(metadata_manager.clone());
 
         let table_infos = self.checkpoint_tables()?;
-        let checkpoint_manager = crate::storage::checkpoint::CheckpointManager::new(
+        let checkpoint_manager = crate::storage::checkpoint_manager::CheckpointManager::new(
             block_manager.clone() as Arc<dyn BlockManager>,
             metadata_manager,
         );

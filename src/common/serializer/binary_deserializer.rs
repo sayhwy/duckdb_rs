@@ -41,6 +41,30 @@ impl<'a> BinaryMetadataDeserializer<'a> {
         f64::from_le_bytes(buf)
     }
 
+    pub fn read_f32(&mut self) -> f32 {
+        let mut buf = [0u8; 4];
+        self.stream.read_data(&mut buf);
+        f32::from_le_bytes(buf)
+    }
+
+    pub fn read_bytes(&mut self) -> io::Result<Vec<u8>> {
+        let len = self.read_varint()? as usize;
+        let mut buf = vec![0u8; len];
+        self.stream.read_data(&mut buf);
+        Ok(buf)
+    }
+
+    pub fn read_sized_bytes(&mut self, expected_len: usize) -> io::Result<Vec<u8>> {
+        let bytes = self.read_bytes()?;
+        if bytes.len() != expected_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected {expected_len} bytes, got {}", bytes.len()),
+            ));
+        }
+        Ok(bytes)
+    }
+
     pub fn read_varint(&mut self) -> io::Result<u64> {
         let mut result = 0u64;
         let mut shift = 0u32;
