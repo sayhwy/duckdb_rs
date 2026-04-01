@@ -1,3 +1,4 @@
+pub mod catalog_deserializer;
 pub mod row_group_writer;
 pub mod string_checkpoint_state;
 pub mod table_data_reader;

@@ -1,5 +1,3 @@
-pub mod catalog_deserializer;
-
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -66,7 +64,7 @@ pub struct DB {
     path: String,
 
     /// Catalog 条目（用于读取）。
-    catalog_entries: Vec<catalog_deserializer::CatalogEntry>,
+    catalog_entries: Vec<crate::storage::checkpoint::catalog_deserializer::CatalogEntry>,
 }
 
 impl DB {
@@ -219,7 +217,7 @@ impl DB {
     }
 
     /// 获取 catalog 条目。
-    pub fn catalog_entries(&self) -> &[catalog_deserializer::CatalogEntry] {
+    pub fn catalog_entries(&self) -> &[crate::storage::checkpoint::catalog_deserializer::CatalogEntry] {
         &self.catalog_entries
     }
 
@@ -1128,7 +1126,7 @@ fn read_main_and_active_headers(path: &str) -> StorageResult<(MainHeader, Databa
 }
 
 fn build_table_handle(
-    entry: &catalog_deserializer::CatalogEntry,
+    entry: &crate::storage::checkpoint::catalog_deserializer::CatalogEntry,
     table_id: u64,
     runtime: Option<Arc<PersistentStorageRuntime>>,
 ) -> TableHandle {
@@ -1221,7 +1219,7 @@ fn to_catalog_type(ty: &LogicalType) -> CatalogLogicalType {
 fn read_catalog_from_db(
     path: &str,
 ) -> StorageResult<(
-    Vec<catalog_deserializer::CatalogEntry>,
+    Vec<crate::storage::checkpoint::catalog_deserializer::CatalogEntry>,
     Option<Arc<PersistentStorageRuntime>>,
 )> {
     let fs = Arc::new(LocalFileSystem);
@@ -1266,7 +1264,7 @@ fn read_catalog_from_db(
         None,
         BlockReaderType::RegisterBlocks,
     );
-    let entries = catalog_deserializer::read_catalog(&mut reader)
+    let entries = crate::storage::checkpoint::catalog_deserializer::read_catalog(&mut reader)
         .map_err(crate::storage::storage_info::StorageError::Io)?;
     let runtime = Arc::new(PersistentStorageRuntime {
         block_manager: block_manager as Arc<dyn BlockManager>,
@@ -1276,7 +1274,7 @@ fn read_catalog_from_db(
 }
 
 fn read_table_data(
-    entry: &catalog_deserializer::CatalogEntry,
+    entry: &crate::storage::checkpoint::catalog_deserializer::CatalogEntry,
     table_pointer: crate::storage::metadata::MetaBlockPointer,
     runtime: &Arc<PersistentStorageRuntime>,
 ) -> StorageResult<Option<PersistentTableData>> {
