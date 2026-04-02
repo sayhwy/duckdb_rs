@@ -85,7 +85,9 @@ pub struct TransactionContext {
     auto_commit: AtomicBool,
 
     /// 当前活跃元事务（C++: `unique_ptr<MetaTransaction> current_transaction`）。
-    current_transaction: Mutex<Option<Box<MetaTransaction>>>,
+    ///
+    /// 使用 `Arc` 而非 `Box`，以便 `begin_transaction_arc()` 可以同时向调用方返回引用。
+    current_transaction: Mutex<Option<Arc<MetaTransaction>>>,
 
     /// 事务管理器（C++: 通过 `AttachedDatabase` 获取）。
     transaction_manager: Arc<DuckTransactionManager>,
@@ -132,7 +134,7 @@ impl TransactionContext {
                 .map(|d| d.as_micros() as i64)
                 .unwrap_or(0);
             let global_transaction_id = next_global_transaction_id();
-            *current = Some(Box::new(MetaTransaction::new(
+            *current = Some(Arc::new(MetaTransaction::new(
                 Arc::clone(&self.transaction_manager),
                 start_timestamp,
                 global_transaction_id,
@@ -155,7 +157,7 @@ impl TransactionContext {
     ///
     /// # Panics
     /// 若无活跃事务（与 C++ `InternalException` 行为对应）。
-    pub fn active_transaction(&self) -> parking_lot::MutexGuard<'_, Option<Box<MetaTransaction>>> {
+    pub fn active_transaction(&self) -> parking_lot::MutexGuard<'_, Option<Arc<MetaTransaction>>> {
         self.current_transaction.lock()
     }
 
@@ -173,13 +175,14 @@ impl TransactionContext {
 
     // ── 事务生命周期 ──────────────────────────────────────────────────────────
 
-    /// 开始新事务（C++: `TransactionContext::BeginTransaction()`）。
+    /// 开始新事务，返回 `Arc<MetaTransaction>`（供外部持有）。
     ///
-    /// 分配新的 `MetaTransaction` 并设为 `current_transaction`。
+    /// 创建 `MetaTransaction` 并同时存入 `current_transaction` 和返回给调用方，
+    /// 两者共享同一个 Arc。调用方需将此 Arc 传给 [`commit`] / [`rollback`]。
     ///
     /// # Errors
     /// 若已有活跃事务返回错误。
-    pub fn begin_transaction(&self) -> Result<(), TransactionError> {
+    pub fn begin_transaction_arc(&self) -> Result<Arc<MetaTransaction>, TransactionError> {
         let mut current = self.current_transaction.lock();
         if current.is_some() {
             return Err(TransactionError::new(
@@ -191,15 +194,25 @@ impl TransactionContext {
             .map(|d| d.as_micros() as i64)
             .unwrap_or(0);
         let global_transaction_id = next_global_transaction_id();
-        *current = Some(Box::new(MetaTransaction::new(
+        let txn = Arc::new(MetaTransaction::new(
             Arc::clone(&self.transaction_manager),
             start_timestamp,
             global_transaction_id,
             self.db_instance.clone(),
-        )));
-        // 开始手动事务时，关闭自动提交
+        ));
+        *current = Some(Arc::clone(&txn));
         self.auto_commit.store(false, Ordering::Relaxed);
-        Ok(())
+        Ok(txn)
+    }
+
+    /// 开始新事务（C++: `TransactionContext::BeginTransaction()`）。
+    ///
+    /// 内部调用 [`begin_transaction_arc`] 并丢弃返回的 Arc。
+    ///
+    /// # Errors
+    /// 若已有活跃事务返回错误。
+    pub fn begin_transaction(&self) -> Result<(), TransactionError> {
+        self.begin_transaction_arc().map(|_| ())
     }
 
     /// 提交当前事务（C++: `TransactionContext::Commit()`）。

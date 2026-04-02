@@ -109,6 +109,13 @@ impl ClientContext {
         self.transaction.begin_transaction()
     }
 
+    /// 开始事务并返回 `Arc<MetaTransaction>`，供调用方持有并传入 commit/rollback。
+    pub fn begin_transaction_arc(
+        &self,
+    ) -> Result<Arc<crate::transaction::meta_transaction::MetaTransaction>, crate::transaction::transaction_context::TransactionError> {
+        self.transaction.begin_transaction_arc()
+    }
+
     /// 提交事务。
     pub fn commit(&self) -> Result<(), crate::transaction::transaction_context::TransactionError> {
         // Finalize all pending local appends so collection.total_rows is up-to-date
@@ -313,6 +320,14 @@ impl Connection {
     ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
         let context = self.context.lock();
         context.begin_transaction()
+    }
+
+    /// 开始事务并返回 `Arc<MetaTransaction>`，供调用方持有并传给 commit/rollback。
+    pub fn begin_transaction_arc(
+        &self,
+    ) -> Result<Arc<crate::transaction::meta_transaction::MetaTransaction>, crate::transaction::transaction_context::TransactionError> {
+        let context = self.context.lock();
+        context.begin_transaction_arc()
     }
 
     /// 提交事务（C++: `Connection::Commit()`）。

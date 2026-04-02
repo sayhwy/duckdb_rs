@@ -1,3 +1,9 @@
+pub mod duck_engine;
+pub mod engine;
+
+pub use duck_engine::{DuckConnection, DuckEngine};
+pub use engine::{Engine, EngineError, SchemaInfo, SchemaTableInfo};
+
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};

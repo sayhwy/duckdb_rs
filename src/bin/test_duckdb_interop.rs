@@ -11,7 +11,7 @@ use std::path::Path;
 use std::process::Command;
 
 use duckdb_rs::common::types::{DataChunk, LogicalType};
-use duckdb_rs::db::DB;
+use duckdb_rs::db::DuckEngine;
 
 // ─── 配置 ─────────────────────────────────────────────────────────────────────
 
@@ -34,12 +34,10 @@ fn main() {
     println!("┌─ 测试 1: DuckDB 创建 -> Rust 读取 ────────────────────┐");
     println!("│");
 
-    // 删除旧文件
     if Path::new(TEST_DB_DUCKDB).exists() {
         std::fs::remove_file(TEST_DB_DUCKDB).expect("删除旧文件失败");
     }
 
-    // 用 DuckDB 创建学生表
     let create_sql = r#"
 SET force_compression='uncompressed';
 CREATE TABLE students (
@@ -73,14 +71,10 @@ INSERT INTO students VALUES
         );
     }
 
-    // 检查文件
     if Path::new(TEST_DB_DUCKDB).exists() {
-        let size = std::fs::metadata(TEST_DB_DUCKDB)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let size = std::fs::metadata(TEST_DB_DUCKDB).map(|m| m.len()).unwrap_or(0);
         println!("│  ✓ 数据库文件已创建: {} 字节", size);
 
-        // 尝试用 Rust 读取
         println!("│  尝试用 Rust 读取...");
         match test_rust_read_duckdb_file() {
             Ok(tables) => {
@@ -102,24 +96,18 @@ INSERT INTO students VALUES
     println!("\n┌─ 测试 2: Rust 创建 -> DuckDB 读取 ────────────────────┐");
     println!("│");
 
-    // 删除旧文件
     if Path::new(TEST_DB_RUST).exists() {
         std::fs::remove_file(TEST_DB_RUST).expect("删除旧文件失败");
     }
 
-    // 用 Rust 创建学生表
     match test_rust_create_student_table() {
         Ok(()) => {
             println!("│  ✓ Rust 创建学生表成功");
 
-            // 检查文件
             if Path::new(TEST_DB_RUST).exists() {
-                let size = std::fs::metadata(TEST_DB_RUST)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let size = std::fs::metadata(TEST_DB_RUST).map(|m| m.len()).unwrap_or(0);
                 println!("│  ✓ 数据库文件已创建: {} 字节", size);
 
-                // 用 DuckDB 读取
                 println!("│  尝试用 DuckDB 读取...");
                 let output = Command::new(DUCKDB_EXE)
                     .arg(TEST_DB_RUST)
@@ -150,9 +138,6 @@ INSERT INTO students VALUES
 
     println!("└────────────────────────────────────────────────────────┘");
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // 总结
-    // ═══════════════════════════════════════════════════════════════════════════
     println!();
     println!("╔══════════════════════════════════════════════════════╗");
     println!("║                    测试完成                          ║");
@@ -167,16 +152,21 @@ INSERT INTO students VALUES
 // ─── Rust 读取 DuckDB 文件 ─────────────────────────────────────────────────────
 
 fn test_rust_read_duckdb_file() -> Result<Vec<String>, String> {
-    let db = std::panic::catch_unwind(|| DB::open(TEST_DB_DUCKDB))
+    let engine = std::panic::catch_unwind(|| DuckEngine::open(TEST_DB_DUCKDB))
         .map_err(|_| "打开 DuckDB 文件时发生 panic".to_string())?
         .map_err(|e| format!("无法打开数据库: {:?}", e))?;
 
-    // 获取表列表
-    let tables = db.tables();
+    let tables = engine.tables();
 
-    // 尝试读取数据
     if tables.contains(&"students".to_string()) {
-        match db.scan_chunks("students", None) {
+        let conn = engine.connect();
+        let txn = conn
+            .begin_transaction()
+            .map_err(|e| format!("begin_transaction 失败: {}", e))?;
+        let result = conn.scan(&txn, "students", None);
+        conn.commit(txn).ok();
+
+        match result {
             Ok(chunks) => {
                 let total_rows: usize = chunks.iter().map(|c| c.size()).sum();
                 println!("│    读取到 {} 行数据", total_rows);
@@ -188,8 +178,6 @@ fn test_rust_read_duckdb_file() -> Result<Vec<String>, String> {
                     ));
                 }
                 println!("│    ✓ 数据校验通过");
-
-                // 打印前几行数据
                 for (i, chunk) in chunks.iter().take(3).enumerate() {
                     println!("│    Chunk {}: {} 行", i, chunk.size());
                 }
@@ -206,25 +194,24 @@ fn test_rust_read_duckdb_file() -> Result<Vec<String>, String> {
 // ─── Rust 创建学生表 ───────────────────────────────────────────────────────────
 
 fn test_rust_create_student_table() -> Result<(), String> {
-    // 创建内存数据库
-    let mut db = DB::open(TEST_DB_RUST).map_err(|e| format!("无法创建数据库: {:?}", e))?;
+    let engine =
+        DuckEngine::open(TEST_DB_RUST).map_err(|e| format!("无法创建数据库: {:?}", e))?;
+    let mut conn = engine.connect();
 
-    // 创建学生表
-    db.create_table(
-        "main",
-        "students",
-        vec![
-            ("id".to_string(), LogicalType::integer()),
-            ("age".to_string(), LogicalType::integer()),
-            ("score".to_string(), LogicalType::double()),
-            ("class_id".to_string(), LogicalType::bigint()),
-        ],
-    );
+    conn.create_table(
+            "main",
+            "students",
+            vec![
+                ("id".to_string(), LogicalType::integer()),
+                ("age".to_string(), LogicalType::integer()),
+                ("score".to_string(), LogicalType::double()),
+                ("class_id".to_string(), LogicalType::bigint()),
+            ],
+        )
+        .map_err(|e| format!("创建表失败: {}", e))?;
 
-    // 准备学生数据
     let students = expected_students();
 
-    // 创建 DataChunk
     let mut chunk = DataChunk::new();
     chunk.initialize(
         &[
@@ -236,36 +223,33 @@ fn test_rust_create_student_table() -> Result<(), String> {
         students.len(),
     );
 
-    // 填充数据
     for (i, &(id, age, score, class_id)) in students.iter().enumerate() {
-        // id (INTEGER)
         let id_offset = i * 4;
         chunk.data[0].raw_data_mut()[id_offset..id_offset + 4].copy_from_slice(&id.to_le_bytes());
 
-        // age (INTEGER)
         let age_offset = i * 4;
         chunk.data[1].raw_data_mut()[age_offset..age_offset + 4]
             .copy_from_slice(&age.to_le_bytes());
 
-        // score (DOUBLE)
         let score_offset = i * 8;
         chunk.data[2].raw_data_mut()[score_offset..score_offset + 8]
             .copy_from_slice(&score.to_le_bytes());
 
-        // class_id (BIGINT)
         let class_offset = i * 8;
         chunk.data[3].raw_data_mut()[class_offset..class_offset + 8]
             .copy_from_slice(&class_id.to_le_bytes());
     }
     chunk.set_cardinality(students.len());
 
-    // 插入数据
-    db.insert_chunk("students", &mut chunk)
+    let txn = conn
+        .begin_transaction()
+        .map_err(|e| format!("begin_transaction 失败: {}", e))?;
+    conn.insert(&txn, "students", &mut chunk)
         .map_err(|e| format!("插入数据失败: {:?}", e))?;
 
-    // 验证插入
-    let results = db
-        .scan_chunks("students", None)
+    // 在提交前验证（事务内可见自身写入）
+    let results = conn
+        .scan(&txn, "students", None)
         .map_err(|e| format!("查询失败: {:?}", e))?;
     let total_rows: usize = results.iter().map(|c| c.size()).sum();
     println!("│  已插入 {} 行数据", total_rows);
@@ -276,9 +260,12 @@ fn test_rust_create_student_table() -> Result<(), String> {
         ));
     }
 
-    // 执行 checkpoint 将数据写入磁盘
+    conn.commit(txn)
+        .map_err(|e| format!("commit 失败: {}", e))?;
+
     println!("│  执行 checkpoint...");
-    db.checkpoint()
+    engine
+        .checkpoint()
         .map_err(|e| format!("Checkpoint 失败: {:?}", e))?;
     println!("│  ✓ Checkpoint 完成");
 

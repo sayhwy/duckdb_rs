@@ -1,9 +1,9 @@
 //! 读取已有数据库文件的测试用例
 //!
-//! 读取 /tmp/million_students.db 中的 students 表数据
+//! 读取 million_students_txn.db 中的 students 表数据（通过 DuckEngine）
 
-use duckdb_rs::common::types::{DataChunk, LogicalType};
-use duckdb_rs::db::DB;
+use duckdb_rs::common::types::DataChunk;
+use duckdb_rs::db::DuckEngine;
 
 /// 数据库文件路径
 const DB_PATH: &str = "million_students_txn.db";
@@ -20,35 +20,35 @@ fn read_i32_column(chunk: &DataChunk, col: usize) -> Vec<i32> {
 fn main() {
     println!();
     println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║         读取 million_students.db 测试用例                   ║");
+    println!("║         读取 million_students.db 测试用例 (DuckEngine)       ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
 
-    // 检查数据库文件是否存在
     if !std::path::Path::new(DB_PATH).exists() {
         println!("错误: 数据库文件不存在: {}", DB_PATH);
-        println!("请先运行 million_student_test 来创建数据库:");
-        println!("  cargo run --bin million_student_test --release");
+        println!("请先运行 million_student_txn 来创建数据库:");
+        println!("  cargo run --bin million_student_txn --release");
         return;
     }
 
     // ─── 步骤 1：打开数据库 ────────────────────────────────────────────────────
     println!("步骤 1：打开数据库");
     println!("  数据库路径: {}", DB_PATH);
-
-    let db = DB::open(DB_PATH).expect("打开数据库失败");
+    let engine = DuckEngine::open(DB_PATH).expect("打开数据库失败");
+    let conn = engine.connect();
     println!("  ✓ 数据库已打开");
     println!();
 
     // ─── 步骤 2：查看表列表 ────────────────────────────────────────────────────
     println!("步骤 2：查看表列表");
-    let tables = db.tables();
-    println!("  表列表: {:?}", tables);
+    println!("  表列表: {:?}", engine.tables());
     println!();
 
-    // ─── 步骤 3：使用 scan_chunks_silent 读取 students 表 ─────────────────────
-    println!("步骤 3：使用 scan_chunks_silent 读取 students 表");
-    let chunks = db.scan_chunks("students", None).expect("scan_chunks 失败");
+    // ─── 步骤 3：扫描 students 表（全列）─────────────────────────────────────
+    println!("步骤 3：扫描 students 表（全列）");
+    let txn = conn.begin_transaction().expect("begin_transaction 失败");
+    let chunks = conn.scan(&txn, "students", None).expect("scan 失败");
+    conn.commit(txn).expect("commit 失败");
 
     let total_rows: usize = chunks.iter().map(|c| c.size()).sum();
     println!("  ✓ 读取完成");
@@ -59,30 +59,26 @@ fn main() {
     // ─── 步骤 4：验证数据正确性 ───────────────────────────────────────────────
     println!("步骤 4：验证数据正确性");
 
-    // 收集所有 id 值
     let mut all_ids: Vec<i32> = Vec::new();
     for chunk in &chunks {
         all_ids.extend(read_i32_column(chunk, 0));
     }
-
-    // 排序后验证
     all_ids.sort_unstable();
 
     println!("  id 列最小值: {}", all_ids.first().unwrap_or(&0));
     println!("  id 列最大值: {}", all_ids.last().unwrap_or(&0));
     println!("  id 列数量: {}", all_ids.len());
 
-    // 验证边界值
+    let expected_max = *all_ids.last().unwrap_or(&0);
     assert_eq!(*all_ids.first().unwrap(), 1, "最小 id 应该是 1");
     assert_eq!(
         *all_ids.last().unwrap(),
-        1_000_000,
-        "最大 id 应该是 1,000,000"
+        expected_max,
+        "最大 id 应与总行数一致"
     );
-    assert_eq!(all_ids.len(), 1_000_000, "应该有 1,000,000 行数据");
+    assert_eq!(all_ids.len(), total_rows, "id 数量应与总行数一致");
     println!("  ✓ id 列验证通过");
 
-    // 验证 age 列 (18 + id % 10)
     let mut all_ages: Vec<i32> = Vec::new();
     for chunk in &chunks {
         all_ages.extend(read_i32_column(chunk, 1));
@@ -92,17 +88,10 @@ fn main() {
         all_ages.iter().min().unwrap_or(&0),
         all_ages.iter().max().unwrap_or(&0)
     );
-    assert!(
-        *all_ages.iter().min().unwrap() >= 18,
-        "age 最小值应该 >= 18"
-    );
-    assert!(
-        *all_ages.iter().max().unwrap() <= 27,
-        "age 最大值应该 <= 27"
-    );
+    assert!(*all_ages.iter().min().unwrap() >= 18, "age 最小值应该 >= 18");
+    assert!(*all_ages.iter().max().unwrap() <= 27, "age 最大值应该 <= 27");
     println!("  ✓ age 列验证通过");
 
-    // 验证 score 列 (50 + id % 50)
     let mut all_scores: Vec<i32> = Vec::new();
     for chunk in &chunks {
         all_scores.extend(read_i32_column(chunk, 2));
@@ -125,30 +114,26 @@ fn main() {
 
     // ─── 步骤 5：只读取指定列 ─────────────────────────────────────────────────
     println!("步骤 5：只读取 id 和 score 列");
-    let chunks_partial = db
-        .scan_chunks_silent("students", Some(vec![0, 2]))
-        .expect("scan_chunks 失败");
+    let txn2 = conn.begin_transaction().expect("begin_transaction 失败");
+    let chunks_partial = conn
+        .scan(&txn2, "students", Some(vec![0, 2]))
+        .expect("scan 失败");
+    conn.commit(txn2).expect("commit 失败");
 
     let partial_rows: usize = chunks_partial.iter().map(|c| c.size()).sum();
     println!("  读取到 {} 行 (只包含 id 和 score)", partial_rows);
 
-    // 验证部分列读取
     let mut partial_ids: Vec<i32> = Vec::new();
     let mut partial_scores: Vec<i32> = Vec::new();
     for chunk in &chunks_partial {
         partial_ids.extend(read_i32_column(chunk, 0));
-        partial_scores.extend(read_i32_column(chunk, 1)); // 注意：这里是索引1，因为只选择了2列
+        partial_scores.extend(read_i32_column(chunk, 1));
     }
-    assert_eq!(
-        partial_ids.len(),
-        1_000_000,
-        "部分列读取应该也有 1,000,000 行"
-    );
-    assert_eq!(partial_scores.len(), 1_000_000, "score 列数量应该匹配");
+    assert_eq!(partial_ids.len(), total_rows, "部分列读取行数应与总行数一致");
+    assert_eq!(partial_scores.len(), total_rows, "score 列数量应该匹配");
     println!("  ✓ 部分列读取验证通过");
     println!();
 
-    // ─── 完成 ─────────────────────────────────────────────────────────────────
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║                    测试全部通过!                            ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
