@@ -93,7 +93,7 @@ pub struct TransactionContext {
     transaction_manager: Arc<DuckTransactionManager>,
 
     /// 数据库实例的弱引用（用于获取 tables）。
-    db_instance: Weak<crate::connection::connection::DatabaseInstance>,
+    db_instance: Weak<crate::db::connection::DatabaseInstance>,
 }
 
 impl TransactionContext {
@@ -101,7 +101,7 @@ impl TransactionContext {
     pub fn new(
         client_id: u64,
         transaction_manager: Arc<DuckTransactionManager>,
-        db_instance: Weak<crate::connection::connection::DatabaseInstance>,
+        db_instance: Weak<crate::db::connection::DatabaseInstance>,
     ) -> Self {
         Self {
             client_id,

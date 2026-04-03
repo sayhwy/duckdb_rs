@@ -465,6 +465,10 @@ impl Connection {
         Ok(())
     }
 
+    fn flush_pending_appends(&self) {
+        self.context.lock().finalize_append_states();
+    }
+
     fn build_storage_context(
         txn: &Arc<DuckTxnHandle>,
     ) -> crate::storage::data_table::ClientContext {
@@ -532,6 +536,7 @@ impl Connection {
         table_name: &str,
         column_ids: Option<Vec<u64>>,
     ) -> Result<Vec<DataChunk>, String> {
+        self.flush_pending_appends();
         let table = self.get_table(table_name)?;
 
         let column_ids = column_ids.unwrap_or_else(|| {
@@ -552,6 +557,14 @@ impl Connection {
         let txn = self.get_read_transaction();
         let mut state = crate::storage::table::scan_state::TableScanState::new();
         table.storage.initialize_scan(&mut state, column_ids.clone(), None);
+        {
+            let txn_guard = txn.lock_inner();
+            txn_guard.storage.initialize_scan_state(
+                table.storage.info.table_id(),
+                &mut state.local_state,
+                &column_ids,
+            );
+        }
 
         let mut chunks = Vec::new();
         loop {
@@ -596,6 +609,7 @@ impl Connection {
         column_ids: &[u64],
         updates: &mut DataChunk,
     ) -> Result<(), String> {
+        self.flush_pending_appends();
         let table = self.get_table(table_name)?;
         let auto_commit = self.ensure_write_transaction_for_query()?;
 
@@ -623,6 +637,7 @@ impl Connection {
     }
 
     pub fn delete_chunk(&self, table_name: &str, row_ids: &[i64]) -> Result<usize, String> {
+        self.flush_pending_appends();
         let table = self.get_table(table_name)?;
         let auto_commit = self.ensure_write_transaction_for_query()?;
 

@@ -35,7 +35,7 @@ use parking_lot::Mutex;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
-
+use crate::db::connection::DatabaseInstance;
 use super::StandardBufferManager;
 use super::buffer::{BlockAllocator, BlockManager, BufferPool};
 use super::metadata::MetaBlockPointer;
@@ -755,7 +755,7 @@ pub struct SingleFileStorageManager {
     ///
     /// 内部使用 `Mutex` 保护，允许延迟初始化。
     block_manager_inner: Mutex<Option<Arc<dyn BlockManager>>>,
-    db_instance: Mutex<Option<Weak<crate::connection::DatabaseInstance>>>,
+    db_instance: Mutex<Option<Weak<DatabaseInstance>>>,
 }
 
 impl SingleFileStorageManager {
@@ -827,7 +827,7 @@ impl SingleFileStorageManager {
         self.wal_size_atomic.load(Ordering::Relaxed)
     }
 
-    pub fn bind_database_instance(&self, db_instance: Weak<crate::connection::DatabaseInstance>) {
+    pub fn bind_database_instance(&self, db_instance: Weak<DatabaseInstance>) {
         *self.db_instance.lock() = Some(db_instance);
     }
 

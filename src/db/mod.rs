@@ -1,5 +1,6 @@
 pub mod duck_engine;
 pub mod engine;
+pub mod connection;
 
 pub use duck_engine::{DuckConnection, DuckEngine, DuckdbEngine};
 pub use engine::{EngineError, SchemaInfo, SchemaTableInfo};
@@ -9,40 +10,32 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-
 use crate::catalog::{
     ColumnDefinition as CatalogColumnDefinition, ColumnList, CreateTableInfo,
     LogicalType as CatalogLogicalType, TableCatalogEntry,
 };
 use crate::common::types::{DataChunk, LogicalType, STANDARD_VECTOR_SIZE};
-use crate::connection::{Connection, DatabaseInstance, TableHandle as ConnectionTableHandle};
+use crate::db::connection::{Connection, DatabaseInstance, TableHandle};
 use crate::storage::buffer::{BlockAllocator, BlockManager, BufferPool};
 use crate::storage::checkpoint::table_data_reader::{BoundCreateTableInfo, TableDataReader};
-use crate::storage::checkpoint_manager::TableInfo;
 use crate::storage::data_table::{
-    ClientContext, ColumnDefinition as StorageColumnDefinition, DataTable,
+    ColumnDefinition as StorageColumnDefinition, DataTable,
 };
 use crate::storage::metadata::{BlockReaderType, MetadataManager, MetadataReader};
 use crate::storage::standard_file_system::LocalFileSystem;
 use crate::storage::storage_info::{
-    BLOCK_HEADER_SIZE, DatabaseHeader, FILE_HEADER_SIZE, FileOpenFlags, FileSystem, INVALID_BLOCK,
-    MainHeader, StorageError, StorageManagerOptions, StorageResult,
+    DatabaseHeader, FileOpenFlags, FileSystem, MainHeader, StorageError, StorageManagerOptions,
+    StorageResult, BLOCK_HEADER_SIZE, FILE_HEADER_SIZE, INVALID_BLOCK,
 };
 use crate::storage::storage_manager::{SingleFileStorageManager, StorageManager, StorageOptions};
 use crate::storage::table::persistent_table_data::{PersistentStorageRuntime, PersistentTableData};
 use crate::storage::wal_replay::{
-    CatalogOps, DB_IDENTIFIER_LEN, ReplayIndexInfo, WalError, WalReplayer, WalResult,
+    CatalogOps, ReplayIndexInfo, WalError, WalReplayer, WalResult, DB_IDENTIFIER_LEN,
 };
 use crate::storage::write_ahead_log::WalInitState;
 use crate::storage::{SingleFileBlockManager, StandardBufferManager};
 use crate::transaction::duck_transaction_manager::DuckTransactionManager;
 
-#[derive(Clone)]
-pub struct TableHandle {
-    pub catalog_entry: TableCatalogEntry,
-    pub storage: Arc<DataTable>,
-}
 
 /// 数据库实例（C++: `class DuckDB` / `DatabaseInstance`）。
 ///
@@ -104,7 +97,7 @@ impl InnerDatabase {
             let handle = build_table_handle(entry, idx as u64 + 1, runtime.clone());
             tables.insert(
                 normalize_name(&entry.name),
-                ConnectionTableHandle {
+                TableHandle {
                     catalog_entry: handle.catalog_entry,
                     storage: handle.storage,
                 },
@@ -205,7 +198,7 @@ impl InnerDatabase {
         let storage = DataTable::new(1, table_id, schema, table, storage_columns, None);
         self.instance.tables.lock().insert(
             normalize_name(table),
-            ConnectionTableHandle {
+            TableHandle {
                 catalog_entry,
                 storage,
             },
@@ -623,7 +616,7 @@ impl RecoveryCatalog {
         Self { db, conn }
     }
 
-    fn table_handle(&self, schema: &str, table: &str) -> WalResult<ConnectionTableHandle> {
+    fn table_handle(&self, schema: &str, table: &str) -> WalResult<TableHandle> {
         let tables = self.db.tables.lock();
         let handle = tables
             .get(&normalize_name(table))
@@ -891,7 +884,7 @@ fn decode_delete_row_ids(payload: &[u8]) -> WalResult<Vec<i64>> {
 fn decode_update_payload(
     column_indexes_payload: &[u8],
     chunk_payload: &[u8],
-    table: &ConnectionTableHandle,
+    table: &TableHandle,
 ) -> WalResult<(Vec<i64>, Vec<u64>, DataChunk)> {
     if column_indexes_payload.len() < 4 || chunk_payload.len() < 4 {
         return Err(WalError::Corrupt("update payload is truncated".into()));

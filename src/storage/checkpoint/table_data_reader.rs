@@ -43,19 +43,18 @@ impl<'a, 'mgr> TableDataReader<'a, 'mgr> {
 
         // Read TableStatistics
         {
-            let mut deserializer = BinaryMetadataDeserializer::new(self.reader);
-            let storage_types: Vec<crate::common::types::LogicalType> = self
+            let column_type_ids: Vec<LogicalTypeId> = self
                 .info
                 .base
                 .columns
                 .columns
                 .iter()
-                .map(|col| catalog_type_to_storage_type(&col.logical_type))
+                .map(|col| col.logical_type.id.clone())
                 .collect();
-            data.table_stats =
-                TableStatistics::deserialize_checkpoint(&mut deserializer, &storage_types)
-                    .expect("failed to deserialize table statistics");
-
+            let mut deserializer = BinaryMetadataDeserializer::new(self.reader);
+            skip_table_statistics(&mut deserializer, &column_type_ids)
+                .expect("failed to skip table statistics");
+            data.table_stats = TableStatistics::new();
         }
 
         // Read row_group_count

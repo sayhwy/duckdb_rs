@@ -22,6 +22,7 @@ const TEST_DB_DUCKDB: &str = "student_duckdb.db";
 // ─── 主函数 ───────────────────────────────────────────────────────────────────
 
 fn main() {
+    std::panic::set_hook(Box::new(|_| {}));
     println!();
     println!("╔══════════════════════════════════════════════════════╗");
     println!("║        DuckDB ↔ Rust 互操作性测试                    ║");

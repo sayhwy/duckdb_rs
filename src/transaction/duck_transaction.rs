@@ -498,7 +498,7 @@ impl DuckTransaction {
     /// ```
     pub fn automatic_checkpoint(
         &self,
-        db: &Arc<crate::connection::connection::DatabaseInstance>,
+        db: &Arc<crate::db::connection::DatabaseInstance>,
         properties: &UndoBufferProperties,
     ) -> bool {
         // C++: if (!ChangesMade()) { return false; }
