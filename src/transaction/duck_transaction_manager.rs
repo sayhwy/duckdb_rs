@@ -574,7 +574,7 @@ impl DuckTransactionManager {
         txn_id: TransactionId,
         handle: &DuckTxnHandle,
         checkpoint_lock_out: &mut Option<Box<StorageLockKey>>,
-        db: &Arc<crate::db::connection::DatabaseInstance>,
+        db: &Arc<crate::db::conn::DatabaseInstance>,
         db_ctx: &DbContext,
     ) -> CheckpointDecision {
         // C++: if (db.IsSystem()) return "system transaction";
@@ -830,7 +830,7 @@ impl DuckTransactionManager {
     /// 成功返回 `None`，失败返回 `Some(ErrorData)`
     pub fn commit_transaction(
         &self,
-        db: &Arc<crate::db::connection::DatabaseInstance>,
+        db: &Arc<crate::db::conn::DatabaseInstance>,
         transaction: &TransactionRef,
     ) -> Option<ErrorData> {
         let txn_id = transaction.transaction_id();

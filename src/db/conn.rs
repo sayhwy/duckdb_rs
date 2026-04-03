@@ -61,10 +61,6 @@ pub struct ClientContext {
 
     /// 是否中断（C++: `atomic<bool> interrupted`）。
     interrupted: std::sync::atomic::AtomicBool,
-
-    /// 每个表的 LocalAppendState，在事务期间复用。
-    /// 类似 DuckDB C++ 的 BatchInsertLocalState::current_append_state。
-    append_states: Mutex<HashMap<u64, crate::storage::table::append_state::LocalAppendState>>,
 }
 
 impl ClientContext {
@@ -78,7 +74,6 @@ impl ClientContext {
             db,
             connection_id: next_connection_id(),
             interrupted: std::sync::atomic::AtomicBool::new(false),
-            append_states: Mutex::new(HashMap::new()),
         }
     }
 
@@ -87,43 +82,6 @@ impl ClientContext {
         self.transaction.try_get_transaction()
     }
 
-    fn with_append_state<R>(
-        &self,
-        table: &TableHandle,
-        storage_context: &crate::storage::data_table::ClientContext,
-        f: impl FnOnce(
-            &mut crate::storage::table::append_state::LocalAppendState,
-        ) -> Result<R, String>,
-    ) -> Result<R, String> {
-        let table_id = table.storage.info.table_id();
-        let mut append_states = self.append_states.lock();
-        if !append_states.contains_key(&table_id) {
-            let mut state = crate::storage::table::append_state::LocalAppendState::new();
-            table
-                .storage
-                .initialize_local_append(&mut state, &table.catalog_entry, storage_context, &[])
-                .map_err(|e| format!("Initialize append failed: {:?}", e))?;
-            append_states.insert(table_id, state);
-        }
-        let state = append_states.get_mut(&table_id).unwrap();
-        f(state)
-    }
-
-    fn finalize_append_states(&self) {
-        let tables = self.db.tables.lock();
-        let mut states = self.append_states.lock();
-        for (table_id, state) in states.iter_mut() {
-            if let Some(table) = tables
-                .values()
-                .find(|handle| handle.storage.info.table_id() == *table_id)
-            {
-                table.storage.finalize_local_append(state);
-            } else {
-                crate::storage::local_storage::LocalStorage::finalize_append(state);
-            }
-        }
-        states.clear();
-    }
 
     /// 中断执行（C++: `Interrupt()`）。
     pub fn interrupt(&self) {
@@ -146,19 +104,10 @@ impl ClientContext {
     ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
         self.transaction.begin_transaction()
     }
-
-    /// 开始事务并返回 `Arc<MetaTransaction>`，供调用方持有并传入 commit/rollback。
-    pub fn begin_transaction_arc(
-        &self,
-    ) -> Result<Arc<crate::transaction::meta_transaction::MetaTransaction>, crate::transaction::transaction_context::TransactionError> {
-        self.transaction.begin_transaction_arc()
-    }
+    
 
     /// 提交事务。
     pub fn commit(&self) -> Result<(), crate::transaction::transaction_context::TransactionError> {
-        // Finalize all pending local appends so collection.total_rows is up-to-date
-        // before LocalStorage::commit() scans them in flush_one.
-        self.finalize_append_states();
         self.transaction.commit()
     }
 
@@ -166,8 +115,6 @@ impl ClientContext {
     pub fn rollback(
         &self,
     ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
-        // Discard pending local append states on rollback.
-        self.append_states.lock().clear();
         self.transaction.rollback()
     }
 
@@ -354,14 +301,6 @@ impl Connection {
         context.begin_transaction()
     }
 
-    /// 开始事务并返回 `Arc<MetaTransaction>`，供调用方持有并传给 commit/rollback。
-    pub fn begin_transaction_arc(
-        &self,
-    ) -> Result<Arc<crate::transaction::meta_transaction::MetaTransaction>, crate::transaction::transaction_context::TransactionError> {
-        let context = self.context.lock();
-        context.begin_transaction_arc()
-    }
-
     /// 提交事务（C++: `Connection::Commit()`）。
     ///
     /// # C++ 源码
@@ -466,7 +405,7 @@ impl Connection {
     }
 
     fn flush_pending_appends(&self) {
-        self.context.lock().finalize_append_states();
+        // local_append finalizes each append immediately; nothing to flush.
     }
 
     fn build_storage_context(
@@ -518,14 +457,11 @@ impl Connection {
         let table = self.get_table(table_name)?;
         let auto_commit = self.ensure_write_transaction_for_query()?;
 
-        let (context_guard, _txn, storage_context) = self.get_write_transaction_context();
-        context_guard.with_append_state(&table, &storage_context, |state| {
-            table
-                .storage
-                .local_append_chunk(state, &storage_context, chunk, false)
-                .map_err(|e| format!("Append failed: {:?}", e))
-        })?;
-        drop(context_guard);
+        let (_context_guard, _txn, storage_context) = self.get_write_transaction_context();
+        table
+            .storage
+            .local_append(&table.catalog_entry, &storage_context, chunk, &[])
+            .map_err(|e| format!("Append failed: {:?}", e))?;
 
         self.commit_if_auto_commit(auto_commit)
     }

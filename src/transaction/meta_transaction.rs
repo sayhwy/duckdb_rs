@@ -86,7 +86,7 @@ pub struct MetaTransaction {
     transaction_manager: Arc<DuckTransactionManager>,
 
     /// 数据库实例的弱引用（C++: `ClientContext &context` 中包含）。
-    db_instance: Weak<crate::db::connection::DatabaseInstance>,
+    db_instance: Weak<crate::db::conn::DatabaseInstance>,
 }
 
 impl MetaTransaction {
@@ -95,7 +95,7 @@ impl MetaTransaction {
         transaction_manager: Arc<DuckTransactionManager>,
         start_timestamp: Timestamp,
         global_transaction_id: TransactionId,
-        db_instance: Weak<crate::db::connection::DatabaseInstance>,
+        db_instance: Weak<crate::db::conn::DatabaseInstance>,
     ) -> Self {
         Self {
             start_timestamp,

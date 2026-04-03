@@ -35,7 +35,7 @@ use parking_lot::Mutex;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
-use crate::db::connection::DatabaseInstance;
+use crate::db::conn::DatabaseInstance;
 use super::StandardBufferManager;
 use super::buffer::{BlockAllocator, BlockManager, BufferPool};
 use super::metadata::MetaBlockPointer;

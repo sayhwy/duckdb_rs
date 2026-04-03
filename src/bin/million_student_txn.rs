@@ -166,7 +166,7 @@ fn main() {
         let count = remaining.min(BATCH_SIZE);
 
         // 开启事务，获取句柄
-        let txn = conn
+        conn
             .begin_transaction()
             .unwrap_or_else(|e| panic!("第 {} 批 begin_transaction 失败: {:?}", batch_idx + 1, e));
 

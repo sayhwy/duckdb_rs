@@ -1,6 +1,6 @@
 pub mod duck_engine;
 pub mod engine;
-pub mod connection;
+pub mod conn;
 
 pub use duck_engine::{DuckConnection, DuckEngine, DuckdbEngine};
 pub use engine::{EngineError, SchemaInfo, SchemaTableInfo};
@@ -15,7 +15,7 @@ use crate::catalog::{
     LogicalType as CatalogLogicalType, TableCatalogEntry,
 };
 use crate::common::types::{DataChunk, LogicalType, STANDARD_VECTOR_SIZE};
-use crate::db::connection::{Connection, DatabaseInstance, TableHandle};
+use crate::db::conn::{Connection, DatabaseInstance, TableHandle};
 use crate::storage::buffer::{BlockAllocator, BlockManager, BufferPool};
 use crate::storage::checkpoint::table_data_reader::{BoundCreateTableInfo, TableDataReader};
 use crate::storage::data_table::{

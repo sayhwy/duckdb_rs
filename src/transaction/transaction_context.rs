@@ -93,7 +93,7 @@ pub struct TransactionContext {
     transaction_manager: Arc<DuckTransactionManager>,
 
     /// 数据库实例的弱引用（用于获取 tables）。
-    db_instance: Weak<crate::db::connection::DatabaseInstance>,
+    db_instance: Weak<crate::db::conn::DatabaseInstance>,
 }
 
 impl TransactionContext {
@@ -101,7 +101,7 @@ impl TransactionContext {
     pub fn new(
         client_id: u64,
         transaction_manager: Arc<DuckTransactionManager>,
-        db_instance: Weak<crate::db::connection::DatabaseInstance>,
+        db_instance: Weak<crate::db::conn::DatabaseInstance>,
     ) -> Self {
         Self {
             client_id,
@@ -173,16 +173,14 @@ impl TransactionContext {
         self.auto_commit.store(value, Ordering::Relaxed);
     }
 
-    // ── 事务生命周期 ──────────────────────────────────────────────────────────
 
-    /// 开始新事务，返回 `Arc<MetaTransaction>`（供外部持有）。
+    /// 开始新事务（C++: `TransactionContext::BeginTransaction()`）。
     ///
-    /// 创建 `MetaTransaction` 并同时存入 `current_transaction` 和返回给调用方，
-    /// 两者共享同一个 Arc。调用方需将此 Arc 传给 [`commit`] / [`rollback`]。
+    /// 内部调用 [`begin_transaction_arc`] 并丢弃返回的 Arc。
     ///
     /// # Errors
     /// 若已有活跃事务返回错误。
-    pub fn begin_transaction_arc(&self) -> Result<Arc<MetaTransaction>, TransactionError> {
+    pub fn begin_transaction(&self) -> Result<(), TransactionError> {
         let mut current = self.current_transaction.lock();
         if current.is_some() {
             return Err(TransactionError::new(
@@ -202,17 +200,7 @@ impl TransactionContext {
         ));
         *current = Some(Arc::clone(&txn));
         self.auto_commit.store(false, Ordering::Relaxed);
-        Ok(txn)
-    }
-
-    /// 开始新事务（C++: `TransactionContext::BeginTransaction()`）。
-    ///
-    /// 内部调用 [`begin_transaction_arc`] 并丢弃返回的 Arc。
-    ///
-    /// # Errors
-    /// 若已有活跃事务返回错误。
-    pub fn begin_transaction(&self) -> Result<(), TransactionError> {
-        self.begin_transaction_arc().map(|_| ())
+        Ok(())
     }
 
     /// 提交当前事务（C++: `TransactionContext::Commit()`）。

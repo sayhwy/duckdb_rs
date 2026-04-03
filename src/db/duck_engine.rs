@@ -38,7 +38,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::common::types::{DataChunk, LogicalType};
-use crate::db::connection::Connection;
+use crate::db::conn::Connection;
 use super::InnerDatabase;
 use super::engine::{EngineError, SchemaInfo, SchemaTableInfo};
 

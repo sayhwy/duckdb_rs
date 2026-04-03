@@ -35,11 +35,18 @@ impl<'a, 'mgr> TableDataReader<'a, 'mgr> {
     }
 
     pub fn read_table_data(&mut self) {
+        if let Err(e) = self.read_table_data_inner() {
+            eprintln!("[table_data_reader] ERROR reading table data: {}", e);
+        }
+    }
+
+    fn read_table_data_inner(&mut self) -> std::io::Result<()> {
         let data = self
             .info
             .data
             .as_mut()
-            .expect("TableDataReader::new must initialize PersistentTableData");
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData,
+                "TableDataReader::new must initialize PersistentTableData"))?;
 
         // Read TableStatistics
         {
@@ -53,7 +60,8 @@ impl<'a, 'mgr> TableDataReader<'a, 'mgr> {
                 .collect();
             let mut deserializer = BinaryMetadataDeserializer::new(self.reader);
             skip_table_statistics(&mut deserializer, &column_type_ids)
-                .expect("failed to skip table statistics");
+                .map_err(|e| std::io::Error::new(e.kind(),
+                    format!("skip_table_statistics: {}", e)))?;
             data.table_stats = TableStatistics::new();
         }
 
@@ -69,9 +77,11 @@ impl<'a, 'mgr> TableDataReader<'a, 'mgr> {
         for i in 0..data.row_group_count {
             let pointer = deserializer
                 .read_row_group_pointer()
-                .unwrap_or_else(|e| panic!("failed to read row group pointer {}: {}", i, e));
+                .map_err(|e| std::io::Error::new(e.kind(),
+                    format!("read_row_group_pointer[{}]: {}", i, e)))?;
             data.row_group_pointers.push(pointer);
         }
+        Ok(())
     }
 }
 
