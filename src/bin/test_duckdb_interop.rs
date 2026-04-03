@@ -163,8 +163,8 @@ fn test_rust_read_duckdb_file() -> Result<Vec<String>, String> {
         let txn = conn
             .begin_transaction()
             .map_err(|e| format!("begin_transaction 失败: {}", e))?;
-        let result = conn.scan(&txn, "students", None);
-        conn.commit(txn).ok();
+        let result = conn.scan("students", None);
+        conn.commit().ok();
 
         match result {
             Ok(chunks) => {
@@ -244,12 +244,12 @@ fn test_rust_create_student_table() -> Result<(), String> {
     let txn = conn
         .begin_transaction()
         .map_err(|e| format!("begin_transaction 失败: {}", e))?;
-    conn.insert(&txn, "students", &mut chunk)
+    conn.insert("students", &mut chunk)
         .map_err(|e| format!("插入数据失败: {:?}", e))?;
 
     // 在提交前验证（事务内可见自身写入）
     let results = conn
-        .scan(&txn, "students", None)
+        .scan("students", None)
         .map_err(|e| format!("查询失败: {:?}", e))?;
     let total_rows: usize = results.iter().map(|c| c.size()).sum();
     println!("│  已插入 {} 行数据", total_rows);
@@ -260,7 +260,7 @@ fn test_rust_create_student_table() -> Result<(), String> {
         ));
     }
 
-    conn.commit(txn)
+    conn.commit()
         .map_err(|e| format!("commit 失败: {}", e))?;
 
     println!("│  执行 checkpoint...");

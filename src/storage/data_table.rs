@@ -1271,7 +1271,7 @@ impl DataTable {
         }
 
         // 4. 写入本地存储（C++: `LocalStorage::Append(state, chunk, *data_table_info)`）
-        LocalStorage::append(state, chunk, &self.info);
+        LocalStorage::append(state, chunk, &self.info)?;
 
         Ok(())
     }

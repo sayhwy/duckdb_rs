@@ -46,9 +46,9 @@ fn main() {
 
     // ─── 步骤 3：扫描 students 表（全列）─────────────────────────────────────
     println!("步骤 3：扫描 students 表（全列）");
-    let txn = conn.begin_transaction().expect("begin_transaction 失败");
-    let chunks = conn.scan(&txn, "students", None).expect("scan 失败");
-    conn.commit(txn).expect("commit 失败");
+    conn.begin_transaction().expect("begin_transaction 失败");
+    let chunks = conn.scan("students", None).expect("scan 失败");
+    conn.commit().expect("commit 失败");
 
     let total_rows: usize = chunks.iter().map(|c| c.size()).sum();
     println!("  ✓ 读取完成");
@@ -114,11 +114,11 @@ fn main() {
 
     // ─── 步骤 5：只读取指定列 ─────────────────────────────────────────────────
     println!("步骤 5：只读取 id 和 score 列");
-    let txn2 = conn.begin_transaction().expect("begin_transaction 失败");
+    conn.begin_transaction().expect("begin_transaction 失败");
     let chunks_partial = conn
-        .scan(&txn2, "students", Some(vec![0, 2]))
+        .scan("students", Some(vec![0, 2]))
         .expect("scan 失败");
-    conn.commit(txn2).expect("commit 失败");
+    conn.commit().expect("commit 失败");
 
     let partial_rows: usize = chunks_partial.iter().map(|c| c.size()).sum();
     println!("  读取到 {} 行 (只包含 id 和 score)", partial_rows);

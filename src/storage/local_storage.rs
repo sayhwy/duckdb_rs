@@ -696,14 +696,14 @@ impl LocalTableStorage {
 /// 使用 `table_id: u64` 作为键（对应 C++ `reference_map_t<DataTable, ...>`）。
 pub struct LocalTableManager {
     /// 受锁保护的表存储映射（C++: `mutable mutex table_storage_lock`）。
-    table_storage: Mutex<HashMap<u64, Arc<Mutex<LocalTableStorage>>>>,
+    table_storage: Arc<Mutex<HashMap<u64, Arc<Mutex<LocalTableStorage>>>>>,
 }
 
 impl LocalTableManager {
     /// 创建空的管理器。
     pub fn new() -> Self {
         Self {
-            table_storage: Mutex::new(HashMap::new()),
+            table_storage: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -798,6 +798,14 @@ impl LocalTableManager {
 impl Default for LocalTableManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Clone for LocalTableManager {
+    fn clone(&self) -> Self {
+        Self {
+            table_storage: Arc::clone(&self.table_storage),
+        }
     }
 }
 
@@ -1511,13 +1519,14 @@ impl Default for LocalStorage {
 }
 
 impl Clone for LocalStorage {
-    /// Creates a fresh empty `LocalStorage`.
+    /// Creates a shallow clone that shares transaction-local table entries.
     ///
-    /// NOTE: This does **not** share table-storage data with the original.
-    /// Cloning is provided primarily so that `ClientContext` (which embeds
-    /// `LocalStorage`) can be constructed from an existing transaction context
-    /// in the connection layer. The cloned instance starts with no local tables.
+    /// This lets higher layers pass a storage-aware execution context into
+    /// `DataTable` methods without re-implementing the CRUD orchestration in
+    /// `Connection`.
     fn clone(&self) -> Self {
-        Self::new()
+        Self {
+            table_manager: self.table_manager.clone(),
+        }
     }
 }

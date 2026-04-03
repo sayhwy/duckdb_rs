@@ -1,4 +1,4 @@
-//! Connection 实现。
+﻿//! Connection 实现。
 //!
 //! 对应 DuckDB C++: `duckdb/main/connection.hpp` / `connection.cpp`
 
@@ -64,7 +64,7 @@ pub struct ClientContext {
 
     /// 每个表的 LocalAppendState，在事务期间复用。
     /// 类似 DuckDB C++ 的 BatchInsertLocalState::current_append_state。
-    append_states: Mutex<HashMap<String, crate::storage::table::append_state::LocalAppendState>>,
+    append_states: Mutex<HashMap<u64, crate::storage::table::append_state::LocalAppendState>>,
 }
 
 impl ClientContext {
@@ -85,6 +85,44 @@ impl ClientContext {
     /// 获取活跃事务句柄（如果存在）。
     pub fn active_transaction(&self) -> Option<Arc<DuckTxnHandle>> {
         self.transaction.try_get_transaction()
+    }
+
+    fn with_append_state<R>(
+        &self,
+        table: &TableHandle,
+        storage_context: &crate::storage::data_table::ClientContext,
+        f: impl FnOnce(
+            &mut crate::storage::table::append_state::LocalAppendState,
+        ) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let table_id = table.storage.info.table_id();
+        let mut append_states = self.append_states.lock();
+        if !append_states.contains_key(&table_id) {
+            let mut state = crate::storage::table::append_state::LocalAppendState::new();
+            table
+                .storage
+                .initialize_local_append(&mut state, &table.catalog_entry, storage_context, &[])
+                .map_err(|e| format!("Initialize append failed: {:?}", e))?;
+            append_states.insert(table_id, state);
+        }
+        let state = append_states.get_mut(&table_id).unwrap();
+        f(state)
+    }
+
+    fn finalize_append_states(&self) {
+        let tables = self.db.tables.lock();
+        let mut states = self.append_states.lock();
+        for (table_id, state) in states.iter_mut() {
+            if let Some(table) = tables
+                .values()
+                .find(|handle| handle.storage.info.table_id() == *table_id)
+            {
+                table.storage.finalize_local_append(state);
+            } else {
+                crate::storage::local_storage::LocalStorage::finalize_append(state);
+            }
+        }
+        states.clear();
     }
 
     /// 中断执行（C++: `Interrupt()`）。
@@ -120,13 +158,7 @@ impl ClientContext {
     pub fn commit(&self) -> Result<(), crate::transaction::transaction_context::TransactionError> {
         // Finalize all pending local appends so collection.total_rows is up-to-date
         // before LocalStorage::commit() scans them in flush_one.
-        {
-            let mut states = self.append_states.lock();
-            for (_, state) in states.iter_mut() {
-                crate::storage::local_storage::LocalStorage::finalize_append(state);
-            }
-            states.clear();
-        }
+        self.finalize_append_states();
         self.transaction.commit()
     }
 
@@ -389,6 +421,84 @@ impl Connection {
         self.context.lock().interrupt();
     }
 
+    fn get_table(&self, table_name: &str) -> Result<TableHandle, String> {
+        let tables = self.db.tables.lock();
+        tables
+            .get(&table_name.to_ascii_lowercase())
+            .cloned()
+            .ok_or_else(|| format!("Table '{}' not found", table_name))
+    }
+
+    fn ensure_write_transaction_for_query(&self) -> Result<bool, String> {
+        let auto_commit = self.is_auto_commit();
+        if auto_commit && !self.has_active_transaction() {
+            self.begin_transaction().map_err(|e| e.to_string())?;
+        }
+        Ok(auto_commit)
+    }
+
+    fn get_write_transaction_context(
+        &self,
+    ) -> (
+        parking_lot::MutexGuard<'_, ClientContext>,
+        Arc<DuckTxnHandle>,
+        crate::storage::data_table::ClientContext,
+    ) {
+        let context_guard = self.context.lock();
+        let txn = context_guard.transaction.get_or_create_write_transaction();
+        let storage_context = Self::build_storage_context(&txn);
+        (context_guard, txn, storage_context)
+    }
+
+    fn get_read_transaction(&self) -> Arc<DuckTxnHandle> {
+        if let Some(txn) = self.get_transaction() {
+            txn
+        } else {
+            self.context.lock().transaction.get_or_create_transaction()
+        }
+    }
+
+    fn commit_if_auto_commit(&self, auto_commit: bool) -> Result<(), String> {
+        if auto_commit {
+            self.context.lock().commit().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn build_storage_context(
+        txn: &Arc<DuckTxnHandle>,
+    ) -> crate::storage::data_table::ClientContext {
+        let txn_guard = txn.lock_inner();
+        crate::storage::data_table::ClientContext {
+            local_storage: *txn_guard.storage.clone(),
+            transaction: Some(Arc::clone(txn)),
+            transaction_data: crate::storage::table::types::TransactionData {
+                start_time: txn_guard.start_time,
+                transaction_id: txn_guard.transaction_id,
+            },
+        }
+    }
+
+    fn build_row_id_vector(row_ids: &[i64]) -> crate::common::types::Vector {
+        let mut row_id_vector = crate::common::types::Vector::with_capacity(
+            crate::common::types::LogicalType::bigint(),
+            row_ids.len(),
+        );
+        for (idx, row_id) in row_ids.iter().copied().enumerate() {
+            let base = idx * 8;
+            row_id_vector.raw_data_mut()[base..base + 8].copy_from_slice(&row_id.to_le_bytes());
+        }
+        row_id_vector
+    }
+
+    fn build_physical_column_ids(column_ids: &[u64]) -> Vec<PhysicalIndex> {
+        column_ids
+            .iter()
+            .copied()
+            .map(|idx| PhysicalIndex(idx as usize))
+            .collect()
+    }
+
     /// 插入数据到指定表（C++: `Append()`）。
     ///
     /// 在自动提交模式下，会自动开始并提交事务。
@@ -401,69 +511,19 @@ impl Connection {
     /// # 返回
     /// 成功返回 `Ok(())`，失败返回错误信息。
     pub fn insert_chunk(&self, table_name: &str, chunk: &mut DataChunk) -> Result<(), String> {
-        // 获取表
-        let tables = self.db.tables.lock();
-        let table = tables
-            .get(&table_name.to_ascii_lowercase())
-            .ok_or_else(|| format!("Table '{}' not found", table_name))?
-            .clone();
-        drop(tables);
+        let table = self.get_table(table_name)?;
+        let auto_commit = self.ensure_write_transaction_for_query()?;
 
-        // 获取或创建事务
-        let auto_commit = self.is_auto_commit();
-        if auto_commit {
-            // 自动提交模式：确保有事务
-            if !self.has_active_transaction() {
-                self.begin_transaction().map_err(|e| e.to_string())?;
-            }
-        }
-
-        let table_id = table.storage.info.table_id();
-        let table_info = Arc::clone(&table.storage.info);
-        let table_types = table.storage.get_types();
-
-        // 获取写事务句柄
-        let context_guard = self.context.lock();
-        let txn = context_guard.transaction.get_or_create_write_transaction();
-
-        // 按照 DuckDB 的方式：复用 LocalAppendState
-        // 类似 C++ 的 BatchInsertLocalState::current_append_state
-        let table_key = table_name.to_ascii_lowercase();
-        let mut append_states = context_guard.append_states.lock();
-
-        // 获取或初始化该表的 LocalAppendState
-        // 直接在事务的真实 LocalStorage 中创建 LocalTableStorage，
-        // 而不是通过克隆的 StorageClientContext（克隆的存储在提交时不可见）。
-        if !append_states.contains_key(&table_key) {
-            let mut state = crate::storage::table::append_state::LocalAppendState::new();
-            {
-                let inner = txn.lock_inner();
-                inner.storage.initialize_append_state(
-                    &mut state,
-                    table_id,
-                    table_info,
-                    table_types.clone(),
-                );
-            }
-            append_states.insert(table_key.clone(), state);
-        }
-
-        let state = append_states.get_mut(&table_key).unwrap();
-
-        // 执行插入
-        crate::storage::local_storage::LocalStorage::append(state, chunk, &table.storage.info)
-            .map_err(|e| format!("Append failed: {:?}", e))?;
-
-        drop(append_states);
+        let (context_guard, _txn, storage_context) = self.get_write_transaction_context();
+        context_guard.with_append_state(&table, &storage_context, |state| {
+            table
+                .storage
+                .local_append_chunk(state, &storage_context, chunk, false)
+                .map_err(|e| format!("Append failed: {:?}", e))
+        })?;
         drop(context_guard);
 
-        // 如果是自动提交模式，立即提交
-        if auto_commit {
-            let context_guard = self.context.lock();
-            context_guard.commit().map_err(|e| e.to_string())?;
-        }
-
-        Ok(())
+        self.commit_if_auto_commit(auto_commit)
     }
 
     /// 扫描表数据。
@@ -472,12 +532,7 @@ impl Connection {
         table_name: &str,
         column_ids: Option<Vec<u64>>,
     ) -> Result<Vec<DataChunk>, String> {
-        let tables = self.db.tables.lock();
-        let table = tables
-            .get(&table_name.to_ascii_lowercase())
-            .ok_or_else(|| format!("Table '{}' not found", table_name))?;
-        let table = table.clone();
-        drop(tables);
+        let table = self.get_table(table_name)?;
 
         let column_ids = column_ids.unwrap_or_else(|| {
             (0..table.storage.column_count())
@@ -494,23 +549,9 @@ impl Connection {
             })
             .collect();
 
-        let mut state = table.storage.begin_scan_state(column_ids.clone());
-
-        // 获取事务句柄（优先使用已有事务，否则创建临时只读事务）
-        let txn = if let Some(t) = self.get_transaction() {
-            t
-        } else {
-            self.context.lock().transaction.get_or_create_transaction()
-        };
-
-        {
-            let txn_guard = txn.lock_inner();
-            txn_guard.storage.initialize_scan_state(
-                table.storage.info.table_id(),
-                &mut state.local_state,
-                &column_ids,
-            );
-        }
+        let txn = self.get_read_transaction();
+        let mut state = crate::storage::table::scan_state::TableScanState::new();
+        table.storage.initialize_scan(&mut state, column_ids.clone(), None);
 
         let mut chunks = Vec::new();
         loop {
@@ -555,52 +596,21 @@ impl Connection {
         column_ids: &[u64],
         updates: &mut DataChunk,
     ) -> Result<(), String> {
-        let tables = self.db.tables.lock();
-        let table = tables
-            .get(&table_name.to_ascii_lowercase())
-            .ok_or_else(|| format!("Table '{}' not found", table_name))?
-            .clone();
-        drop(tables);
+        let table = self.get_table(table_name)?;
+        let auto_commit = self.ensure_write_transaction_for_query()?;
 
-        // Auto-commit behavior matches insert_chunk.
-        let auto_commit = self.is_auto_commit();
-        if auto_commit && !self.has_active_transaction() {
-            self.begin_transaction().map_err(|e| e.to_string())?;
-        }
+        let (context_guard, _txn, storage_context) = self.get_write_transaction_context();
+        let mut row_id_vector = Self::build_row_id_vector(row_ids);
+        let physical_column_ids = Self::build_physical_column_ids(column_ids);
 
-        // Get write transaction
-        let context_guard = self.context.lock();
-        let txn = context_guard.transaction.get_or_create_write_transaction();
-
-        let txn_data = txn.transaction_data();
-        let storage_txn_data = crate::storage::table::types::TransactionData {
-            start_time: txn_data.start_time,
-            transaction_id: txn_data.transaction_id,
-        };
-        let mut storage_context = crate::storage::data_table::ClientContext {
-            local_storage: crate::storage::local_storage::LocalStorage::new(),
-            transaction: Some(txn.clone()),
-            transaction_data: storage_txn_data,
-        };
-        let mut row_id_vector = crate::common::types::Vector::with_capacity(
-            crate::common::types::LogicalType::bigint(),
-            row_ids.len(),
-        );
-        for (idx, row_id) in row_ids.iter().copied().enumerate() {
-            let base = idx * 8;
-            row_id_vector.raw_data_mut()[base..base + 8].copy_from_slice(&row_id.to_le_bytes());
-        }
-        let physical_column_ids: Vec<PhysicalIndex> = column_ids
-            .iter()
-            .copied()
-            .map(|idx| PhysicalIndex(idx as usize))
-            .collect();
-
-        let mut state = crate::storage::table::update_state::TableUpdateState::new();
+        let mut state = table
+            .storage
+            .initialize_update()
+            .map_err(|e| format!("Initialize update failed: {:?}", e))?;
         table
             .storage
             .update(
-                &mut state,
+                state.as_mut(),
                 &storage_context,
                 &mut row_id_vector,
                 &physical_column_ids,
@@ -609,63 +619,29 @@ impl Connection {
             .map_err(|e| format!("Update failed: {:?}", e))?;
 
         drop(context_guard);
-        drop(txn);
-
-        if auto_commit {
-            let context_guard = self.context.lock();
-            context_guard.commit().map_err(|e| e.to_string())?;
-        }
-        Ok(())
+        self.commit_if_auto_commit(auto_commit)
     }
 
     pub fn delete_chunk(&self, table_name: &str, row_ids: &[i64]) -> Result<usize, String> {
-        let tables = self.db.tables.lock();
-        let table = tables
-            .get(&table_name.to_ascii_lowercase())
-            .ok_or_else(|| format!("Table '{}' not found", table_name))?
-            .clone();
-        drop(tables);
+        let table = self.get_table(table_name)?;
+        let auto_commit = self.ensure_write_transaction_for_query()?;
 
-        let auto_commit = self.is_auto_commit();
-        if auto_commit && !self.has_active_transaction() {
-            self.begin_transaction().map_err(|e| e.to_string())?;
-        }
+        let (context_guard, _txn, storage_context) = self.get_write_transaction_context();
+        let mut row_id_vector = Self::build_row_id_vector(row_ids);
 
-        let context_guard = self.context.lock();
-        let txn = context_guard.transaction.get_or_create_write_transaction();
-
-        let txn_data = txn.transaction_data();
-        let storage_txn_data = crate::storage::table::types::TransactionData {
-            start_time: txn_data.start_time,
-            transaction_id: txn_data.transaction_id,
-        };
-        let storage_context = crate::storage::data_table::ClientContext {
-            local_storage: crate::storage::local_storage::LocalStorage::new(),
-            transaction: Some(txn.clone()),
-            transaction_data: storage_txn_data,
-        };
-        let mut row_id_vector = crate::common::types::Vector::with_capacity(
-            crate::common::types::LogicalType::bigint(),
-            row_ids.len(),
-        );
-        for (idx, row_id) in row_ids.iter().copied().enumerate() {
-            let base = idx * 8;
-            row_id_vector.raw_data_mut()[base..base + 8].copy_from_slice(&row_id.to_le_bytes());
-        }
-
-        let mut state = crate::storage::table::delete_state::TableDeleteState::new();
+        let mut state = table.storage.initialize_delete();
         let deleted = table
             .storage
-            .delete(&mut state, &storage_context, &mut row_id_vector, row_ids.len() as u64)
+            .delete(
+                state.as_mut(),
+                &storage_context,
+                &mut row_id_vector,
+                row_ids.len() as u64,
+            )
             .map_err(|e| format!("Delete failed: {:?}", e))?;
 
         drop(context_guard);
-        drop(txn);
-
-        if auto_commit {
-            let context_guard = self.context.lock();
-            context_guard.commit().map_err(|e| e.to_string())?;
-        }
+        self.commit_if_auto_commit(auto_commit)?;
         Ok(deleted as usize)
     }
 }

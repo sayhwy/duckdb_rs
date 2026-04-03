@@ -1,8 +1,8 @@
 pub mod duck_engine;
 pub mod engine;
 
-pub use duck_engine::{DuckConnection, DuckEngine};
-pub use engine::{Engine, EngineError, SchemaInfo, SchemaTableInfo};
+pub use duck_engine::{DuckConnection, DuckEngine, DuckdbEngine};
+pub use engine::{EngineError, SchemaInfo, SchemaTableInfo};
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -62,7 +62,7 @@ pub struct TableHandle {
 /// conn.insert_chunk("my_table", &mut chunk)?;
 /// conn.commit()?;
 /// ```
-pub struct DB {
+struct InnerDatabase {
     /// 数据库实例（支持多连接）。
     instance: Arc<DatabaseInstance>,
 
@@ -73,7 +73,7 @@ pub struct DB {
     catalog_entries: Vec<crate::storage::checkpoint::catalog_deserializer::CatalogEntry>,
 }
 
-impl DB {
+impl InnerDatabase {
     /// 打开数据库（C++: `DuckDB::OpenOrCreate`）。
     ///
     /// # 参数
@@ -603,6 +603,9 @@ impl DB {
         )
     }
 }
+
+#[cfg(test)]
+type DB = InnerDatabase;
 
 fn normalize_name(name: &str) -> String {
     name.to_ascii_lowercase()

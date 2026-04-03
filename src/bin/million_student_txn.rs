@@ -1,4 +1,4 @@
-//! 百万学生事务批量写入测试
+﻿//! 百万学生事务批量写入测试
 //!
 //! # 测试目标
 //!
@@ -171,11 +171,11 @@ fn main() {
             .unwrap_or_else(|e| panic!("第 {} 批 begin_transaction 失败: {:?}", batch_idx + 1, e));
 
         let mut chunk = build_student_chunk(start_id, count);
-        conn.insert(&txn, "students", &mut chunk)
+        conn.insert("students", &mut chunk)
             .unwrap_or_else(|e| panic!("第 {} 批插入失败: {:?}", batch_idx + 1, e));
 
         // 提交事务（txn 句柄在此之后失效）
-        conn.commit(txn)
+        conn.commit()
             .unwrap_or_else(|e| panic!("第 {} 批 commit 失败: {:?}", batch_idx + 1, e));
 
         inserted += count;
@@ -202,9 +202,9 @@ fn main() {
     // 用只读事务扫描
     let txn = conn.begin_transaction().expect("scan 事务创建失败");
     let chunks = conn
-        .scan(&txn, "students", None)
+        .scan("students", None)
         .expect("内存扫描失败");
-    conn.commit(txn).expect("scan 事务提交失败");
+    conn.commit().expect("scan 事务提交失败");
 
     let total_rows: usize = chunks.iter().map(|c| c.size()).sum();
     println!(
@@ -238,29 +238,29 @@ fn main() {
     println!("  ✓ 耗时: {:.3}s", t3.elapsed().as_secs_f64());
     println!();
 
-    // // ─── 步骤 4：Checkpoint 持久化 ────────────────────────────────────────────
-    // println!("══ 步骤 4：Checkpoint 持久化 ══════════════════════════════════════");
-    // let t4 = Instant::now();
-    // let db_size_before = std::fs::metadata(DB_PATH).map(|m| m.len()).unwrap_or(0);
-    // engine.checkpoint().expect("Checkpoint 失败");
-    // let db_size_after = std::fs::metadata(DB_PATH).map(|m| m.len()).unwrap_or(0);
-    // let wal_size_after = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
-    // println!(
-    //     "  ✓ Checkpoint 完成! 耗时: {:.3}s",
-    //     t4.elapsed().as_secs_f64()
-    // );
-    // println!(
-    //     "  .db 文件大小:  {} (增长 {})",
-    //     format_bytes(db_size_after),
-    //     format_bytes(db_size_after.saturating_sub(db_size_before))
-    // );
-    // println!("  .wal 文件大小: {}", format_bytes(wal_size_after));
-    // assert!(
-    //     db_size_after > db_size_before,
-    //     ".db 文件应在 Checkpoint 后增大"
-    // );
-    // println!("  ✓ 数据已持久化到磁盘");
-    // println!();
+    // ─── 步骤 4：Checkpoint 持久化 ────────────────────────────────────────────
+    println!("══ 步骤 4：Checkpoint 持久化 ══════════════════════════════════════");
+    let t4 = Instant::now();
+    let db_size_before = std::fs::metadata(DB_PATH).map(|m| m.len()).unwrap_or(0);
+    engine.checkpoint().expect("Checkpoint 失败");
+    let db_size_after = std::fs::metadata(DB_PATH).map(|m| m.len()).unwrap_or(0);
+    let wal_size_after = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "  ✓ Checkpoint 完成! 耗时: {:.3}s",
+        t4.elapsed().as_secs_f64()
+    );
+    println!(
+        "  .db 文件大小:  {} (增长 {})",
+        format_bytes(db_size_after),
+        format_bytes(db_size_after.saturating_sub(db_size_before))
+    );
+    println!("  .wal 文件大小: {}", format_bytes(wal_size_after));
+    assert!(
+        db_size_after > db_size_before,
+        ".db 文件应在 Checkpoint 后增大"
+    );
+    println!("  ✓ 数据已持久化到磁盘");
+    println!();
 
     // ─── 步骤 5：关闭并重新打开数据库 ────────────────────────────────────────
     println!("══ 步骤 5：关闭并重新打开数据库 ══════════════════════════════════");
@@ -281,11 +281,11 @@ fn main() {
     );
     let t6 = Instant::now();
     let conn2 = engine2.connect();
-    let txn2 = conn2.begin_transaction().expect("scan2 事务创建失败");
+    conn2.begin_transaction().expect("scan2 事务创建失败");
     let chunks2 = conn2
-        .scan(&txn2, "students", None)
+        .scan("students", None)
         .expect("磁盘扫描失败");
-    conn2.commit(txn2).expect("scan2 事务提交失败");
+    conn2.commit().expect("scan2 事务提交失败");
 
     let total_after: usize = chunks2.iter().map(|c| c.size()).sum();
     let scan_elapsed = t6.elapsed().as_secs_f64();
@@ -371,3 +371,4 @@ fn main() {
     println!("║  ✓ 步骤6: 磁盘数据完整验证             [通过]                ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
 }
+

@@ -1,34 +1,34 @@
-//! `DuckEngine` 和 `DuckConnection`：数据库引擎与连接的具体实现。
+//! `DuckdbEngine` 和 `DuckConnection`：数据库引擎与连接的具体实现。
 //!
 //! # 架构
 //!
 //! ```text
-//! DuckEngine
-//!   └── databases: HashMap<String, Arc<Mutex<DB>>>   — 已注册的数据库实例
+//! DuckdbEngine
+//!   └── databases: HashMap<String, Arc<Mutex<InnerDatabase>>>   — 已注册的数据库实例
 //!         └── connect() → DuckConnection             — 每次调用创建独立连接
 //!                           ├── conn: Connection     — 底层连接（ClientContext）
-//!                           ├── db: Arc<Mutex<DB>>   — 数据库引用（用于 DDL）
+//!                           ├── db: Arc<Mutex<InnerDatabase>>   — 数据库引用（用于 DDL）
 //!                           └── schemas: HashSet     — 已注册 Schema
 //! ```
 //!
 //! # 多连接并发示例
 //!
 //! ```rust
-//! let engine = DuckEngine::open("mydb.db")?;
+//! let engine = DuckdbEngine::open("mydb.db")?;
 //!
 //! // 连接 1：写入
 //! let mut conn1 = engine.connect();
 //! conn1.create_table("main", "items", columns)?;
-//! let txn1 = conn1.begin_transaction()?;
-//! conn1.insert(&txn1, "items", &mut chunk)?;
+//! conn1.begin_transaction()?;
+//! conn1.insert("items", &mut chunk)?;
 //!
 //! // 连接 2：独立读取（并发）
 //! let conn2 = engine.connect();
-//! let txn2 = conn2.begin_transaction()?;
-//! let data = conn2.scan(&txn2, "items", None)?;
-//! conn2.commit(txn2)?;
+//! conn2.begin_transaction()?;
+//! let data = conn2.scan("items", None)?;
+//! conn2.commit()?;
 //!
-//! conn1.commit(txn1)?;
+//! conn1.commit()?;
 //! ```
 
 use std::collections::HashMap;
@@ -39,57 +39,47 @@ use parking_lot::Mutex;
 
 use crate::common::types::{DataChunk, LogicalType};
 use crate::connection::Connection;
-use crate::transaction::meta_transaction::MetaTransaction;
+use super::InnerDatabase;
+use super::engine::{EngineError, SchemaInfo, SchemaTableInfo};
 
-use super::DB;
-use super::engine::{Engine, EngineError, SchemaInfo, SchemaTableInfo};
-
-// ─── DuckEngine ────────────────────────────────────────────────────────────────
+// ─── DuckdbEngine ──────────────────────────────────────────────────────────────
 
 /// DuckDB 引擎（数据库管理层）。
 ///
-/// 负责打开/附加数据库实例。所有数据操作通过 [`DuckEngine::connect`] 获取的
+/// 负责打开/附加数据库实例。所有数据操作通过 [`DuckdbEngine::connect`] 获取的
 /// [`DuckConnection`] 进行，每个连接独立持有 `ClientContext` 和事务状态。
-pub struct DuckEngine {
-    /// 已注册的数据库实例（名称 → DB）。
+pub struct DuckdbEngine {
+    /// 已注册的数据库实例（名称 → InnerDatabase）。
     ///
-    /// 用 `Arc<Mutex<DB>>` 封装，使多个 `DuckConnection` 可共享同一 DB 引用以执行 DDL。
-    databases: HashMap<String, Arc<Mutex<DB>>>,
+    /// 用 `Arc<Mutex<InnerDatabase>>` 封装，使多个 `DuckConnection` 可共享同一数据库句柄以执行 DDL。
+    databases: HashMap<String, Arc<Mutex<InnerDatabase>>>,
 
     /// 默认数据库名称。
     default_db: String,
+
+    /// 默认数据库路径，避免从锁保护的内部状态借出 `&str`。
+    default_path: String,
 }
 
-impl DuckEngine {
+impl DuckdbEngine {
     /// 打开（或创建）数据库，返回引擎实例。
     ///
-    /// 打开的数据库注册为默认库，之后可通过 [`DuckEngine::connect`] 获取连接操作。
+    /// 打开的数据库注册为默认库，之后可通过 [`DuckdbEngine::connect`] 获取连接操作。
     ///
     /// # 参数
     /// - `path`：数据库文件路径；使用 `":memory:"` 创建内存数据库。
     pub fn open(path: impl Into<String>) -> Result<Self, EngineError> {
         let path = path.into();
         let db_name = derive_db_name(&path);
-        let db = DB::open(path).map_err(|e| format!("open db failed: {:?}", e))?;
+        let db = InnerDatabase::open(path.clone()).map_err(|e| format!("open db failed: {:?}", e))?;
         let mut databases = HashMap::new();
         databases.insert(db_name.clone(), Arc::new(Mutex::new(db)));
-        Ok(Self { databases, default_db: db_name })
+        Ok(Self { databases, default_db: db_name, default_path: path })
     }
 
     /// 获取默认数据库路径。
     pub fn path(&self) -> &str {
-        self.databases
-            .get(&self.default_db)
-            .map(|db| {
-                // Safety: we only read path, no mutation
-                let guard = db.lock();
-                // Return a &str tied to the Arc lifetime — use a workaround via storing the path
-                // We can't return &str from a locked guard, so we use a static-lifetime trick.
-                // Instead, just expose path() through Engine trait.
-                let _ = guard;
-                ""
-            })
-            .unwrap_or("")
+        &self.default_path
     }
 
     /// 执行 Checkpoint，将内存/WAL 数据持久化到磁盘。
@@ -115,7 +105,7 @@ impl DuckEngine {
     /// # 示例
     ///
     /// ```rust
-    /// let engine = DuckEngine::open("mydb.db")?;
+    /// let engine = DuckdbEngine::open("mydb.db")?;
     /// let conn1 = engine.connect();   // 连接 1
     /// let conn2 = engine.connect();   // 连接 2（独立，并发安全）
     /// ```
@@ -129,7 +119,13 @@ impl DuckEngine {
 
     // ── 内部辅助 ──────────────────────────────────────────────────────────────
 
-    fn default_db_arc(&self) -> Result<Arc<Mutex<DB>>, EngineError> {
+    pub fn attach(&mut self, name: &str, path: &str) -> Result<(), EngineError> {
+        let db = InnerDatabase::open(path).map_err(|e| format!("open db failed: {:?}", e))?;
+        self.databases.insert(name.to_string(), Arc::new(Mutex::new(db)));
+        Ok(())
+    }
+
+    fn default_db_arc(&self) -> Result<Arc<Mutex<InnerDatabase>>, EngineError> {
         self.databases
             .get(&self.default_db)
             .cloned()
@@ -137,52 +133,24 @@ impl DuckEngine {
     }
 }
 
-// ─── Engine trait impl ────────────────────────────────────────────────────────
-
-impl Engine for DuckEngine {
-    fn connect(&self) -> DuckConnection {
-        self.connect()
-    }
-
-    fn attach(&mut self, name: &str, path: &str) -> Result<(), EngineError> {
-        let db = DB::open(path).map_err(|e| format!("open db failed: {:?}", e))?;
-        self.databases.insert(name.to_string(), Arc::new(Mutex::new(db)));
-        Ok(())
-    }
-
-    fn checkpoint(&self) -> Result<(), EngineError> {
-        self.checkpoint()
-    }
-
-    fn tables(&self) -> Vec<String> {
-        self.tables()
-    }
-
-    fn path(&self) -> &str {
-        ""  // &str from Mutex<DB> requires unsafe lifetime extension; use DuckEngine::tables() instead
-    }
-}
+/// 向后兼容的旧类型名。
+pub type DuckEngine = DuckdbEngine;
 
 // ─── DuckConnection ────────────────────────────────────────────────────────────
 
 /// 数据库连接（操作层）。
 ///
-/// 通过 [`DuckEngine::connect`] 创建，每个 `DuckConnection` 拥有：
+/// 通过 [`DuckdbEngine::connect`] 创建，每个 `DuckConnection` 拥有：
 /// - 独立的 [`Connection`]（含 `ClientContext` 和 `TransactionContext`）
 /// - 数据库引用（用于 DDL 操作）
 /// - 本连接已注册的 Schema 集合
 ///
-/// # 多事务并发
-///
-/// 同一连接可依次（或通过 Arc 并发）持有多个 `MetaTransaction`，
-/// 各事务通过 `begin_transaction()` 独立创建，通过 `commit(txn)` / `rollback(txn)`
-/// 独立提交/回滚。
 pub struct DuckConnection {
     /// 底层连接（C++: `Connection`）。
     conn: Connection,
 
     /// 数据库引用（用于 DDL：create_table 等需要修改元数据）。
-    db: Arc<Mutex<DB>>,
+    db: Arc<Mutex<InnerDatabase>>,
 
     /// 本连接已注册的 Schema 集合（C++: catalog schema entries）。
     schemas: HashSet<String>,
@@ -191,20 +159,18 @@ pub struct DuckConnection {
 impl DuckConnection {
     // ── 事务管理 ──────────────────────────────────────────────────────────────
 
-    /// 开启新事务，返回 `Arc<MetaTransaction>`。
-    ///
-    /// 多次调用可获得多个并发事务句柄；每个句柄独立提交/回滚。
-    pub fn begin_transaction(&self) -> Result<Arc<MetaTransaction>, EngineError> {
-        self.conn.begin_transaction_arc().map_err(|e| e.to_string())
+    /// 开启当前连接上的事务。
+    pub fn begin_transaction(&self) -> Result<(), EngineError> {
+        self.conn.begin_transaction().map_err(|e| e.to_string())
     }
 
-    /// 提交指定事务，消费 Arc 所有权。
-    pub fn commit(&self, _txn: Arc<MetaTransaction>) -> Result<(), EngineError> {
+    /// 提交当前连接上的事务。
+    pub fn commit(&self) -> Result<(), EngineError> {
         self.conn.commit().map_err(|e| e.to_string())
     }
 
-    /// 回滚指定事务，丢弃所有未提交修改，消费 Arc 所有权。
-    pub fn rollback(&self, _txn: Arc<MetaTransaction>) -> Result<(), EngineError> {
+    /// 回滚当前连接上的事务，丢弃所有未提交修改。
+    pub fn rollback(&self) -> Result<(), EngineError> {
         self.conn.rollback().map_err(|e| e.to_string())
     }
 
@@ -213,7 +179,6 @@ impl DuckConnection {
     /// 在事务内向表插入一批数据。
     pub fn insert(
         &self,
-        _txn: &Arc<MetaTransaction>,
         table_name: &str,
         chunk: &mut DataChunk,
     ) -> Result<(), EngineError> {
@@ -223,7 +188,6 @@ impl DuckConnection {
     /// 在事务内按 Row ID 更新指定列。
     pub fn update(
         &self,
-        _txn: &Arc<MetaTransaction>,
         table_name: &str,
         row_ids: &[i64],
         column_ids: &[u64],
@@ -235,7 +199,6 @@ impl DuckConnection {
     /// 在事务内按 Row ID 删除行，返回实际删除行数。
     pub fn delete(
         &self,
-        _txn: &Arc<MetaTransaction>,
         table_name: &str,
         row_ids: &[i64],
     ) -> Result<usize, EngineError> {
@@ -245,7 +208,6 @@ impl DuckConnection {
     /// 在事务内扫描表数据，可见当前事务内的未提交写入。
     pub fn scan(
         &self,
-        _txn: &Arc<MetaTransaction>,
         table_name: &str,
         column_ids: Option<Vec<u64>>,
     ) -> Result<Vec<DataChunk>, EngineError> {

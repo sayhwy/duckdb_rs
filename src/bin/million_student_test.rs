@@ -175,10 +175,10 @@ fn main() {
             .unwrap_or_else(|e| panic!("第 {} 批 begin_transaction 失败: {:?}", batch_idx + 1, e));
 
         let mut chunk = build_student_chunk(start_id, count);
-        conn.insert(&txn, "students", &mut chunk)
+        conn.insert("students", &mut chunk)
             .unwrap_or_else(|e| panic!("第 {} 批插入失败: {:?}", batch_idx + 1, e));
 
-        conn.commit(txn)
+        conn.commit()
             .unwrap_or_else(|e| panic!("第 {} 批 commit 失败: {:?}", batch_idx + 1, e));
 
         inserted += count;
@@ -203,9 +203,9 @@ fn main() {
     println!("  正在扫描内存中的学生数据...");
     let txn = conn.begin_transaction().expect("scan 事务创建失败");
     let chunks_before = conn
-        .scan(&txn, "students", None)
+        .scan("students", None)
         .expect("内存数据扫描失败");
-    conn.commit(txn).expect("scan 事务提交失败");
+    conn.commit().expect("scan 事务提交失败");
 
     let total_before: usize = chunks_before.iter().map(|c| c.size()).sum();
     println!(
@@ -304,11 +304,11 @@ fn main() {
     let t8 = Instant::now();
     println!("  正在读取所有学生数据...");
     let conn2 = engine2.connect();
-    let txn2 = conn2.begin_transaction().expect("scan2 事务创建失败");
+    conn2.begin_transaction().expect("scan2 事务创建失败");
     let chunks_after = conn2
-        .scan(&txn2, "students", None)
+        .scan("students", None)
         .expect("磁盘数据扫描失败");
-    conn2.commit(txn2).expect("scan2 事务提交失败");
+    conn2.commit().expect("scan2 事务提交失败");
 
     let total_after: usize = chunks_after.iter().map(|c| c.size()).sum();
     let scan_elapsed = t8.elapsed().as_secs_f64();

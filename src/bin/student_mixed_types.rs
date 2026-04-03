@@ -101,9 +101,9 @@ fn main() {
     chunk.set_cardinality(ROW_COUNT);
 
     // 插入数据（显式事务）
-    let txn = conn.begin_transaction().expect("begin_transaction 失败");
-    conn.insert(&txn, "students", &mut chunk).expect("插入数据失败");
-    conn.commit(txn).expect("commit 失败");
+    conn.begin_transaction().expect("begin_transaction 失败");
+    conn.insert("students", &mut chunk).expect("插入数据失败");
+    conn.commit().expect("commit 失败");
     println!("插入 {} 条记录成功", ROW_COUNT);
 
     // Checkpoint 到磁盘
