@@ -1306,14 +1306,14 @@ fn read_table_data(
         None,
         BlockReaderType::RegisterBlocks,
     );
-    let mut table_reader = TableDataReader::new(&mut reader, &mut bound, table_pointer);
+    let mut table_reader =
+        TableDataReader::new(&mut reader, &mut bound, table_pointer, Some(runtime.clone()));
     table_reader.read_table_data();
     let mut data = match bound.data {
         Some(data) => *data,
         None => return Ok(None),
     };
     data.total_rows = entry.total_rows;
-    data.runtime = Some(runtime.clone());
     Ok(Some(data))
 }
 

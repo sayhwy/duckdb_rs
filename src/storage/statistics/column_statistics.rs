@@ -143,12 +143,34 @@ impl ColumnStatistics {
         let mut stats = None;
         let mut distinct = None;
         loop {
-            match de.next_field()? {
-                100 => stats = Some(BaseStatistics::deserialize_checkpoint(de, logical_type.clone())?),
+            let field = de.next_field()?;
+            match field {
+                100 => {
+                    stats = Some(BaseStatistics::deserialize_checkpoint(de, logical_type.clone())?);
+                    let next = de.peek_field()?;
+                    if next != 101 && next != MESSAGE_TERMINATOR_FIELD_ID {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("after BaseStatistics expected field 101 or terminator, got {next}"),
+                        ));
+                    }
+                }
                 101 => {
                     let distinct_present = de.read_u8();
                     if distinct_present != 0 {
                         distinct = Some(DistinctStatistics::deserialize_checkpoint(de)?);
+                        let next = de.peek_field()?;
+                        if next != MESSAGE_TERMINATOR_FIELD_ID {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("after DistinctStatistics expected terminator, got {next}"),
+                            ));
+                        }
+                    } else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "ColumnStatistics distinct field present but nullable flag is false",
+                        ));
                     }
                 }
                 MESSAGE_TERMINATOR_FIELD_ID => {

@@ -228,6 +228,64 @@ fn read_column_list(r: &mut BinaryDeserializer<'_>) -> io::Result<Vec<ColumnInfo
     Ok(columns)
 }
 
+fn skip_catalog_entry_info(r: &mut BinaryDeserializer<'_>) -> io::Result<()> {
+    loop {
+        let fid = r.read_field_id();
+        if fid == MESSAGE_TERMINATOR_FIELD_ID {
+            return Ok(());
+        }
+        match fid {
+            100 => {
+                let _ = r.read_varint()?;
+            }
+            101 | 102 => {
+                let _ = r.read_string()?;
+            }
+            _ => {
+                let _ = r.read_varint()?;
+            }
+        }
+    }
+}
+
+fn skip_logical_dependency(r: &mut BinaryDeserializer<'_>) -> io::Result<()> {
+    loop {
+        let fid = r.read_field_id();
+        if fid == MESSAGE_TERMINATOR_FIELD_ID {
+            return Ok(());
+        }
+        match fid {
+            100 => skip_catalog_entry_info(r)?,
+            101 => {
+                let _ = r.read_string()?;
+            }
+            _ => {
+                let _ = r.read_varint()?;
+            }
+        }
+    }
+}
+
+fn skip_logical_dependency_list(r: &mut BinaryDeserializer<'_>) -> io::Result<()> {
+    loop {
+        let fid = r.read_field_id();
+        if fid == MESSAGE_TERMINATOR_FIELD_ID {
+            return Ok(());
+        }
+        match fid {
+            100 => {
+                let count = r.read_varint()? as usize;
+                for _ in 0..count {
+                    skip_logical_dependency(r)?;
+                }
+            }
+            _ => {
+                let _ = r.read_varint()?;
+            }
+        }
+    }
+}
+
 fn skip_constraints(r: &mut BinaryDeserializer<'_>) -> io::Result<()> {
     let count = r.read_varint()? as usize;
     for _ in 0..count {
@@ -283,11 +341,10 @@ fn read_create_table_info(
                 }
             }
             109 => {
-                // dependencies - skip list
-                let count = r.read_varint()? as usize;
-                for _ in 0..count {
-                    r.skip_object_varint_only()?;
-                }
+                skip_logical_dependency_list(r)?;
+            }
+            110 => {
+                let _ = r.read_string()?;
             }
             // CreateTableInfo fields
             200 => table_name = r.read_string()?,
@@ -394,8 +451,12 @@ fn read_meta_block_pointer_nested(
             }));
         }
         match fid {
-            100 => block_pointer = r.read_varint()?,
-            101 => offset = r.read_varint()? as u32,
+            100 => {
+                block_pointer = r.read_varint()?;
+            }
+            101 => {
+                offset = r.read_varint()? as u32;
+            }
             _ => {
                 let _ = r.read_varint()?;
             }

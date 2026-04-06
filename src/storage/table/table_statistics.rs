@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use super::types::LogicalType;
 use crate::common::serializer::{
-    BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID,
+    skip_optional_blocking_sample, BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID,
 };
 use crate::common::serializer::BinarySerializer;
 use std::io;
@@ -198,7 +198,8 @@ impl TableStatistics {
         let result = TableStatistics::new();
         let mut inner = result.inner.lock();
         loop {
-            match de.next_field()? {
+            let field = de.next_field()?;
+            match field {
                 100 => {
                     let count = de.read_list_len()?;
                     inner.column_stats.clear();
@@ -207,21 +208,29 @@ impl TableStatistics {
                             .get(idx)
                             .cloned()
                             .unwrap_or_else(LogicalType::integer);
-                        let stats = ColumnStatistics::deserialize_checkpoint(de, logical_type.clone())?
+                        let stats = ColumnStatistics::deserialize_checkpoint(de, logical_type.clone())
+                            .map_err(|e| {
+                                io::Error::new(
+                                    e.kind(),
+                                    format!(
+                                        "column_stats[{idx}] ({:?}): {e}",
+                                        logical_type.id
+                                    ),
+                                )
+                            })?
                             .map(Arc::new)
                             .unwrap_or_else(|| ColumnStatistics::create_empty(logical_type));
                         inner.column_stats.push(stats);
                     }
                 }
                 101 => {
-                    if de.read_u8() != 0 {
-                        loop {
-                            if de.next_field()? == MESSAGE_TERMINATOR_FIELD_ID {
-                                break;
-                            }
-                            let _ = de.read_varint()?;
-                        }
+                    if skip_optional_blocking_sample(de).is_ok() {
                         inner.table_sample = Some(Vec::new());
+                    } else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "failed to skip table_sample",
+                        ));
                     }
                 }
                 MESSAGE_TERMINATOR_FIELD_ID => break,

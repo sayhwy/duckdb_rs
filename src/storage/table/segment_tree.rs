@@ -148,10 +148,6 @@ impl<T: Send + Sync> SegmentTree<T> {
     ///
     /// May trigger a lazy-load call.
     pub fn get_root_segment<'a>(&self, lock: &'a SegmentLock<'_, T>) -> Option<&'a SegmentNode<T>> {
-        let nodes = &*lock.0;
-        if nodes.is_empty() {
-            drop(self.load_next_segment_inner(&mut *self.nodes.lock()));
-        }
         lock.0.first()
     }
 

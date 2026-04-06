@@ -54,6 +54,31 @@ impl<'a> BinaryMetadataDeserializer<'a> {
         Ok(buf)
     }
 
+    pub fn read_fixed_bytes(&mut self, len: usize) -> io::Result<Vec<u8>> {
+        let actual_len = self.read_varint()? as usize;
+        if actual_len != len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected {len} bytes, got {actual_len}"),
+            ));
+        }
+        let mut buf = vec![0u8; len];
+        self.stream.read_data(&mut buf);
+        Ok(buf)
+    }
+
+    pub fn skip_sized_bytes(&mut self, expected_len: usize) -> io::Result<()> {
+        let actual_len = self.read_varint()? as usize;
+        if actual_len != expected_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected {expected_len} bytes, got {actual_len}"),
+            ));
+        }
+        self.skip_bytes(actual_len);
+        Ok(())
+    }
+
     pub fn read_sized_bytes(&mut self, expected_len: usize) -> io::Result<Vec<u8>> {
         let bytes = self.read_bytes()?;
         if bytes.len() != expected_len {
@@ -435,7 +460,7 @@ pub fn skip_table_statistics(de: &mut BinaryMetadataDeserializer<'_>) -> io::Res
     }
 }
 
-fn skip_optional_blocking_sample(de: &mut BinaryMetadataDeserializer<'_>) -> io::Result<()> {
+pub fn skip_optional_blocking_sample(de: &mut BinaryMetadataDeserializer<'_>) -> io::Result<()> {
     if de.read_u8() == 0 {
         return Ok(());
     }

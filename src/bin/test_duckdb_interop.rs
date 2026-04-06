@@ -164,6 +164,7 @@ fn test_rust_read_duckdb_file() -> Result<Vec<String>, String> {
         let txn = conn
             .begin_transaction()
             .map_err(|e| format!("begin_transaction 失败: {}", e))?;
+        let _ = &txn;
         let result = conn.scan("students", None);
         conn.commit().ok();
 

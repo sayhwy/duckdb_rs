@@ -14,6 +14,15 @@ const BASE_SAMPLE_RATE: f64 = 0.01;
 /// Standard vector size (from DuckDB)
 const STANDARD_VECTOR_SIZE: usize = 2048;
 
+const HLL_STORAGE_V1: u64 = 1;
+const HLL_STORAGE_V2: u64 = 2;
+const HLL_V2_REGISTER_COUNT: usize = 64;
+const HLL_V1_P: usize = 12;
+const HLL_V1_BITS: usize = 6;
+const HLL_V1_REGISTER_COUNT: usize = 1 << HLL_V1_P;
+const HLL_V1_HEADER_SIZE: usize = 17;
+const HLL_V1_DENSE_SIZE: usize = HLL_V1_HEADER_SIZE + ((HLL_V1_REGISTER_COUNT * HLL_V1_BITS + 7) / 8);
+
 /// HyperLogLog implementation for cardinality estimation
 /// This is a simplified version - in production, use a proper HLL implementation
 #[derive(Debug, Clone)]
@@ -94,13 +103,34 @@ impl HyperLogLog {
     }
 
     fn deserialize_checkpoint(de: &mut BinaryMetadataDeserializer<'_>) -> io::Result<Self> {
-        let mut precision = 14u8;
-        let mut registers = Vec::new();
+        let mut storage_type = HLL_STORAGE_V2;
+        let mut registers = vec![0u8; HLL_V2_REGISTER_COUNT];
         loop {
             match de.next_field()? {
-                100 => precision = de.read_varint()? as u8,
-                101 => registers = de.read_bytes()?,
-                MESSAGE_TERMINATOR_FIELD_ID => return Ok(Self { registers, precision }),
+                100 => {
+                    storage_type = de.read_varint()?;
+                }
+                101 => match storage_type {
+                    HLL_STORAGE_V2 => {
+                        registers = de.read_fixed_bytes(HLL_V2_REGISTER_COUNT)?;
+                    }
+                    HLL_STORAGE_V1 => {
+                        let dense_hll = de.read_fixed_bytes(HLL_V1_DENSE_SIZE)?;
+                        registers = convert_hll_v1_to_v2(&dense_hll)?;
+                    }
+                    other => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("unknown HyperLogLog storage type {other}"),
+                        ));
+                    }
+                },
+                MESSAGE_TERMINATOR_FIELD_ID => {
+                    return Ok(Self {
+                        registers,
+                        precision: 6,
+                    })
+                }
                 other => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -110,6 +140,52 @@ impl HyperLogLog {
             }
         }
     }
+}
+
+fn convert_hll_v1_to_v2(dense_hll: &[u8]) -> io::Result<Vec<u8>> {
+    if dense_hll.len() != HLL_V1_DENSE_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "invalid HyperLogLog V1 size: expected {}, got {}",
+                HLL_V1_DENSE_SIZE,
+                dense_hll.len()
+            ),
+        ));
+    }
+    if &dense_hll[0..4] != b"HYLL" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "invalid HyperLogLog V1 magic bytes: {:02x?}",
+                &dense_hll[..dense_hll.len().min(8)]
+            ),
+        ));
+    }
+
+    let registers = &dense_hll[HLL_V1_HEADER_SIZE..];
+    let mult = HLL_V1_REGISTER_COUNT / HLL_V2_REGISTER_COUNT;
+    let mut result = vec![0u8; HLL_V2_REGISTER_COUNT];
+    for (i, slot) in result.iter_mut().enumerate() {
+        let mut max_old = 0u8;
+        for j in 0..mult {
+            let register_idx = i * mult + j;
+            max_old = max_old.max(read_hll_v1_register(registers, register_idx));
+        }
+        *slot = max_old;
+    }
+    Ok(result)
+}
+
+fn read_hll_v1_register(registers: &[u8], regnum: usize) -> u8 {
+    let byte_idx = regnum * HLL_V1_BITS / 8;
+    let first_bit = regnum * HLL_V1_BITS & 7;
+    let first_bit_8 = 8 - first_bit;
+    let b0 = registers[byte_idx] as u16;
+    // DuckDB's legacy HLL reader relies on the SDS string null terminator when
+    // the final 6-bit register straddles the end of the dense payload.
+    let b1 = registers.get(byte_idx + 1).copied().unwrap_or(0) as u16;
+    (((b0 >> first_bit) | (b1 << first_bit_8)) & ((1 << HLL_V1_BITS) - 1) as u16) as u8
 }
 
 /// Distinct statistics using HyperLogLog for cardinality estimation
@@ -246,7 +322,12 @@ impl DistinctStatistics {
                 101 => {
                     result.total_count.store(de.read_varint()?, Ordering::Relaxed);
                 }
-                102 => result.log = HyperLogLog::deserialize_checkpoint(de)?,
+                102 => {
+                    let present = de.read_u8();
+                    if present != 0 {
+                        result.log = HyperLogLog::deserialize_checkpoint(de)?;
+                    }
+                }
                 MESSAGE_TERMINATOR_FIELD_ID => return Ok(result),
                 other => {
                     return Err(io::Error::new(
