@@ -182,7 +182,7 @@ impl DatabaseInstance {
             storage_manager,
             transaction_manager,
             tables: Mutex::new(HashMap::new()),
-            transaction_counter: AtomicU64::new(1),
+            transaction_counter: AtomicU64::new(0),
             commit_counter: AtomicU64::new(1),
             block_alloc_size,
         }

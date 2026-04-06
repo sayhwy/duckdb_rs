@@ -18,8 +18,7 @@
 //! | `bool auto_commit` | `auto_commit: bool` |
 //! | `DuckTransactionManager &manager` | `transaction_manager: Arc<DuckTransactionManager>` |
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
@@ -28,7 +27,6 @@ use super::duck_transaction_manager::{DuckTransactionManager, DuckTxnHandle};
 use super::meta_transaction::MetaTransaction;
 use super::transaction_manager::ErrorData;
 use super::types::TransactionId;
-use crate::storage::data_table::DataTable;
 
 // ─── TransactionError ──────────────────────────────────────────────────────────
 
@@ -62,13 +60,11 @@ impl From<ErrorData> for TransactionError {
     }
 }
 
-// ─── 全局事务 ID 计数器 ────────────────────────────────────────────────────────
-
-/// 全局元事务 ID，单调递增（C++: `ClientContext` 中无直接对应，这里用于唯一标识元事务）。
-static GLOBAL_TRANSACTION_ID: AtomicU64 = AtomicU64::new(1);
-
-fn next_global_transaction_id() -> TransactionId {
-    GLOBAL_TRANSACTION_ID.fetch_add(1, Ordering::Relaxed)
+fn current_timestamp_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)
 }
 
 // ─── TransactionContext ────────────────────────────────────────────────────────
@@ -79,7 +75,7 @@ fn next_global_transaction_id() -> TransactionId {
 /// 多线程并发通过 `ClientContext` 的锁保护。
 pub struct TransactionContext {
     /// 客户端 ID（C++: `ClientContext &context`，暂用 ID 替代）。
-    client_id: u64,
+    _client_id: u64,
 
     /// 是否自动提交（C++: `bool auto_commit`）。
     auto_commit: AtomicBool,
@@ -104,7 +100,7 @@ impl TransactionContext {
         db_instance: Weak<crate::db::conn::DatabaseInstance>,
     ) -> Self {
         Self {
-            client_id,
+            _client_id: client_id,
             auto_commit: AtomicBool::new(true),
             current_transaction: Mutex::new(None),
             transaction_manager,
@@ -122,35 +118,38 @@ impl TransactionContext {
     /// 尝试获取当前事务句柄。
     pub fn try_get_transaction(&self) -> Option<Arc<DuckTxnHandle>> {
         let current = self.current_transaction.lock();
-        current.as_ref().map(|txn| txn.get_transaction(0))
+        let db_id = self.default_db_id()?;
+        current
+            .as_ref()
+            .and_then(|txn| txn.try_get_transaction(db_id))
     }
 
     /// 获取或创建事务（只读）。
     pub fn get_or_create_transaction(&self) -> Arc<DuckTxnHandle> {
         let mut current = self.current_transaction.lock();
         if current.is_none() {
-            let start_timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_micros() as i64)
-                .unwrap_or(0);
-            let global_transaction_id = next_global_transaction_id();
-            *current = Some(Arc::new(MetaTransaction::new(
-                Arc::clone(&self.transaction_manager),
-                start_timestamp,
-                global_transaction_id,
-                self.db_instance.clone(),
-            )));
+            *current = Some(Arc::new(self.create_meta_transaction()));
         }
-        current.as_ref().unwrap().get_transaction(0)
+        let db_id = self
+            .default_db_id()
+            .expect("TransactionContext::get_or_create_transaction: database instance dropped");
+        current.as_ref().unwrap().get_transaction(db_id)
     }
 
     /// 获取或创建写事务。
     pub fn get_or_create_write_transaction(&self) -> Arc<DuckTxnHandle> {
-        let txn = self.get_or_create_transaction();
-        // 标记为写事务 - DuckTxnHandle 实现了 Transaction trait
-        use crate::transaction::transaction::Transaction;
-        txn.set_read_write();
-        txn
+        let txn = {
+            let mut current = self.current_transaction.lock();
+            if current.is_none() {
+                *current = Some(Arc::new(self.create_meta_transaction()));
+            }
+            Arc::clone(current.as_ref().unwrap())
+        };
+        let db_id = self
+            .default_db_id()
+            .expect("TransactionContext::get_or_create_write_transaction: database instance dropped");
+        txn.modify_database(db_id);
+        txn.get_transaction(db_id)
     }
 
     /// 获取当前活跃元事务的引用（C++: `ActiveTransaction()`）。
@@ -171,6 +170,10 @@ impl TransactionContext {
     /// 设置自动提交模式（C++: `SetAutoCommit(bool)`）。
     pub fn set_auto_commit(&self, value: bool) {
         self.auto_commit.store(value, Ordering::Relaxed);
+        if !value && !self.has_active_transaction() {
+            self.begin_transaction()
+                .expect("TransactionContext::set_auto_commit(false) failed to start transaction");
+        }
     }
 
 
@@ -187,17 +190,7 @@ impl TransactionContext {
                 "cannot begin transaction: already in transaction",
             ));
         }
-        let start_timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_micros() as i64)
-            .unwrap_or(0);
-        let global_transaction_id = next_global_transaction_id();
-        let txn = Arc::new(MetaTransaction::new(
-            Arc::clone(&self.transaction_manager),
-            start_timestamp,
-            global_transaction_id,
-            self.db_instance.clone(),
-        ));
+        let txn = Arc::new(self.create_meta_transaction());
         *current = Some(Arc::clone(&txn));
         self.auto_commit.store(false, Ordering::Relaxed);
         Ok(())
@@ -211,11 +204,10 @@ impl TransactionContext {
         let txn = self.current_transaction.lock().take().ok_or_else(|| {
             TransactionError::new("TransactionContext::commit called without active transaction")
         })?;
+        self.auto_commit.store(true, Ordering::Relaxed);
 
         // C++: auto error = transaction->Commit();
         let result = txn.commit();
-        // 提交后恢复自动提交模式
-        self.auto_commit.store(true, Ordering::Relaxed);
         match result {
             None => Ok(()),
             Some(err) => Err(err.into()),
@@ -225,10 +217,9 @@ impl TransactionContext {
     /// 回滚当前事务（C++: `TransactionContext::Rollback(optional_ptr<ErrorData>)`）。
     pub fn rollback(&self) -> Result<(), TransactionError> {
         if let Some(txn) = self.current_transaction.lock().take() {
+            self.auto_commit.store(true, Ordering::Relaxed);
             txn.rollback();
         }
-        // 回滚后恢复自动提交模式
-        self.auto_commit.store(true, Ordering::Relaxed);
         Ok(())
     }
 
@@ -258,5 +249,22 @@ impl TransactionContext {
     /// 重置为无活跃查询（C++: `ResetActiveQuery()`）。
     pub fn reset_active_query(&self) {
         self.set_active_query(super::types::MAXIMUM_QUERY_ID);
+    }
+
+    fn create_meta_transaction(&self) -> MetaTransaction {
+        let db = self
+            .db_instance
+            .upgrade()
+            .expect("TransactionContext::create_meta_transaction: database instance dropped");
+        MetaTransaction::new(
+            Arc::clone(&self.transaction_manager),
+            current_timestamp_micros(),
+            db.get_new_transaction_number(),
+            self.db_instance.clone(),
+        )
+    }
+
+    fn default_db_id(&self) -> Option<u64> {
+        self.db_instance.upgrade().map(|db| db.db_id)
     }
 }

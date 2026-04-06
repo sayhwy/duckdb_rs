@@ -25,9 +25,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use super::duck_transaction_manager::{DuckTransactionManager, DuckTxnHandle};
+use super::transaction::Transaction;
 use super::transaction_manager::ErrorData;
 use super::types::{MAXIMUM_QUERY_ID, Timestamp, TransactionId, TransactionState};
-use crate::storage::data_table::DataTable;
 
 // ─── TransactionReference ──────────────────────────────────────────────────────
 
@@ -105,7 +105,7 @@ impl MetaTransaction {
                 transactions: HashMap::new(),
                 all_transactions: Vec::new(),
                 modified_database: None,
-                is_read_only: true,
+                is_read_only: false,
             }),
             transaction_manager,
             db_instance,
@@ -128,6 +128,7 @@ impl MetaTransaction {
         let handle = self
             .transaction_manager
             .start_duck_transaction(is_read_only);
+        handle.set_active_query(self.get_active_query());
         inner.all_transactions.push(db_id);
         inner
             .transactions
@@ -155,7 +156,7 @@ impl MetaTransaction {
 
     /// 提交所有子事务（C++: `MetaTransaction::Commit()`）。
     ///
-    /// 按 `all_transactions` 顺序逐个提交，任意一个失败则回滚后续并返回错误。
+    /// 按 `all_transactions` 逆序逐个提交，状态流转与 DuckDB 对齐。
     pub fn commit(&self) -> Option<ErrorData> {
         // 获取数据库实例引用（C++: 通过 context 引用访问）
         let db = match self.db_instance.upgrade() {
@@ -167,33 +168,26 @@ impl MetaTransaction {
         let all_dbs: Vec<u64> = inner.all_transactions.clone();
         drop(inner); // 释放锁，允许 commit_transaction 内部操作
 
-        for db_id in &all_dbs {
+        for db_id in all_dbs.iter().rev() {
             let handle = {
                 let inner = self.inner.lock();
                 match inner.transactions.get(db_id) {
-                    Some(r) => Arc::clone(&r.transaction),
-                    None => continue,
+                    Some(r) if r.state == TransactionState::Uncommitted => Arc::clone(&r.transaction),
+                    _ => continue,
                 }
             };
-            // C++: auto error = manager.CommitTransaction(context, transaction);
-            use super::transaction::Transaction;
             let txn_ref = Arc::clone(&handle) as Arc<dyn Transaction>;
             let result = self.transaction_manager.commit_transaction(&db, &txn_ref);
+            let mut inner = self.inner.lock();
+            if let Some(txn_ref) = inner.transactions.get_mut(db_id) {
+                txn_ref.state = if result.is_some() {
+                    TransactionState::RolledBack
+                } else {
+                    TransactionState::Committed
+                };
+            }
+            drop(inner);
             if let Some(err) = result {
-                // 提交失败：回滚所有尚未提交的子事务
-                // C++: for (auto &[db, txn_ref] : transactions) { if txn_ref.state == Uncommitted rollback }
-                let inner = self.inner.lock();
-                for &remaining_db in &inner.all_transactions {
-                    if remaining_db == *db_id {
-                        continue; // 当前失败的事务跳过
-                    }
-                    if let Some(r) = inner.transactions.get(&remaining_db) {
-                        if r.state == TransactionState::Uncommitted {
-                            self.transaction_manager
-                                .rollback_duck_transaction(&r.transaction);
-                        }
-                    }
-                }
                 return Some(err);
             }
         }
@@ -204,14 +198,19 @@ impl MetaTransaction {
     ///
     /// 按 `all_transactions` 逆序逐个回滚（C++: 也是逆序）。
     pub fn rollback(&self) {
-        let inner = self.inner.lock();
-        // C++: for (idx_t i = all_transactions.size(); i > 0; i--)
-        //          auto &db = all_transactions[i - 1]; auto &txn = transactions[db];
-        //          manager.RollbackTransaction(txn.transaction);
-        for &db_id in inner.all_transactions.iter().rev() {
-            if let Some(r) = inner.transactions.get(&db_id) {
-                self.transaction_manager
-                    .rollback_duck_transaction(&r.transaction);
+        let all_dbs = self.inner.lock().all_transactions.clone();
+        for db_id in all_dbs.iter().rev() {
+            let handle = {
+                let inner = self.inner.lock();
+                match inner.transactions.get(db_id) {
+                    Some(r) if r.state == TransactionState::Uncommitted => Arc::clone(&r.transaction),
+                    _ => continue,
+                }
+            };
+            self.transaction_manager
+                .rollback_duck_transaction(&handle);
+            if let Some(r) = self.inner.lock().transactions.get_mut(db_id) {
+                r.state = TransactionState::RolledBack;
             }
         }
     }
@@ -226,13 +225,21 @@ impl MetaTransaction {
     /// 设置活跃查询 ID（C++: `SetActiveQuery()`）。
     pub fn set_active_query(&self, query_id: TransactionId) {
         self.active_query.store(query_id, Ordering::Relaxed);
+        let inner = self.inner.lock();
+        for txn in inner.transactions.values() {
+            txn.transaction.set_active_query(query_id);
+        }
     }
 
     // ── 读写状态 ──────────────────────────────────────────────────────────────
 
     /// 设置为只读（C++: `SetReadOnly()`）。
     pub fn set_read_only(&self) {
-        self.inner.lock().is_read_only = true;
+        let mut inner = self.inner.lock();
+        if inner.modified_database.is_some() {
+            panic!("Cannot set MetaTransaction to read only - modifications have already been made");
+        }
+        inner.is_read_only = true;
     }
 
     /// 是否只读（C++: `IsReadOnly()`）。
@@ -245,15 +252,20 @@ impl MetaTransaction {
     /// 同一事务只允许修改一个数据库，否则 panic（与 C++ 行为一致）。
     pub fn modify_database(&self, db_id: u64) {
         let mut inner = self.inner.lock();
+        if inner.is_read_only {
+            panic!("Cannot write to database in a transaction that is launched in read-only mode");
+        }
         match inner.modified_database {
             None => {
                 inner.modified_database = Some(db_id);
-                inner.is_read_only = false; // 写事务
             }
             Some(existing) if existing == db_id => {}
             Some(_) => {
                 panic!("MetaTransaction: cannot modify more than one database per transaction")
             }
+        }
+        if let Some(txn_ref) = inner.transactions.get(&db_id) {
+            txn_ref.transaction.set_read_write();
         }
     }
 
