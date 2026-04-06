@@ -15,7 +15,7 @@ use duckdb_rs::db::DuckEngine;
 
 // ─── 配置 ─────────────────────────────────────────────────────────────────────
 
-const DUCKDB_EXE: &str = "D:/duckdb.exe";
+const DUCKDB_EXE: &str = "/Users/liang/Documents/code/duckdb/bin/duckdb";
 const TEST_DB_RUST: &str = "student_rust.db";
 const TEST_DB_DUCKDB: &str = "student_duckdb.db";
 

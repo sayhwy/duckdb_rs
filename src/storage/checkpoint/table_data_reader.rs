@@ -50,19 +50,19 @@ impl<'a, 'mgr> TableDataReader<'a, 'mgr> {
 
         // Read TableStatistics
         {
-            let column_type_ids: Vec<LogicalTypeId> = self
+            let mut deserializer = BinaryMetadataDeserializer::new(self.reader);
+            let storage_types: Vec<crate::common::types::LogicalType> = self
                 .info
                 .base
                 .columns
                 .columns
                 .iter()
-                .map(|col| col.logical_type.id.clone())
+                .map(|col| catalog_type_to_storage_type(&col.logical_type))
                 .collect();
-            let mut deserializer = BinaryMetadataDeserializer::new(self.reader);
-            skip_table_statistics(&mut deserializer, &column_type_ids)
-                .map_err(|e| std::io::Error::new(e.kind(),
-                    format!("skip_table_statistics: {}", e)))?;
-            data.table_stats = TableStatistics::new();
+            data.table_stats =
+                TableStatistics::deserialize_checkpoint(&mut deserializer, &storage_types)
+                    .expect("failed to deserialize table statistics");
+
         }
 
         // Read row_group_count
