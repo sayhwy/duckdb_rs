@@ -239,28 +239,28 @@ fn main() {
     println!();
 
     // ─── 步骤 4：Checkpoint 持久化 ────────────────────────────────────────────
-    println!("══ 步骤 4：Checkpoint 持久化 ══════════════════════════════════════");
-    let t4 = Instant::now();
-    let db_size_before = std::fs::metadata(DB_PATH).map(|m| m.len()).unwrap_or(0);
-    engine.checkpoint().expect("Checkpoint 失败");
-    let db_size_after = std::fs::metadata(DB_PATH).map(|m| m.len()).unwrap_or(0);
-    let wal_size_after = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
-    println!(
-        "  ✓ Checkpoint 完成! 耗时: {:.3}s",
-        t4.elapsed().as_secs_f64()
-    );
-    println!(
-        "  .db 文件大小:  {} (增长 {})",
-        format_bytes(db_size_after),
-        format_bytes(db_size_after.saturating_sub(db_size_before))
-    );
-    println!("  .wal 文件大小: {}", format_bytes(wal_size_after));
-    assert!(
-        db_size_after > db_size_before,
-        ".db 文件应在 Checkpoint 后增大"
-    );
-    println!("  ✓ 数据已持久化到磁盘");
-    println!();
+    // println!("══ 步骤 4：Checkpoint 持久化 ══════════════════════════════════════");
+    // let t4 = Instant::now();
+    // let db_size_before = std::fs::metadata(DB_PATH).map(|m| m.len()).unwrap_or(0);
+    // engine.checkpoint().expect("Checkpoint 失败");
+    // let db_size_after = std::fs::metadata(DB_PATH).map(|m| m.len()).unwrap_or(0);
+    // let wal_size_after = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+    // println!(
+    //     "  ✓ Checkpoint 完成! 耗时: {:.3}s",
+    //     t4.elapsed().as_secs_f64()
+    // );
+    // println!(
+    //     "  .db 文件大小:  {} (增长 {})",
+    //     format_bytes(db_size_after),
+    //     format_bytes(db_size_after.saturating_sub(db_size_before))
+    // );
+    // println!("  .wal 文件大小: {}", format_bytes(wal_size_after));
+    // assert!(
+    //     db_size_after > db_size_before,
+    //     ".db 文件应在 Checkpoint 后增大"
+    // );
+    // println!("  ✓ 数据已持久化到磁盘");
+    // println!();
 
     // ─── 步骤 5：关闭并重新打开数据库 ────────────────────────────────────────
     println!("══ 步骤 5：关闭并重新打开数据库 ══════════════════════════════════");

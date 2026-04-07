@@ -612,7 +612,6 @@ struct RecoveryCatalog {
 impl RecoveryCatalog {
     fn new(db: Arc<DatabaseInstance>) -> Self {
         let conn = Connection::new(db.clone());
-        conn.set_auto_commit(false);
         Self { db, conn }
     }
 
@@ -1766,6 +1765,52 @@ mod tests {
         }
 
         // Cleanup
+        cleanup_db(&db_path);
+    }
+
+    /// Test: persistent database can recover committed rows from WAL without checkpoint.
+    #[test]
+    fn persistent_reopen_from_wal_replay() {
+        let db_path = temp_db_path("reopen_wal_replay");
+
+        cleanup_db(&db_path);
+
+        {
+            let mut db = DB::open(&db_path).expect("Failed to create database");
+            db.create_table(
+                "main",
+                "wal_test",
+                vec![("id".to_string(), LogicalType::integer())],
+            );
+            db.checkpoint()
+                .expect("Checkpoint after CREATE TABLE failed");
+
+            let conn = db.connect();
+            for batch in 0..4 {
+                conn.begin_transaction()
+                    .expect("Failed to begin transaction");
+                let start = batch * 512;
+                let values: Vec<i32> = (start..start + 512).collect();
+                let mut chunk = build_integer_chunk(&values);
+                conn.insert_chunk("wal_test", &mut chunk)
+                    .expect("Insert through WAL transaction failed");
+                conn.commit().expect("Commit failed");
+            }
+
+            let wal_path = format!("{}.wal", db_path);
+            let wal_meta = std::fs::metadata(&wal_path).expect("WAL should exist before reopen");
+            assert!(wal_meta.len() > 0, "WAL should contain replayable data");
+        }
+
+        {
+            let db = DB::open(&db_path).expect("Failed to reopen database from WAL");
+            let chunks = db
+                .scan_chunks_silent("wal_test", None)
+                .expect("Scan after WAL replay failed");
+            let total_rows: usize = chunks.iter().map(|c| c.size()).sum();
+            assert_eq!(total_rows, 2048, "Expected 2048 rows after WAL replay");
+        }
+
         cleanup_db(&db_path);
     }
 
