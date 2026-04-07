@@ -844,7 +844,7 @@ impl DuckTransactionManager {
             storage_in_memory: false,
             compression_enabled: false,
             debug_skip_checkpoint_on_commit: false,
-            has_wal: true,
+            has_wal: db.storage_manager.has_wal(),
             recovery_mode_default: true,
             storage_manager: Some(db.storage_manager.clone()),
         };
@@ -1051,12 +1051,7 @@ impl DuckTransactionManager {
 
                 // 执行 checkpoint（忽略错误，checkpoint 失败不影响事务提交）
                 // C++: storage_manager.CreateCheckpoint(context, options);
-                match storage_mgr.create_checkpoint(checkpoint_options) {
-                    Ok(_) => println!("   ✅ 自动 checkpoint 执行成功"),
-                    Err(e) => println!("   ⚠️  自动 checkpoint 执行失败: {:?}", e),
-                }
-            } else {
-                println!("   ⚠️  StorageManager 不可用，跳过 checkpoint");
+                let _ = storage_mgr.create_checkpoint(checkpoint_options);
             }
 
             // checkpoint_lock_key 会在此处 drop，自动释放锁

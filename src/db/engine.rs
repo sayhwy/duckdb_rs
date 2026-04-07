@@ -64,4 +64,3 @@ pub struct SchemaInfo {
     /// 该 Schema 下的所有表。
     pub tables: Vec<SchemaTableInfo>,
 }
-

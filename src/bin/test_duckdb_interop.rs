@@ -73,7 +73,9 @@ INSERT INTO students VALUES
     }
 
     if Path::new(TEST_DB_DUCKDB).exists() {
-        let size = std::fs::metadata(TEST_DB_DUCKDB).map(|m| m.len()).unwrap_or(0);
+        let size = std::fs::metadata(TEST_DB_DUCKDB)
+            .map(|m| m.len())
+            .unwrap_or(0);
         println!("│  ✓ 数据库文件已创建: {} 字节", size);
 
         println!("│  尝试用 Rust 读取...");
@@ -106,7 +108,9 @@ INSERT INTO students VALUES
             println!("│  ✓ Rust 创建学生表成功");
 
             if Path::new(TEST_DB_RUST).exists() {
-                let size = std::fs::metadata(TEST_DB_RUST).map(|m| m.len()).unwrap_or(0);
+                let size = std::fs::metadata(TEST_DB_RUST)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
                 println!("│  ✓ 数据库文件已创建: {} 字节", size);
 
                 println!("│  尝试用 DuckDB 读取...");
@@ -196,21 +200,20 @@ fn test_rust_read_duckdb_file() -> Result<Vec<String>, String> {
 // ─── Rust 创建学生表 ───────────────────────────────────────────────────────────
 
 fn test_rust_create_student_table() -> Result<(), String> {
-    let engine =
-        DuckEngine::open(TEST_DB_RUST).map_err(|e| format!("无法创建数据库: {:?}", e))?;
+    let engine = DuckEngine::open(TEST_DB_RUST).map_err(|e| format!("无法创建数据库: {:?}", e))?;
     let mut conn = engine.connect();
 
     conn.create_table(
-            "main",
-            "students",
-            vec![
-                ("id".to_string(), LogicalType::integer()),
-                ("age".to_string(), LogicalType::integer()),
-                ("score".to_string(), LogicalType::double()),
-                ("class_id".to_string(), LogicalType::bigint()),
-            ],
-        )
-        .map_err(|e| format!("创建表失败: {}", e))?;
+        "main",
+        "students",
+        vec![
+            ("id".to_string(), LogicalType::integer()),
+            ("age".to_string(), LogicalType::integer()),
+            ("score".to_string(), LogicalType::double()),
+            ("class_id".to_string(), LogicalType::bigint()),
+        ],
+    )
+    .map_err(|e| format!("创建表失败: {}", e))?;
 
     let students = expected_students();
 
@@ -262,8 +265,7 @@ fn test_rust_create_student_table() -> Result<(), String> {
         ));
     }
 
-    conn.commit()
-        .map_err(|e| format!("commit 失败: {}", e))?;
+    conn.commit().map_err(|e| format!("commit 失败: {}", e))?;
 
     println!("│  执行 checkpoint...");
     engine

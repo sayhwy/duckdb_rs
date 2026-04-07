@@ -42,10 +42,8 @@ use super::types::{
     CompressionType, Idx, LogicalType, MetaBlockPointer, PhysicalType, RowId, STANDARD_VECTOR_SIZE,
     TransactionData, TransactionId,
 };
+use crate::common::serializer::{BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID};
 use crate::common::types::{DataChunk, Vector};
-use crate::common::serializer::{
-    BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID,
-};
 use crate::storage::table::column_segment::ColumnSegment;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -724,7 +722,9 @@ impl RowGroup {
     /// some rows were already deleted by an earlier transaction).
     pub fn delete(
         &self,
-        transaction_handle: Option<&Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle>>,
+        transaction_handle: Option<
+            &Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle>,
+        >,
         transaction: TransactionData,
         table: Option<&crate::storage::data_table::DataTable>,
         row_ids: &mut [RowId],

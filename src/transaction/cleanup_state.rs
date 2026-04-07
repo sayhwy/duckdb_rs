@@ -18,8 +18,8 @@
 use super::append_info::AppendInfo;
 use super::commit_state::{IndexDataRemover, IndexRemovalType};
 use super::delete_info::DeleteInfo;
-use super::update_info::UpdateInfo;
 use super::types::{ActiveTransactionState, TransactionId, UndoFlags};
+use super::update_info::UpdateInfo;
 
 // ─── CleanupState ──────────────────────────────────────────────────────────────
 
@@ -75,7 +75,9 @@ impl CleanupState {
     fn cleanup_delete(&mut self, payload: &[u8]) {
         let info = DeleteInfo::deserialize(payload);
         if let Some(version_info) =
-            crate::storage::table::row_version_manager::RowVersionManager::lookup(info.version_info_id)
+            crate::storage::table::row_version_manager::RowVersionManager::lookup(
+                info.version_info_id,
+            )
         {
             version_info.cleanup_delete(&info, self.lowest_active_transaction);
         }
@@ -94,7 +96,9 @@ impl CleanupState {
 
     fn cleanup_update(&mut self, payload: &[u8]) {
         let info = UpdateInfo::deserialize_auto(payload);
-        if let Some(segment) = crate::storage::table::update_segment::UpdateSegment::lookup(info.segment_id) {
+        if let Some(segment) =
+            crate::storage::table::update_segment::UpdateSegment::lookup(info.segment_id)
+        {
             segment.cleanup_update(&info);
         }
     }

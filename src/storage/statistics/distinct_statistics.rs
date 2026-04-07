@@ -1,9 +1,7 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-use crate::common::serializer::{
-    BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID,
-};
 use crate::common::serializer::BinarySerializer;
+use crate::common::serializer::{BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID};
 use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Sample rate for integral types (higher sampling rate)
 const INTEGRAL_SAMPLE_RATE: f64 = 0.1;
@@ -21,7 +19,8 @@ const HLL_V1_P: usize = 12;
 const HLL_V1_BITS: usize = 6;
 const HLL_V1_REGISTER_COUNT: usize = 1 << HLL_V1_P;
 const HLL_V1_HEADER_SIZE: usize = 17;
-const HLL_V1_DENSE_SIZE: usize = HLL_V1_HEADER_SIZE + ((HLL_V1_REGISTER_COUNT * HLL_V1_BITS + 7) / 8);
+const HLL_V1_DENSE_SIZE: usize =
+    HLL_V1_HEADER_SIZE + ((HLL_V1_REGISTER_COUNT * HLL_V1_BITS + 7) / 8);
 
 /// HyperLogLog implementation for cardinality estimation
 /// This is a simplified version - in production, use a proper HLL implementation
@@ -129,7 +128,7 @@ impl HyperLogLog {
                     return Ok(Self {
                         registers,
                         precision: 6,
-                    })
+                    });
                 }
                 other => {
                     return Err(io::Error::new(
@@ -320,7 +319,9 @@ impl DistinctStatistics {
                         .store(de.read_varint()?, Ordering::Relaxed);
                 }
                 101 => {
-                    result.total_count.store(de.read_varint()?, Ordering::Relaxed);
+                    result
+                        .total_count
+                        .store(de.read_varint()?, Ordering::Relaxed);
                 }
                 102 => {
                     let present = de.read_u8();

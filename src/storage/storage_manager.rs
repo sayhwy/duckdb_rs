@@ -31,11 +31,6 @@
 //! | `bool load_complete` | `AtomicBool` |
 //! | `optional_idx storage_version` | `Option<u64>` |
 
-use parking_lot::Mutex;
-use std::io;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
-use crate::db::conn::DatabaseInstance;
 use super::StandardBufferManager;
 use super::buffer::{BlockAllocator, BlockManager, BufferPool};
 use super::metadata::MetaBlockPointer;
@@ -47,6 +42,11 @@ use super::storage_info::{
 };
 use super::storage_info::{StorageError, StorageResult};
 use super::write_ahead_log::{WalInitState, WalWriter, WriteAheadLog};
+use crate::db::conn::DatabaseInstance;
+use parking_lot::Mutex;
+use std::io;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
 // ─── FileWalWriter ─────────────────────────────────────────────────────────────
 
@@ -748,6 +748,9 @@ pub struct SingleFileStorageManager {
     /// 存储序列化版本（C++: `optional_idx storage_version`）。
     storage_version: Mutex<Option<u64>>,
 
+    /// WAL 回放期间禁用新的 WAL 写入，避免恢复过程把同一批数据再次写回 WAL。
+    replaying_wal: AtomicBool,
+
     /// 存储选项（C++: `StorageOptions storage_options`）。
     pub storage_options: StorageOptions,
 
@@ -782,6 +785,7 @@ impl SingleFileStorageManager {
             wal_size_atomic: Arc::new(AtomicU64::new(0)),
             load_complete: AtomicBool::new(false),
             storage_version: Mutex::new(None),
+            replaying_wal: AtomicBool::new(false),
             storage_options: options,
             block_manager_inner: Mutex::new(None),
             db_instance: Mutex::new(None),
@@ -831,7 +835,17 @@ impl SingleFileStorageManager {
         *self.db_instance.lock() = Some(db_instance);
     }
 
-    fn checkpoint_tables(&self) -> StorageResult<Vec<crate::storage::checkpoint_manager::TableInfo>> {
+    pub fn set_replaying_wal(&self, replaying: bool) {
+        self.replaying_wal.store(replaying, Ordering::Release);
+    }
+
+    pub fn is_replaying_wal(&self) -> bool {
+        self.replaying_wal.load(Ordering::Acquire)
+    }
+
+    fn checkpoint_tables(
+        &self,
+    ) -> StorageResult<Vec<crate::storage::checkpoint_manager::TableInfo>> {
         let db_instance = self
             .db_instance
             .lock()
@@ -886,11 +900,7 @@ impl SingleFileStorageManager {
         }
         let wal_path = self.wal_path();
         self.wal_state.lock().wal = Some(Arc::new(WriteAheadLog::new(
-            self,
-            wal_path,
-            wal_size,
-            init_state,
-            None,
+            self, wal_path, wal_size, init_state, None,
         )));
     }
 }
@@ -979,7 +989,11 @@ impl StorageManager for SingleFileStorageManager {
     }
 
     fn has_wal(&self) -> bool {
-        if self.in_memory() || self.read_only || !self.load_complete.load(Ordering::Acquire) {
+        if self.in_memory()
+            || self.read_only
+            || self.is_replaying_wal()
+            || !self.load_complete.load(Ordering::Acquire)
+        {
             return false;
         }
         true
@@ -1017,13 +1031,6 @@ impl StorageManager for SingleFileStorageManager {
         //   6. wal.reset()
         //   7. 创建 checkpoint WAL（.checkpoint.wal），next_checkpoint_iteration
 
-        println!("🟡 [CHECKPOINT] WALStartCheckpoint 开始");
-        println!("   - 数据库路径: {}", self.path);
-        println!(
-            "   - 当前 WAL 大小: {} bytes",
-            self.wal_size_atomic.load(Ordering::Relaxed)
-        );
-
         let mut wal_state = self.wal_state.lock();
 
         // 设置 checkpoint 事务 ID（简化：使用当前时间戳作为 ID 占位）
@@ -1037,13 +1044,11 @@ impl StorageManager for SingleFileStorageManager {
         let wal = match &wal_state.wal {
             Some(w) => w.clone(),
             None => {
-                println!("   ⚠️  WAL 不存在，跳过 checkpoint");
                 return Ok(false);
             }
         };
 
         if self.wal_size_atomic.load(Ordering::Relaxed) == 0 {
-            println!("   ⚠️  WAL 大小为 0，跳过 checkpoint");
             return Ok(false);
         }
 
@@ -1084,10 +1089,6 @@ impl StorageManager for SingleFileStorageManager {
         );
         wal_state.wal = Some(Arc::new(checkpoint_wal));
 
-        println!("   ✅ WALStartCheckpoint 完成");
-        println!("   - 主 WAL 已关闭");
-        println!("   - Checkpoint WAL 已创建: {}", checkpoint_wal_path);
-
         Ok(true)
     }
 
@@ -1097,8 +1098,6 @@ impl StorageManager for SingleFileStorageManager {
         //   2. if (!wal->Initialized()) → 无并发写 → 删除主 WAL，重新创建空 WAL
         //   3. 否则：关闭 checkpoint WAL，MoveFile(.checkpoint.wal → .wal)，重新打开
 
-        println!("🟡 [CHECKPOINT] WALFinishCheckpoint 开始");
-
         let mut wal_state = self.wal_state.lock();
         let wal = wal_state
             .wal
@@ -1107,7 +1106,6 @@ impl StorageManager for SingleFileStorageManager {
 
         if !wal.is_initialized() {
             // 情形 A：无并发写 — checkpoint WAL 从未初始化（没有新的并发事务写入）
-            println!("   - 情形 A: 无并发写入，删除主 WAL");
             // C++: fs.TryRemoveFile(wal_path) — 删除主 WAL 文件
             let _ = std::fs::remove_file(&wal_state.wal_path);
 
@@ -1122,7 +1120,6 @@ impl StorageManager for SingleFileStorageManager {
             wal_state.wal = Some(Arc::new(new_wal));
         } else {
             // 情形 B：有并发写 — checkpoint WAL 已初始化（收到了并发事务写入）
-            println!("   - 情形 B: 有并发写入，合并 checkpoint WAL");
             // C++: drop(wal) — 关闭 checkpoint WAL writer（确保数据 flush 到磁盘）
             let checkpoint_path = wal.wal_path.clone();
             drop(wal);
@@ -1150,12 +1147,6 @@ impl StorageManager for SingleFileStorageManager {
             );
             wal_state.wal = Some(Arc::new(new_wal));
         }
-
-        println!("   ✅ WALFinishCheckpoint 完成");
-        println!(
-            "   - WAL 大小: {} bytes",
-            self.wal_size_atomic.load(Ordering::Relaxed)
-        );
 
         Ok(())
     }
@@ -1288,6 +1279,9 @@ impl StorageManager for SingleFileStorageManager {
     }
 
     fn gen_storage_commit_state(&self) -> Option<Box<dyn StorageCommitState>> {
+        if self.is_replaying_wal() {
+            return None;
+        }
         // C++: auto wal = storage_manager.GetWAL();
         //      commit_state = storage_manager.GenStorageCommitState(*wal);
         //

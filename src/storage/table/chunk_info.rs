@@ -411,8 +411,9 @@ impl ChunkVectorInfo {
                 }
                 for idx in 0..max_count {
                     let delete_id = self.deleted[idx];
-                    let committed_deleted =
-                        delete_id != NOT_DELETED_ID && delete_id < TRANSACTION_ID_START && delete_id < min_start_id;
+                    let committed_deleted = delete_id != NOT_DELETED_ID
+                        && delete_id < TRANSACTION_ID_START
+                        && delete_id < min_start_id;
                     if !committed_deleted {
                         sel_vector.sel.push(idx as u32);
                         visible += 1;
@@ -425,8 +426,9 @@ impl ChunkVectorInfo {
                     let delete_id = self.deleted[idx];
                     let committed_inserted =
                         insert_id < TRANSACTION_ID_START && insert_id < min_start_id;
-                    let committed_deleted =
-                        delete_id != NOT_DELETED_ID && delete_id < TRANSACTION_ID_START && delete_id < min_start_id;
+                    let committed_deleted = delete_id != NOT_DELETED_ID
+                        && delete_id < TRANSACTION_ID_START
+                        && delete_id < min_start_id;
                     if committed_inserted && !committed_deleted {
                         sel_vector.sel.push(idx as u32);
                         visible += 1;

@@ -1,4 +1,4 @@
-﻿//! Connection 实现。
+//! Connection 实现。
 //!
 //! 对应 DuckDB C++: `duckdb/main/connection.hpp` / `connection.cpp`
 
@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
-use crate::catalog::TableCatalogEntry;
 use crate::catalog::PhysicalIndex;
+use crate::catalog::TableCatalogEntry;
 use crate::common::types::{DataChunk, LogicalType, STANDARD_VECTOR_SIZE};
 use crate::storage::data_table::DataTable;
 use crate::storage::storage_manager::StorageManager;
@@ -82,7 +82,6 @@ impl ClientContext {
         self.transaction.try_get_transaction()
     }
 
-
     /// 中断执行（C++: `Interrupt()`）。
     pub fn interrupt(&self) {
         self.interrupted.store(true, Ordering::Relaxed);
@@ -104,7 +103,6 @@ impl ClientContext {
     ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
         self.transaction.begin_transaction()
     }
-    
 
     /// 提交事务。
     pub fn commit(&self) -> Result<(), crate::transaction::transaction_context::TransactionError> {
@@ -492,7 +490,9 @@ impl Connection {
 
         let txn = self.get_read_transaction();
         let mut state = crate::storage::table::scan_state::TableScanState::new();
-        table.storage.initialize_scan(&mut state, column_ids.clone(), None);
+        table
+            .storage
+            .initialize_scan(&mut state, column_ids.clone(), None);
         {
             let txn_guard = txn.lock_inner();
             txn_guard.storage.initialize_scan_state(

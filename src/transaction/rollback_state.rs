@@ -17,8 +17,8 @@
 
 use super::append_info::AppendInfo;
 use super::delete_info::DeleteInfo;
-use super::update_info::UpdateInfo;
 use super::types::{NOT_DELETED_ID, UndoFlags};
+use super::update_info::UpdateInfo;
 
 // ─── RollbackState ─────────────────────────────────────────────────────────────
 
@@ -47,7 +47,9 @@ impl RollbackState {
 
     fn rollback_update(&mut self, payload: &[u8]) {
         let info = UpdateInfo::deserialize_auto(payload);
-        if let Some(segment) = crate::storage::table::update_segment::UpdateSegment::lookup(info.segment_id) {
+        if let Some(segment) =
+            crate::storage::table::update_segment::UpdateSegment::lookup(info.segment_id)
+        {
             segment.rollback_update(&info);
         }
     }
@@ -55,7 +57,9 @@ impl RollbackState {
     fn rollback_delete(&mut self, payload: &[u8]) {
         let info = DeleteInfo::deserialize(payload);
         if let Some(version_info) =
-            crate::storage::table::row_version_manager::RowVersionManager::lookup(info.version_info_id)
+            crate::storage::table::row_version_manager::RowVersionManager::lookup(
+                info.version_info_id,
+            )
         {
             version_info.rollback_delete(&info);
         }

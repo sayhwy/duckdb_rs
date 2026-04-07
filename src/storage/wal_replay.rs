@@ -400,9 +400,12 @@ impl<R: WalReader> WalFrameReader<R> {
 
         if self.header_pending {
             self.header_pending = false;
-            return Ok((offset, WalFrame::Header {
-                payload: self.read_header_payload()?,
-            }));
+            return Ok((
+                offset,
+                WalFrame::Header {
+                    payload: self.read_header_payload()?,
+                },
+            ));
         }
 
         let frame = match self.version {

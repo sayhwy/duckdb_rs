@@ -195,8 +195,13 @@ mod tests {
             serializer.end_object();
         }
         let mut de = BinaryMetadataDeserializer::new(&mut stream);
-        let decoded = de.read_meta_block_pointer().expect("pointer should deserialize");
+        let decoded = de
+            .read_meta_block_pointer()
+            .expect("pointer should deserialize");
         assert_eq!(decoded, ptr);
-        assert!(decoded.is_valid(), "pointer with block_pointer=0 must remain valid");
+        assert!(
+            decoded.is_valid(),
+            "pointer with block_pointer=0 must remain valid"
+        );
     }
 }

@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // checkpoint_manager.rs 鈥?Checkpoint 绠＄悊鍣?
 // 瀵瑰簲 C++: duckdb/storage/checkpoint_manager.hpp/.cpp
 // ============================================================
@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use crate::catalog::{ColumnDefinition, LogicalType, TableCatalogEntry};
-use crate::common::types::LogicalTypeId;
 use crate::common::serializer::BinarySerializer;
+use crate::common::types::LogicalTypeId;
 use crate::storage::buffer::BlockManager;
 use crate::storage::data_table::DataTable;
 use crate::storage::metadata::WriteStream;
@@ -295,9 +295,8 @@ impl CheckpointManager {
                         let mut str_data: Vec<Vec<u8>> = Vec::with_capacity(n);
                         for i in 0..n {
                             let base = i * 16;
-                            let len = u32::from_le_bytes(
-                                buf[base..base + 4].try_into().unwrap(),
-                            ) as usize;
+                            let len = u32::from_le_bytes(buf[base..base + 4].try_into().unwrap())
+                                as usize;
                             if len <= 12 {
                                 let bytes = buf[base + 4..base + 4 + len].to_vec();
                                 str_data.push(bytes);
@@ -428,7 +427,6 @@ fn write_data_pointer_with_compression(
     serializer.end_object();
 }
 
-
 mod catalog_type {
     pub const TABLE_ENTRY: u8 = 1;
     pub const SCHEMA_ENTRY: u8 = 2;
@@ -478,7 +476,8 @@ fn write_catalog<W: WriteStream>(
         serializer.list_write_object(|s| write_schema_entry(s, catalog_name, schema_name));
     }
     for (entry, table_pointer, total_rows) in entries {
-        serializer.list_write_object(|s| write_catalog_entry(s, entry, *table_pointer, *total_rows));
+        serializer
+            .list_write_object(|s| write_catalog_entry(s, entry, *table_pointer, *total_rows));
     }
     serializer.end_list();
     serializer.end_object();
@@ -558,10 +557,7 @@ fn write_create_table_info(serializer: &mut BinarySerializer<'_>, entry: &TableC
     serializer.end_object();
 }
 
-fn write_column_list(
-    serializer: &mut BinarySerializer<'_>,
-    columns: &crate::catalog::ColumnList,
-) {
+fn write_column_list(serializer: &mut BinarySerializer<'_>, columns: &crate::catalog::ColumnList) {
     serializer.begin_list(100, columns.columns.len());
     for column in &columns.columns {
         serializer.list_write_object(|s| write_column_definition(s, column));
@@ -625,4 +621,3 @@ fn write_table_storage_info(
     serializer.begin_list(104, 0);
     serializer.end_list();
 }
-

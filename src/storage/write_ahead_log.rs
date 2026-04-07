@@ -41,7 +41,9 @@ use std::io::{self, Write};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::metadata::MetaBlockPointer;
-use super::storage_info::{BLOCK_HEADER_SIZE, DatabaseHeader, FileOpenFlags, FileSystem, MainHeader};
+use super::storage_info::{
+    BLOCK_HEADER_SIZE, DatabaseHeader, FileOpenFlags, FileSystem, MainHeader,
+};
 use super::storage_manager::StorageManager;
 
 // ─── WAL 版本常量 ──────────────────────────────────────────────────────────────
@@ -778,7 +780,9 @@ impl WriteAheadLog {
         self.storage_manager
     }
 
-    fn storage_manager_header_info(&self) -> io::Result<([u8; MainHeader::DB_IDENTIFIER_LEN], u64)> {
+    fn storage_manager_header_info(
+        &self,
+    ) -> io::Result<([u8; MainHeader::DB_IDENTIFIER_LEN], u64)> {
         let path = self.storage_manager().db_path();
         let fs = crate::storage::standard_file_system::LocalFileSystem;
         let mut file = fs
@@ -789,16 +793,24 @@ impl WriteAheadLog {
         file.read_at(&mut main_header_buf, 0)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         let main_header = MainHeader::deserialize(&main_header_buf[BLOCK_HEADER_SIZE..])
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid DuckDB main header"))?;
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid DuckDB main header")
+            })?;
 
         let mut header_buf = vec![0u8; super::storage_info::FILE_HEADER_SIZE];
-        file.read_at(&mut header_buf, super::storage_info::FILE_HEADER_SIZE as u64)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        file.read_at(
+            &mut header_buf,
+            super::storage_info::FILE_HEADER_SIZE as u64,
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         let h0 = DatabaseHeader::deserialize(
             &header_buf[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + DatabaseHeader::SERIALIZED_SIZE],
         );
-        file.read_at(&mut header_buf, (super::storage_info::FILE_HEADER_SIZE * 2) as u64)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        file.read_at(
+            &mut header_buf,
+            (super::storage_info::FILE_HEADER_SIZE * 2) as u64,
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         let h1 = DatabaseHeader::deserialize(
             &header_buf[BLOCK_HEADER_SIZE..BLOCK_HEADER_SIZE + DatabaseHeader::SERIALIZED_SIZE],
         );

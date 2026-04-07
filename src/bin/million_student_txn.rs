@@ -1,4 +1,4 @@
-﻿//! 百万学生事务批量写入测试
+//! 百万学生事务批量写入测试
 //!
 //! # 测试目标
 //!
@@ -166,8 +166,7 @@ fn main() {
         let count = remaining.min(BATCH_SIZE);
 
         // 开启事务，获取句柄
-        conn
-            .begin_transaction()
+        conn.begin_transaction()
             .unwrap_or_else(|e| panic!("第 {} 批 begin_transaction 失败: {:?}", batch_idx + 1, e));
 
         let mut chunk = build_student_chunk(start_id, count);
@@ -201,9 +200,7 @@ fn main() {
     let t3 = Instant::now();
     // 用只读事务扫描
     let txn = conn.begin_transaction().expect("scan 事务创建失败");
-    let chunks = conn
-        .scan("students", None)
-        .expect("内存扫描失败");
+    let chunks = conn.scan("students", None).expect("内存扫描失败");
     conn.commit().expect("scan 事务提交失败");
 
     let total_rows: usize = chunks.iter().map(|c| c.size()).sum();
@@ -282,9 +279,7 @@ fn main() {
     let t6 = Instant::now();
     let conn2 = engine2.connect();
     conn2.begin_transaction().expect("scan2 事务创建失败");
-    let chunks2 = conn2
-        .scan("students", None)
-        .expect("磁盘扫描失败");
+    let chunks2 = conn2.scan("students", None).expect("磁盘扫描失败");
     conn2.commit().expect("scan2 事务提交失败");
 
     let total_after: usize = chunks2.iter().map(|c| c.size()).sum();

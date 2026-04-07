@@ -14,8 +14,8 @@
 
 use super::append_info::AppendInfo;
 use super::delete_info::DeleteInfo;
-use super::update_info::UpdateInfo;
 use super::types::{ActiveTransactionState, CommitMode, NOT_DELETED_ID, TransactionId, UndoFlags};
+use super::update_info::UpdateInfo;
 use std::sync::atomic::Ordering;
 
 // ─── IndexDataRemover ──────────────────────────────────────────────────────────
@@ -173,7 +173,9 @@ impl CommitState {
     fn commit_delete(&mut self, payload: &[u8]) {
         let info = DeleteInfo::deserialize(payload);
         if let Some(version_info) =
-            crate::storage::table::row_version_manager::RowVersionManager::lookup(info.version_info_id)
+            crate::storage::table::row_version_manager::RowVersionManager::lookup(
+                info.version_info_id,
+            )
         {
             version_info.commit_delete(&info, self.commit_id);
         }
@@ -199,7 +201,9 @@ impl CommitState {
 
     fn commit_update(&mut self, payload: &[u8]) {
         let info = UpdateInfo::deserialize_auto(payload);
-        if let Some(segment) = crate::storage::table::update_segment::UpdateSegment::lookup(info.segment_id) {
+        if let Some(segment) =
+            crate::storage::table::update_segment::UpdateSegment::lookup(info.segment_id)
+        {
             segment.commit_update(&info, self.commit_id);
         }
     }
@@ -223,7 +227,9 @@ impl CommitState {
 
     fn revert_update(&mut self, payload: &[u8]) {
         let info = UpdateInfo::deserialize_auto(payload);
-        if let Some(segment) = crate::storage::table::update_segment::UpdateSegment::lookup(info.segment_id) {
+        if let Some(segment) =
+            crate::storage::table::update_segment::UpdateSegment::lookup(info.segment_id)
+        {
             segment.revert_commit(&info, info.version_number.load(Ordering::Relaxed));
         }
     }

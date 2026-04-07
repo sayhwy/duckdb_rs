@@ -1,9 +1,7 @@
 use super::{BaseStatistics, DistinctStatistics};
-use crate::common::types::LogicalType;
-use crate::common::serializer::{
-    BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID,
-};
 use crate::common::serializer::BinarySerializer;
+use crate::common::serializer::{BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID};
+use crate::common::types::LogicalType;
 use std::io;
 use std::sync::Arc;
 
@@ -146,12 +144,17 @@ impl ColumnStatistics {
             let field = de.next_field()?;
             match field {
                 100 => {
-                    stats = Some(BaseStatistics::deserialize_checkpoint(de, logical_type.clone())?);
+                    stats = Some(BaseStatistics::deserialize_checkpoint(
+                        de,
+                        logical_type.clone(),
+                    )?);
                     let next = de.peek_field()?;
                     if next != 101 && next != MESSAGE_TERMINATOR_FIELD_ID {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
-                            format!("after BaseStatistics expected field 101 or terminator, got {next}"),
+                            format!(
+                                "after BaseStatistics expected field 101 or terminator, got {next}"
+                            ),
                         ));
                     }
                 }

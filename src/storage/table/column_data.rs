@@ -1181,7 +1181,8 @@ impl ColumnDataKind {
                 update_segment.fetch_updates(
                     transaction,
                     vector_index,
-                    &mut result.raw_data_mut()[..(scanned as usize * self.ctx.logical_type.physical_size())],
+                    &mut result.raw_data_mut()
+                        [..(scanned as usize * self.ctx.logical_type.physical_size())],
                 );
             }
         }

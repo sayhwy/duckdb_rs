@@ -3,8 +3,8 @@ use crate::common::serializer::BinarySerializer;
 use crate::storage::metadata::{MetaBlockPointer, MetadataManager, MetadataWriter, WriteStream};
 use crate::storage::storage_manager::CheckpointOptions;
 use crate::storage::table::data_table_info::DataTableInfo;
-use crate::storage::table::row_group_collection::RowGroupCollection;
 use crate::storage::table::row_group::RowGroupPointer;
+use crate::storage::table::row_group_collection::RowGroupCollection;
 use crate::storage::table::table_statistics::TableStatistics;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -132,7 +132,8 @@ impl<'writer, 'mgr> SingleFileTableDataWriter<'writer, 'mgr> {
             .unwrap_or(0);
 
         {
-            let mut serializer = BinarySerializer::new(self.table_data_writer as &mut dyn WriteStream);
+            let mut serializer =
+                BinarySerializer::new(self.table_data_writer as &mut dyn WriteStream);
             serializer.begin_root_object();
             global_stats.serialize_checkpoint(&mut serializer);
             serializer.end_object();
@@ -140,7 +141,8 @@ impl<'writer, 'mgr> SingleFileTableDataWriter<'writer, 'mgr> {
         self.table_data_writer
             .write_u64(self.base.row_group_pointers.len() as u64);
         for row_group_pointer in &self.base.row_group_pointers {
-            let mut serializer = BinarySerializer::new(self.table_data_writer as &mut dyn WriteStream);
+            let mut serializer =
+                BinarySerializer::new(self.table_data_writer as &mut dyn WriteStream);
             serializer.begin_root_object();
             serializer.write_varint(100, row_group_pointer.row_start);
             serializer.write_varint(101, row_group_pointer.tuple_count);

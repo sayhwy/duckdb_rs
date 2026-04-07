@@ -10,7 +10,7 @@ use crate::common::types::Vector;
 use crate::storage::storage_info::{StorageError, StorageResult};
 use crate::transaction::update_info::UpdateInfo as TxnUpdateInfo;
 
-use super::types::{Idx, RowId, TransactionData, TransactionId, STANDARD_VECTOR_SIZE};
+use super::types::{Idx, RowId, STANDARD_VECTOR_SIZE, TransactionData, TransactionId};
 
 static NEXT_SEGMENT_ID: AtomicU64 = AtomicU64::new(1);
 static SEGMENT_REGISTRY: OnceLock<Mutex<HashMap<u64, Weak<UpdateSegment>>>> = OnceLock::new();
@@ -49,7 +49,10 @@ impl UpdateSegment {
     }
 
     pub fn lookup(segment_id: u64) -> Option<Arc<Self>> {
-        segment_registry().lock().get(&segment_id).and_then(Weak::upgrade)
+        segment_registry()
+            .lock()
+            .get(&segment_id)
+            .and_then(Weak::upgrade)
     }
 
     pub fn has_updates(&self) -> bool {
@@ -76,7 +79,12 @@ impl UpdateSegment {
         (start_vector..=end_vector).any(|vector_idx| self.has_updates_at(vector_idx))
     }
 
-    pub fn fetch_updates(&self, _transaction: TransactionData, vector_index: Idx, result: &mut [u8]) {
+    pub fn fetch_updates(
+        &self,
+        _transaction: TransactionData,
+        vector_index: Idx,
+        result: &mut [u8],
+    ) {
         self.fetch_committed(vector_index, result);
     }
 
@@ -140,7 +148,9 @@ impl UpdateSegment {
 
     pub fn update(
         &self,
-        transaction_handle: Option<&Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle>>,
+        transaction_handle: Option<
+            &Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle>,
+        >,
         transaction: TransactionData,
         table: &crate::storage::data_table::DataTable,
         column_index: Idx,
@@ -178,15 +188,23 @@ impl UpdateSegment {
 
         let mut start = 0usize;
         while start < update_count {
-            let first_relative_row = (row_ids[start] as u64).checked_sub(row_group_start).ok_or_else(|| {
-                StorageError::Other("UpdateSegment::update: row_id before row_group_start".to_string())
-            })?;
+            let first_relative_row = (row_ids[start] as u64)
+                .checked_sub(row_group_start)
+                .ok_or_else(|| {
+                    StorageError::Other(
+                        "UpdateSegment::update: row_id before row_group_start".to_string(),
+                    )
+                })?;
             let vector_index = first_relative_row / STANDARD_VECTOR_SIZE;
             let mut end = start + 1;
             while end < update_count {
-                let relative_row = (row_ids[end] as u64).checked_sub(row_group_start).ok_or_else(|| {
-                    StorageError::Other("UpdateSegment::update: row_id before row_group_start".to_string())
-                })?;
+                let relative_row = (row_ids[end] as u64)
+                    .checked_sub(row_group_start)
+                    .ok_or_else(|| {
+                        StorageError::Other(
+                            "UpdateSegment::update: row_id before row_group_start".to_string(),
+                        )
+                    })?;
                 if relative_row / STANDARD_VECTOR_SIZE != vector_index {
                     break;
                 }
@@ -212,14 +230,17 @@ impl UpdateSegment {
                 let relative_row = (row_ids[src_idx] as u64)
                     .checked_sub(row_group_start)
                     .ok_or_else(|| {
-                        StorageError::Other("UpdateSegment::update: row_id before row_group_start".to_string())
+                        StorageError::Other(
+                            "UpdateSegment::update: row_id before row_group_start".to_string(),
+                        )
                     })?;
                 let row_in_vector = (relative_row % STANDARD_VECTOR_SIZE) as u32;
                 ids.push(row_in_vector);
                 txn_info.tuples.push(row_in_vector);
                 let src_off = src_idx * type_size;
                 let dst_off = dst_idx * type_size;
-                data[dst_off..dst_off + type_size].copy_from_slice(&raw[src_off..src_off + type_size]);
+                data[dst_off..dst_off + type_size]
+                    .copy_from_slice(&raw[src_off..src_off + type_size]);
                 txn_info.values[dst_off..dst_off + type_size]
                     .copy_from_slice(&raw[src_off..src_off + type_size]);
             }
@@ -259,7 +280,9 @@ impl UpdateSegment {
         let Some(current) = slot.take() else {
             return;
         };
-        if current.ids == info.tuples && current.version_number == info.version_number.load(Ordering::Relaxed) {
+        if current.ids == info.tuples
+            && current.version_number == info.version_number.load(Ordering::Relaxed)
+        {
             *slot = current.prev;
         } else {
             *slot = Some(current);

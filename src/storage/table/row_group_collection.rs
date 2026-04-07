@@ -562,9 +562,7 @@ impl RowGroupCollection {
                 let mut lock = tree.lock();
                 let new_index = lock.0.len();
                 lock.0.push(super::segment_tree::SegmentNode::new(
-                    index,
-                    row_group,
-                    new_index,
+                    index, row_group, new_index,
                 ));
             }
 
@@ -640,7 +638,9 @@ impl RowGroupCollection {
 
     pub fn delete(
         &self,
-        transaction_handle: Option<&Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle>>,
+        transaction_handle: Option<
+            &Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle>,
+        >,
         transaction: TransactionData,
         table: Option<&crate::storage::data_table::DataTable>,
         ids: &mut [RowId],
@@ -694,7 +694,9 @@ impl RowGroupCollection {
 
     pub fn update(
         &self,
-        transaction_handle: Option<&Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle>>,
+        transaction_handle: Option<
+            &Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle>,
+        >,
         transaction: TransactionData,
         table: Option<&crate::storage::data_table::DataTable>,
         ids: &[RowId],
@@ -766,15 +768,17 @@ impl RowGroupCollection {
                 if col.ctx.is_persistent() {
                     let table = table.ok_or_else(|| {
                         crate::storage::storage_info::StorageError::Other(
-                            "RowGroupCollection::update: persistent updates require table metadata".to_string(),
+                            "RowGroupCollection::update: persistent updates require table metadata"
+                                .to_string(),
                         )
                     })?;
                     let update_segment = {
                         let _update_lock = col.ctx.update_lock.lock();
                         let mut updates_guard = col.ctx.updates.lock();
                         Arc::clone(updates_guard.get_or_insert_with(|| {
-                            let segment =
-                                Arc::new(super::update_segment::UpdateSegment::new(type_size as Idx));
+                            let segment = Arc::new(super::update_segment::UpdateSegment::new(
+                                type_size as Idx,
+                            ));
                             super::update_segment::UpdateSegment::register(&segment);
                             segment
                         }))
@@ -843,10 +847,7 @@ impl RowGroupCollection {
     // ── Statistics ────────────────────────────────────────────
 
     /// Copy statistics for one column (C++: `CopyStats`).
-    pub fn copy_stats(
-        &self,
-        column_id: Idx,
-    ) -> Option<crate::storage::statistics::BaseStatistics> {
+    pub fn copy_stats(&self, column_id: Idx) -> Option<crate::storage::statistics::BaseStatistics> {
         self.stats
             .copy_column_stats(column_id as usize)
             .map(|stats| stats.statistics().clone())

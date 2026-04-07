@@ -172,7 +172,9 @@ impl MetaTransaction {
             let handle = {
                 let inner = self.inner.lock();
                 match inner.transactions.get(db_id) {
-                    Some(r) if r.state == TransactionState::Uncommitted => Arc::clone(&r.transaction),
+                    Some(r) if r.state == TransactionState::Uncommitted => {
+                        Arc::clone(&r.transaction)
+                    }
                     _ => continue,
                 }
             };
@@ -203,12 +205,13 @@ impl MetaTransaction {
             let handle = {
                 let inner = self.inner.lock();
                 match inner.transactions.get(db_id) {
-                    Some(r) if r.state == TransactionState::Uncommitted => Arc::clone(&r.transaction),
+                    Some(r) if r.state == TransactionState::Uncommitted => {
+                        Arc::clone(&r.transaction)
+                    }
                     _ => continue,
                 }
             };
-            self.transaction_manager
-                .rollback_duck_transaction(&handle);
+            self.transaction_manager.rollback_duck_transaction(&handle);
             if let Some(r) = self.inner.lock().transactions.get_mut(db_id) {
                 r.state = TransactionState::RolledBack;
             }
@@ -237,7 +240,9 @@ impl MetaTransaction {
     pub fn set_read_only(&self) {
         let mut inner = self.inner.lock();
         if inner.modified_database.is_some() {
-            panic!("Cannot set MetaTransaction to read only - modifications have already been made");
+            panic!(
+                "Cannot set MetaTransaction to read only - modifications have already been made"
+            );
         }
         inner.is_read_only = true;
     }

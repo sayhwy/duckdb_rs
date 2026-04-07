@@ -145,9 +145,9 @@ impl TransactionContext {
             }
             Arc::clone(current.as_ref().unwrap())
         };
-        let db_id = self
-            .default_db_id()
-            .expect("TransactionContext::get_or_create_write_transaction: database instance dropped");
+        let db_id = self.default_db_id().expect(
+            "TransactionContext::get_or_create_write_transaction: database instance dropped",
+        );
         txn.modify_database(db_id);
         txn.get_transaction(db_id)
     }
@@ -175,7 +175,6 @@ impl TransactionContext {
                 .expect("TransactionContext::set_auto_commit(false) failed to start transaction");
         }
     }
-
 
     /// 开始新事务（C++: `TransactionContext::BeginTransaction()`）。
     ///

@@ -191,6 +191,7 @@ impl UndoBuffer {
             u64,
             std::sync::Arc<crate::storage::data_table::DataTable>,
         >,
+        include_appends: bool,
     ) -> Result<(), String> {
         let wal = commit_state
             .wal()
@@ -227,12 +228,13 @@ impl UndoBuffer {
             }
         }
 
-        let append_writer = Box::new(TableAppendWriter { tables });
+        let append_writer =
+            include_appends.then(|| Box::new(TableAppendWriter { tables }) as Box<_>);
         let mut wal_state = crate::transaction::wal_write_state::WALWriteState::new(
             wal.as_ref(),
             Some(commit_state),
             table_names,
-            Some(append_writer),
+            append_writer,
         );
 
         self.allocator.iterate_forward(|flags, payload| {

@@ -38,18 +38,18 @@ fn main() {
 
     // 创建学生表（"main" schema 已预注册）
     conn.create_table(
-            "main",
-            "students",
-            vec![
-                ("id".to_string(), LogicalType::integer()),
-                ("name".to_string(), LogicalType::varchar()),
-                ("gpa".to_string(), LogicalType::float()),
-                ("age".to_string(), LogicalType::integer()),
-                ("is_active".to_string(), LogicalType::boolean()),
-                ("enrollment_day".to_string(), LogicalType::date()),
-            ],
-        )
-        .expect("创建表失败");
+        "main",
+        "students",
+        vec![
+            ("id".to_string(), LogicalType::integer()),
+            ("name".to_string(), LogicalType::varchar()),
+            ("gpa".to_string(), LogicalType::float()),
+            ("age".to_string(), LogicalType::integer()),
+            ("is_active".to_string(), LogicalType::boolean()),
+            ("enrollment_day".to_string(), LogicalType::date()),
+        ],
+    )
+    .expect("创建表失败");
     println!("创建表 students 成功");
 
     // 生成 100 条学生数据
@@ -94,8 +94,7 @@ fn main() {
 
         // col 5: enrollment_day (DATE, 4 bytes — i32 days since 1970-01-01)
         let off = i * 4;
-        chunk.data[5].raw_data_mut()[off..off + 4]
-            .copy_from_slice(&enrollment_day.to_le_bytes());
+        chunk.data[5].raw_data_mut()[off..off + 4].copy_from_slice(&enrollment_day.to_le_bytes());
     }
 
     chunk.set_cardinality(ROW_COUNT);
@@ -123,8 +122,7 @@ fn main() {
 /// 返回: (id, name, age, gpa, is_active, enrollment_day)
 fn generate_students(n: usize) -> Vec<(i32, &'static str, i32, f32, bool, i32)> {
     let names: [&'static str; 10] = [
-        "Alice", "Bob", "Charlie", "Diana", "Eve",
-        "Frank", "Grace", "Henry", "Iris", "Jack",
+        "Alice", "Bob", "Charlie", "Diana", "Eve", "Frank", "Grace", "Henry", "Iris", "Jack",
     ];
     let mut students = Vec::with_capacity(n);
     for i in 0..n {

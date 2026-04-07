@@ -37,10 +37,10 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::common::types::{DataChunk, LogicalType};
-use crate::db::conn::Connection;
 use super::InnerDatabase;
 use super::engine::{EngineError, SchemaInfo, SchemaTableInfo};
+use crate::common::types::{DataChunk, LogicalType};
+use crate::db::conn::Connection;
 
 // ─── DuckdbEngine ──────────────────────────────────────────────────────────────
 
@@ -71,10 +71,15 @@ impl DuckdbEngine {
     pub fn open(path: impl Into<String>) -> Result<Self, EngineError> {
         let path = path.into();
         let db_name = derive_db_name(&path);
-        let db = InnerDatabase::open(path.clone()).map_err(|e| format!("open db failed: {:?}", e))?;
+        let db =
+            InnerDatabase::open(path.clone()).map_err(|e| format!("open db failed: {:?}", e))?;
         let mut databases = HashMap::new();
         databases.insert(db_name.clone(), Arc::new(Mutex::new(db)));
-        Ok(Self { databases, default_db: db_name, default_path: path })
+        Ok(Self {
+            databases,
+            default_db: db_name,
+            default_path: path,
+        })
     }
 
     /// 获取默认数据库路径。
@@ -121,7 +126,8 @@ impl DuckdbEngine {
 
     pub fn attach(&mut self, name: &str, path: &str) -> Result<(), EngineError> {
         let db = InnerDatabase::open(path).map_err(|e| format!("open db failed: {:?}", e))?;
-        self.databases.insert(name.to_string(), Arc::new(Mutex::new(db)));
+        self.databases
+            .insert(name.to_string(), Arc::new(Mutex::new(db)));
         Ok(())
     }
 
@@ -177,11 +183,7 @@ impl DuckConnection {
     // ── CRUD ──────────────────────────────────────────────────────────────────
 
     /// 在事务内向表插入一批数据。
-    pub fn insert(
-        &self,
-        table_name: &str,
-        chunk: &mut DataChunk,
-    ) -> Result<(), EngineError> {
+    pub fn insert(&self, table_name: &str, chunk: &mut DataChunk) -> Result<(), EngineError> {
         self.conn.insert_chunk(table_name, chunk)
     }
 
@@ -193,15 +195,12 @@ impl DuckConnection {
         column_ids: &[u64],
         updates: &mut DataChunk,
     ) -> Result<(), EngineError> {
-        self.conn.update_chunk(table_name, row_ids, column_ids, updates)
+        self.conn
+            .update_chunk(table_name, row_ids, column_ids, updates)
     }
 
     /// 在事务内按 Row ID 删除行，返回实际删除行数。
-    pub fn delete(
-        &self,
-        table_name: &str,
-        row_ids: &[i64],
-    ) -> Result<usize, EngineError> {
+    pub fn delete(&self, table_name: &str, row_ids: &[i64]) -> Result<usize, EngineError> {
         self.conn.delete_chunk(table_name, row_ids)
     }
 
@@ -242,7 +241,10 @@ impl DuckConnection {
                     .collect(),
             })
             .collect();
-        Ok(SchemaInfo { name: schema_name.to_string(), tables: schema_tables })
+        Ok(SchemaInfo {
+            name: schema_name.to_string(),
+            tables: schema_tables,
+        })
     }
 
     /// 在指定 Schema 下创建表。

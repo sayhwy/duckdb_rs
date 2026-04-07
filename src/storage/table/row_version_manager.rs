@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use super::chunk_info::{ChunkConstantInfo, ChunkInfo, ChunkVectorInfo, SelectionVector};
 use super::types::{
-    Idx, MetaBlockPointer, RowId, TransactionData, TransactionId, TRANSACTION_ID_START,
+    Idx, MetaBlockPointer, RowId, TRANSACTION_ID_START, TransactionData, TransactionId,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -45,7 +45,8 @@ struct RvmInner {
 }
 
 static NEXT_VERSION_INFO_ID: AtomicU64 = AtomicU64::new(1);
-static VERSION_INFO_REGISTRY: OnceLock<Mutex<HashMap<u64, Weak<RowVersionManager>>>> = OnceLock::new();
+static VERSION_INFO_REGISTRY: OnceLock<Mutex<HashMap<u64, Weak<RowVersionManager>>>> =
+    OnceLock::new();
 
 fn version_info_registry() -> &'static Mutex<HashMap<u64, Weak<RowVersionManager>>> {
     VERSION_INFO_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
@@ -93,12 +94,18 @@ impl RowVersionManager {
             let max_count = (count - read_count).min(super::types::STANDARD_VECTOR_SIZE);
             let mut sel = SelectionVector::default();
             let visible = match info {
-                ChunkInfo::Constant(c) => {
-                    c.get_committed_sel_vector(TRANSACTION_ID_START, TRANSACTION_ID_START, &mut sel, max_count)
-                }
-                ChunkInfo::Vector(v) => {
-                    v.get_committed_sel_vector(TRANSACTION_ID_START, TRANSACTION_ID_START, &mut sel, max_count)
-                }
+                ChunkInfo::Constant(c) => c.get_committed_sel_vector(
+                    TRANSACTION_ID_START,
+                    TRANSACTION_ID_START,
+                    &mut sel,
+                    max_count,
+                ),
+                ChunkInfo::Vector(v) => v.get_committed_sel_vector(
+                    TRANSACTION_ID_START,
+                    TRANSACTION_ID_START,
+                    &mut sel,
+                    max_count,
+                ),
             };
             deleted += max_count - visible;
         }
@@ -117,7 +124,11 @@ impl RowVersionManager {
         let mut vector_idx = 0usize;
         while read_count < count {
             let max_count = (count - read_count).min(super::types::STANDARD_VECTOR_SIZE);
-            let checkpoint_count = match inner.vector_info.get(vector_idx).and_then(|entry| entry.as_ref()) {
+            let checkpoint_count = match inner
+                .vector_info
+                .get(vector_idx)
+                .and_then(|entry| entry.as_ref())
+            {
                 None => max_count,
                 Some(info) => {
                     let mut sel = SelectionVector::default();
@@ -209,7 +220,11 @@ impl RowVersionManager {
         let inner = self.inner.lock();
         let vector_idx = (row / super::types::STANDARD_VECTOR_SIZE) as usize;
         let row_in_vector = row % super::types::STANDARD_VECTOR_SIZE;
-        let Some(info) = inner.vector_info.get(vector_idx).and_then(|entry| entry.as_ref()) else {
+        let Some(info) = inner
+            .vector_info
+            .get(vector_idx)
+            .and_then(|entry| entry.as_ref())
+        else {
             return true;
         };
         let mut sel = SelectionVector::default();
@@ -288,7 +303,11 @@ impl RowVersionManager {
             } else {
                 super::types::STANDARD_VECTOR_SIZE
             };
-            if let Some(info) = inner.vector_info.get_mut(vector_idx).and_then(|entry| entry.as_mut()) {
+            if let Some(info) = inner
+                .vector_info
+                .get_mut(vector_idx)
+                .and_then(|entry| entry.as_mut())
+            {
                 info.commit_append(commit_id, vector_base + vstart, vector_base + vend);
             }
         }
@@ -316,7 +335,11 @@ impl RowVersionManager {
         let start_vector_idx = (row_group_start / super::types::STANDARD_VECTOR_SIZE) as usize;
         let end_vector_idx = ((row_group_end - 1) / super::types::STANDARD_VECTOR_SIZE) as usize;
         for vector_idx in start_vector_idx..=end_vector_idx {
-            let Some(info) = inner.vector_info.get(vector_idx).and_then(|entry| entry.as_ref()) else {
+            let Some(info) = inner
+                .vector_info
+                .get(vector_idx)
+                .and_then(|entry| entry.as_ref())
+            else {
                 continue;
             };
             if info.can_cleanup(lowest_active_transaction) {
@@ -362,7 +385,11 @@ impl RowVersionManager {
         self.update_delete_ids(info, super::types::NOT_DELETED_ID);
     }
 
-    pub fn commit_delete(&self, info: &crate::transaction::delete_info::DeleteInfo, commit_id: TransactionId) {
+    pub fn commit_delete(
+        &self,
+        info: &crate::transaction::delete_info::DeleteInfo,
+        commit_id: TransactionId,
+    ) {
         self.update_delete_ids(info, commit_id);
     }
 

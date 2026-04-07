@@ -1,8 +1,6 @@
-use crate::common::types::{LogicalType, LogicalTypeId, SelectionVector, Vector};
-use crate::common::serializer::{
-    BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID,
-};
 use crate::common::serializer::BinarySerializer;
+use crate::common::serializer::{BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID};
+use crate::common::types::{LogicalType, LogicalTypeId, SelectionVector, Vector};
 use std::fmt;
 use std::io;
 
@@ -339,8 +337,20 @@ impl BaseStatistics {
         serializer.begin_object(103);
         match &self.stats_data {
             StatsData::Numeric(data) => {
-                Self::serialize_numeric_value(serializer, 200, data.has_min, data.min, &self.logical_type);
-                Self::serialize_numeric_value(serializer, 201, data.has_max, data.max, &self.logical_type);
+                Self::serialize_numeric_value(
+                    serializer,
+                    200,
+                    data.has_min,
+                    data.min,
+                    &self.logical_type,
+                );
+                Self::serialize_numeric_value(
+                    serializer,
+                    201,
+                    data.has_max,
+                    data.max,
+                    &self.logical_type,
+                );
             }
             StatsData::String(data) => {
                 serializer.write_bytes(200, &data.min);
@@ -395,9 +405,15 @@ impl BaseStatistics {
                 _ => serializer.write_field_id(101),
             }
             match logical_type.id {
-                LogicalTypeId::Boolean => serializer.write_varint_raw(unsafe { value.boolean as u64 }),
-                LogicalTypeId::TinyInt => serializer.write_signed_varint_raw(unsafe { value.tinyint as i64 }),
-                LogicalTypeId::SmallInt => serializer.write_signed_varint_raw(unsafe { value.smallint as i64 }),
+                LogicalTypeId::Boolean => {
+                    serializer.write_varint_raw(unsafe { value.boolean as u64 })
+                }
+                LogicalTypeId::TinyInt => {
+                    serializer.write_signed_varint_raw(unsafe { value.tinyint as i64 })
+                }
+                LogicalTypeId::SmallInt => {
+                    serializer.write_signed_varint_raw(unsafe { value.smallint as i64 })
+                }
                 LogicalTypeId::Integer | LogicalTypeId::Date => {
                     serializer.write_signed_varint_raw(unsafe { value.integer as i64 })
                 }
@@ -536,7 +552,9 @@ impl BaseStatistics {
                                     super::NumericStats::set_max(data, value, logical_type);
                                 }
                             }
-                            LogicalTypeId::BigInt | LogicalTypeId::Time | LogicalTypeId::Timestamp => {
+                            LogicalTypeId::BigInt
+                            | LogicalTypeId::Time
+                            | LogicalTypeId::Timestamp => {
                                 let value = de.read_i64_varint()?;
                                 if is_min {
                                     super::NumericStats::set_min(data, value, logical_type);

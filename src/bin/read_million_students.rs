@@ -88,8 +88,14 @@ fn main() {
         all_ages.iter().min().unwrap_or(&0),
         all_ages.iter().max().unwrap_or(&0)
     );
-    assert!(*all_ages.iter().min().unwrap() >= 18, "age 最小值应该 >= 18");
-    assert!(*all_ages.iter().max().unwrap() <= 27, "age 最大值应该 <= 27");
+    assert!(
+        *all_ages.iter().min().unwrap() >= 18,
+        "age 最小值应该 >= 18"
+    );
+    assert!(
+        *all_ages.iter().max().unwrap() <= 27,
+        "age 最大值应该 <= 27"
+    );
     println!("  ✓ age 列验证通过");
 
     let mut all_scores: Vec<i32> = Vec::new();
@@ -115,9 +121,7 @@ fn main() {
     // ─── 步骤 5：只读取指定列 ─────────────────────────────────────────────────
     println!("步骤 5：只读取 id 和 score 列");
     conn.begin_transaction().expect("begin_transaction 失败");
-    let chunks_partial = conn
-        .scan("students", Some(vec![0, 2]))
-        .expect("scan 失败");
+    let chunks_partial = conn.scan("students", Some(vec![0, 2])).expect("scan 失败");
     conn.commit().expect("commit 失败");
 
     let partial_rows: usize = chunks_partial.iter().map(|c| c.size()).sum();
@@ -129,7 +133,11 @@ fn main() {
         partial_ids.extend(read_i32_column(chunk, 0));
         partial_scores.extend(read_i32_column(chunk, 1));
     }
-    assert_eq!(partial_ids.len(), total_rows, "部分列读取行数应与总行数一致");
+    assert_eq!(
+        partial_ids.len(),
+        total_rows,
+        "部分列读取行数应与总行数一致"
+    );
     assert_eq!(partial_scores.len(), total_rows, "score 列数量应该匹配");
     println!("  ✓ 部分列读取验证通过");
     println!();

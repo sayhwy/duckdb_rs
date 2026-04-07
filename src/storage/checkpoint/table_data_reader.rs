@@ -1,7 +1,5 @@
 use crate::catalog::{CreateTableInfo, LogicalType as CatalogLogicalType, LogicalTypeId};
-use crate::common::serializer::{
-    BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID,
-};
+use crate::common::serializer::{BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID};
 use crate::storage::metadata::{BlockReaderType, MetaBlockPointer, MetadataReader, ReadStream};
 use crate::storage::table::persistent_table_data::{PersistentStorageRuntime, PersistentTableData};
 use crate::storage::table::row_group::RowGroupPointer;
@@ -50,12 +48,12 @@ impl<'a, 'mgr> TableDataReader<'a, 'mgr> {
             .data
             .as_ref()
             .and_then(|persistent| persistent.runtime.as_ref().cloned());
-        let data = self
-            .info
-            .data
-            .as_mut()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData,
-                "TableDataReader::new must initialize PersistentTableData"))?;
+        let data = self.info.data.as_mut().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "TableDataReader::new must initialize PersistentTableData",
+            )
+        })?;
 
         // Read TableStatistics
         {
@@ -73,9 +71,7 @@ impl<'a, 'mgr> TableDataReader<'a, 'mgr> {
                     .unwrap_or_else(|e| {
                         panic!(
                             "failed to deserialize table statistics for table {}.{}: {}",
-                            self.info.base.base.schema,
-                            self.info.base.table,
-                            e
+                            self.info.base.base.schema, self.info.base.table, e
                         )
                     });
         }
@@ -335,18 +331,16 @@ fn skip_hyperloglog(de: &mut BinaryMetadataDeserializer<'_>) -> std::io::Result<
             100 => {
                 storage_type = de.read_varint()?;
             }
-            101 => {
-                match storage_type {
-                    2 => de.skip_sized_bytes(64)?,
-                    1 => de.skip_sized_bytes(HLL_V1_DENSE_SIZE)?,
-                    other => {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("unknown HyperLogLog storage type {other}"),
-                        ));
-                    }
+            101 => match storage_type {
+                2 => de.skip_sized_bytes(64)?,
+                1 => de.skip_sized_bytes(HLL_V1_DENSE_SIZE)?,
+                other => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("unknown HyperLogLog storage type {other}"),
+                    ));
                 }
-            }
+            },
             MESSAGE_TERMINATOR_FIELD_ID => return Ok(()),
             other => {
                 return Err(std::io::Error::new(

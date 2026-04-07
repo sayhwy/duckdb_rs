@@ -6,10 +6,10 @@ use parking_lot::{Mutex, MutexGuard};
 use std::sync::Arc;
 
 use super::types::LogicalType;
-use crate::common::serializer::{
-    skip_optional_blocking_sample, BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID,
-};
 use crate::common::serializer::BinarySerializer;
+use crate::common::serializer::{
+    BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID, skip_optional_blocking_sample,
+};
 use std::io;
 
 // 使用统一的统计信息模块
@@ -204,22 +204,18 @@ impl TableStatistics {
                     let count = de.read_list_len()?;
                     inner.column_stats.clear();
                     for idx in 0..count {
-                        let logical_type = types
-                            .get(idx)
-                            .cloned()
-                            .unwrap_or_else(LogicalType::integer);
-                        let stats = ColumnStatistics::deserialize_checkpoint(de, logical_type.clone())
-                            .map_err(|e| {
-                                io::Error::new(
-                                    e.kind(),
-                                    format!(
-                                        "column_stats[{idx}] ({:?}): {e}",
-                                        logical_type.id
-                                    ),
-                                )
-                            })?
-                            .map(Arc::new)
-                            .unwrap_or_else(|| ColumnStatistics::create_empty(logical_type));
+                        let logical_type =
+                            types.get(idx).cloned().unwrap_or_else(LogicalType::integer);
+                        let stats =
+                            ColumnStatistics::deserialize_checkpoint(de, logical_type.clone())
+                                .map_err(|e| {
+                                    io::Error::new(
+                                        e.kind(),
+                                        format!("column_stats[{idx}] ({:?}): {e}", logical_type.id),
+                                    )
+                                })?
+                                .map(Arc::new)
+                                .unwrap_or_else(|| ColumnStatistics::create_empty(logical_type));
                         inner.column_stats.push(stats);
                     }
                 }
@@ -272,8 +268,8 @@ impl Clone for TableStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::LogicalType;
     use crate::common::serializer::{BinaryMetadataDeserializer, BinarySerializer};
+    use crate::common::types::LogicalType;
     use crate::storage::metadata::{ReadStream, WriteStream};
     use crate::storage::statistics::{NumericStats, StatsData, StringStats};
 
@@ -346,7 +342,10 @@ mod tests {
             let terminator = deserializer
                 .next_field()
                 .expect("terminator should be readable");
-            assert_eq!(terminator, crate::common::serializer::MESSAGE_TERMINATOR_FIELD_ID);
+            assert_eq!(
+                terminator,
+                crate::common::serializer::MESSAGE_TERMINATOR_FIELD_ID
+            );
             decoded
         };
 

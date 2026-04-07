@@ -673,38 +673,21 @@ impl DataTable {
         }
         let end = row_start + count;
 
-        // Build full-column scan.
         let col_count = self.column_definitions.len();
         let column_ids: Vec<u64> = (0..col_count as u64).collect();
         let types = self.get_types();
 
         let mut state = TableScanState::new();
-        self.initialize_scan_with_offset(&mut state, column_ids, row_start, end);
-
-        // Compute row_start_aligned from the first scanned position.
-        // After initialize_scan_with_offset the scan starts at the vector boundary
-        // that contains row_start.
-        use crate::storage::table::types::STANDARD_VECTOR_SIZE;
-        let row_start_aligned = if let Some(rg_idx) = state.table_state.row_group_index {
-            let tree = self.row_groups.get_row_groups();
-            let lock = tree.lock();
-            if let Some(node) = tree.get_segment_by_index(&lock, rg_idx as i64) {
-                node.row_start() + state.table_state.vector_index * STANDARD_VECTOR_SIZE
-            } else {
-                row_start
-            }
-        } else {
-            return; // nothing to scan
-        };
+        self.initialize_scan(&mut state, column_ids, None);
 
         let mut chunk = DataChunk::new();
-        chunk.initialize(&types, STANDARD_VECTOR_SIZE as usize);
+        chunk.initialize(&types, crate::common::types::STANDARD_VECTOR_SIZE);
 
         let tx_data = TransactionData {
             start_time: u64::MAX,
             transaction_id: 0,
         };
-        let mut current_row = row_start_aligned;
+        let mut current_row = 0;
         while current_row < end {
             chunk.reset();
             if !self
@@ -716,21 +699,24 @@ impl DataTable {
             if chunk.size() == 0 {
                 break;
             }
-            let end_row = current_row + chunk.size() as Idx;
-            let chunk_start = current_row.max(row_start);
-            let chunk_end = end_row.min(end);
-            let chunk_count = (chunk_end - chunk_start) as usize;
-            debug_assert!(chunk_start < chunk_end);
-            if chunk_count != chunk.size() {
-                let start_in_chunk = if current_row >= row_start {
-                    0
-                } else {
-                    (row_start - current_row) as usize
-                };
-                chunk.slice_range(start_in_chunk, chunk_count);
+
+            let scan_end = current_row + chunk.size() as Idx;
+            if scan_end <= row_start {
+                current_row = scan_end;
+                continue;
+            }
+            if current_row >= end {
+                break;
+            }
+
+            let slice_start = row_start.saturating_sub(current_row) as usize;
+            let slice_end = (end.min(scan_end) - current_row) as usize;
+            debug_assert!(slice_start < slice_end);
+            if slice_start != 0 || slice_end != chunk.size() {
+                chunk.slice_range(slice_start, slice_end - slice_start);
             }
             f(&chunk);
-            current_row = end_row;
+            current_row = scan_end;
         }
     }
 
@@ -1099,15 +1085,14 @@ impl DataTable {
 
             let row_ids_slice = slice_row_ids(&flat_row_ids, &global_sel);
             let updates_slice = slice_updates(updates, &global_sel.indices)?;
-            self.row_groups
-                .update(
-                    context.transaction.as_ref(),
-                    context.transaction_data,
-                    Some(self),
-                    &row_ids_slice,
-                    column_ids,
-                    &updates_slice,
-                )?;
+            self.row_groups.update(
+                context.transaction.as_ref(),
+                context.transaction_data,
+                Some(self),
+                &row_ids_slice,
+                column_ids,
+                &updates_slice,
+            )?;
         }
         Ok(())
     }
@@ -1472,7 +1457,7 @@ impl DataTable {
     }
 }
 
-fn serialize_insert_chunk_payload(chunk: &DataChunk) -> Vec<u8> {
+pub(crate) fn serialize_insert_chunk_payload(chunk: &DataChunk) -> Vec<u8> {
     let mut out = Vec::new();
     let row_count = chunk.size() as u32;
     let column_count = chunk.column_count() as u32;
@@ -1510,7 +1495,11 @@ fn extract_row_ids(row_ids: &Vector, count: usize) -> StorageResult<Vec<RowId>> 
 
 fn slice_updates(updates: &DataChunk, indices: &[u32]) -> StorageResult<DataChunk> {
     let mut out = DataChunk::new();
-    let types: Vec<LogicalType> = updates.data.iter().map(|v| v.logical_type.clone()).collect();
+    let types: Vec<LogicalType> = updates
+        .data
+        .iter()
+        .map(|v| v.logical_type.clone())
+        .collect();
     out.initialize(&types, indices.len());
     let sel = crate::common::types::SelectionVector {
         indices: indices.to_vec(),

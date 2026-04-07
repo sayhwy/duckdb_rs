@@ -43,6 +43,7 @@ use crate::storage::table::scan_state::{
 };
 use crate::storage::table::table_index_list::TableIndexList;
 use crate::storage::table::types::{Idx, LogicalType, RowId, TransactionData};
+use crate::storage::write_ahead_log::WriteAheadLog;
 
 // ─── MAX_ROW_ID ───────────────────────────────────────────────────────────────
 
@@ -106,6 +107,9 @@ pub struct LocalTableStorage {
 
     /// 本地已删除行数（C++: `idx_t deleted_rows`）。
     pub deleted_rows: Idx,
+
+    /// 按 append 顺序缓存的 WAL INSERT payload。
+    wal_chunks: Vec<Vec<u8>>,
 
     // ── 乐观写入 ──────────────────────────────────────────────────────────────
     /// 乐观写入集合列表（C++: `vector<unique_ptr<OptimisticWriteCollection>>`）。
@@ -199,6 +203,7 @@ impl LocalTableStorage {
             delete_indexes,
             index_append_mode: IndexAppendMode::Default,
             deleted_rows: 0,
+            wal_chunks: Vec::new(),
             optimistic_collections: Vec::new(),
             optimistic_writer,
             merged_storage: false,
@@ -280,6 +285,7 @@ impl LocalTableStorage {
             delete_indexes: TableIndexList::new(),
             index_append_mode: parent.index_append_mode,
             deleted_rows: parent.deleted_rows,
+            wal_chunks: std::mem::take(&mut parent.wal_chunks),
             optimistic_collections,
             optimistic_writer,
             merged_storage: parent.merged_storage,
@@ -345,6 +351,7 @@ impl LocalTableStorage {
             delete_indexes: TableIndexList::new(),
             index_append_mode: parent.index_append_mode,
             deleted_rows: parent.deleted_rows,
+            wal_chunks: std::mem::take(&mut parent.wal_chunks),
             optimistic_collections,
             optimistic_writer,
             merged_storage: parent.merged_storage,
@@ -406,6 +413,7 @@ impl LocalTableStorage {
             delete_indexes: TableIndexList::new(),
             index_append_mode: parent.index_append_mode,
             deleted_rows: parent.deleted_rows,
+            wal_chunks: std::mem::take(&mut parent.wal_chunks),
             optimistic_collections,
             optimistic_writer,
             merged_storage: parent.merged_storage,
@@ -993,6 +1001,16 @@ impl LocalStorage {
         let mut storage = storage_arc.lock();
         let collection = Arc::clone(&storage.row_groups.collection);
 
+        let mut wal_chunk = DataChunk::new();
+        wal_chunk.initialize(&storage.types, table_chunk.size().max(1));
+        table_chunk.copy_to(&mut wal_chunk, 0);
+        wal_chunk.flatten();
+        storage
+            .wal_chunks
+            .push(crate::storage::data_table::serialize_insert_chunk_payload(
+                &wal_chunk,
+            ));
+
         let offset = MAX_ROW_ID as Idx + collection.total_rows();
         let base_id = offset + state.append_state.total_append_count;
 
@@ -1178,6 +1196,42 @@ impl LocalStorage {
             }
         }
         Ok(append_entries)
+    }
+
+    /// 将当前事务的本地 append 直接序列化到 WAL。
+    pub fn write_to_wal(
+        &self,
+        log: &WriteAheadLog,
+        tables: &HashMap<u64, Arc<DataTable>>,
+    ) -> StorageResult<()> {
+        let table_storage: Vec<(u64, Arc<Mutex<LocalTableStorage>>)> = self
+            .table_manager
+            .table_storage
+            .lock()
+            .iter()
+            .map(|(table_id, storage)| (*table_id, Arc::clone(storage)))
+            .collect();
+
+        for (table_id, storage_arc) in table_storage {
+            let table = match tables.get(&table_id) {
+                Some(table) => table,
+                None => continue,
+            };
+            let storage = storage_arc.lock();
+            let collection = storage.get_collection();
+            if storage.is_dropped || collection.total_rows() <= storage.deleted_rows {
+                continue;
+            }
+
+            log.write_set_table(&table.info.get_schema_name(), &table.info.get_table_name())
+                .map_err(StorageError::Io)?;
+
+            for payload in &storage.wal_chunks {
+                log.write_insert(payload).map_err(StorageError::Io)?;
+            }
+        }
+
+        Ok(())
     }
 
     /// 回滚所有本地存储（C++: `Rollback`）。

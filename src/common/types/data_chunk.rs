@@ -60,29 +60,70 @@ impl LogicalType {
 
     /// 通用构造（C++: `LogicalType(LogicalTypeId id)`）。
     pub fn new(id: LogicalTypeId) -> Self {
-        Self { id, child_type: None, array_size: 0, struct_fields: Vec::new() }
+        Self {
+            id,
+            child_type: None,
+            array_size: 0,
+            struct_fields: Vec::new(),
+        }
     }
 
     // ── 构造快捷方式 ──────────────────────────────────────────────────────────
 
-    pub fn boolean() -> Self { Self::new(LogicalTypeId::Boolean) }
-    pub fn tinyint() -> Self { Self::new(LogicalTypeId::TinyInt) }
-    pub fn smallint() -> Self { Self::new(LogicalTypeId::SmallInt) }
-    pub fn integer() -> Self { Self::new(LogicalTypeId::Integer) }
-    pub fn bigint() -> Self { Self::new(LogicalTypeId::BigInt) }
-    pub fn hugeint() -> Self { Self::new(LogicalTypeId::HugeInt) }
-    pub fn float() -> Self { Self::new(LogicalTypeId::Float) }
-    pub fn double() -> Self { Self::new(LogicalTypeId::Double) }
-    pub fn varchar() -> Self { Self::new(LogicalTypeId::Varchar) }
-    pub fn date() -> Self { Self::new(LogicalTypeId::Date) }
-    pub fn row_id() -> Self { Self::new(LogicalTypeId::BigInt) } // row_t = i64
-    pub fn validity() -> Self { Self::new(LogicalTypeId::Validity) }
-    pub fn new_invalid() -> Self { Self::new(LogicalTypeId::Invalid) }
-    pub fn uinteger() -> Self { Self::new(LogicalTypeId::UInteger) }
-    pub fn utinyint() -> Self { Self::new(LogicalTypeId::UTinyInt) }
-    pub fn usmallint() -> Self { Self::new(LogicalTypeId::USmallInt) }
-    pub fn ubigint() -> Self { Self::new(LogicalTypeId::UBigInt) }
-    pub fn blob() -> Self { Self::new(LogicalTypeId::Blob) }
+    pub fn boolean() -> Self {
+        Self::new(LogicalTypeId::Boolean)
+    }
+    pub fn tinyint() -> Self {
+        Self::new(LogicalTypeId::TinyInt)
+    }
+    pub fn smallint() -> Self {
+        Self::new(LogicalTypeId::SmallInt)
+    }
+    pub fn integer() -> Self {
+        Self::new(LogicalTypeId::Integer)
+    }
+    pub fn bigint() -> Self {
+        Self::new(LogicalTypeId::BigInt)
+    }
+    pub fn hugeint() -> Self {
+        Self::new(LogicalTypeId::HugeInt)
+    }
+    pub fn float() -> Self {
+        Self::new(LogicalTypeId::Float)
+    }
+    pub fn double() -> Self {
+        Self::new(LogicalTypeId::Double)
+    }
+    pub fn varchar() -> Self {
+        Self::new(LogicalTypeId::Varchar)
+    }
+    pub fn date() -> Self {
+        Self::new(LogicalTypeId::Date)
+    }
+    pub fn row_id() -> Self {
+        Self::new(LogicalTypeId::BigInt)
+    } // row_t = i64
+    pub fn validity() -> Self {
+        Self::new(LogicalTypeId::Validity)
+    }
+    pub fn new_invalid() -> Self {
+        Self::new(LogicalTypeId::Invalid)
+    }
+    pub fn uinteger() -> Self {
+        Self::new(LogicalTypeId::UInteger)
+    }
+    pub fn utinyint() -> Self {
+        Self::new(LogicalTypeId::UTinyInt)
+    }
+    pub fn usmallint() -> Self {
+        Self::new(LogicalTypeId::USmallInt)
+    }
+    pub fn ubigint() -> Self {
+        Self::new(LogicalTypeId::UBigInt)
+    }
+    pub fn blob() -> Self {
+        Self::new(LogicalTypeId::Blob)
+    }
 
     /// LIST(child) 类型（C++: `LogicalType::LIST(child_type)`）。
     pub fn list(child_type: LogicalType) -> Self {
@@ -117,15 +158,21 @@ impl LogicalType {
     /// VARIANT 类型（内部存储为带固定 schema 的 STRUCT，C++: `LogicalType::VARIANT()`）。
     pub fn variant() -> Self {
         let children = vec![
-            ("keys".to_string(),     Self::list(Self::varchar())),
-            ("children".to_string(), Self::list(Self::struct_type(vec![
-                ("keys_index".to_string(),   Self::uinteger()),
-                ("values_index".to_string(), Self::uinteger()),
-            ]))),
-            ("values".to_string(), Self::list(Self::struct_type(vec![
-                ("type_id".to_string(),    Self::utinyint()),
-                ("byte_offset".to_string(), Self::uinteger()),
-            ]))),
+            ("keys".to_string(), Self::list(Self::varchar())),
+            (
+                "children".to_string(),
+                Self::list(Self::struct_type(vec![
+                    ("keys_index".to_string(), Self::uinteger()),
+                    ("values_index".to_string(), Self::uinteger()),
+                ])),
+            ),
+            (
+                "values".to_string(),
+                Self::list(Self::struct_type(vec![
+                    ("type_id".to_string(), Self::utinyint()),
+                    ("byte_offset".to_string(), Self::uinteger()),
+                ])),
+            ),
             ("data".to_string(), Self::blob()),
         ];
         Self {
