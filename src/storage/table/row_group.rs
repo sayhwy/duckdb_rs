@@ -262,7 +262,7 @@ impl RowGroup {
                     byte_count as Idx,
                     super::types::CompressionType::Uncompressed,
                     super::column_segment::SegmentStatistics::default(),
-                    block_handle,
+                    block_handle.clone(),
                 );
                 let segment = Arc::new(segment);
                 column
@@ -970,6 +970,35 @@ impl RowGroup {
             allocation_size: AtomicU64::new(self.allocation_size()),
             has_changes: AtomicBool::new(self.has_changes()),
         })
+    }
+
+    /// Create a shallow copy of this row group with a rebased absolute row start.
+    pub fn shallow_copy_with_row_start(&self, row_start: Idx) -> Arc<RowGroup> {
+        let copied = self.make_shallow_copy();
+        if copied.row_start == row_start {
+            copied
+        } else {
+            let is_loaded: Vec<AtomicBool> = copied
+                .is_loaded
+                .iter()
+                .map(|b| AtomicBool::new(b.load(Ordering::Relaxed)))
+                .collect();
+            Arc::new(RowGroup {
+                count: AtomicU64::new(copied.count()),
+                collection: copied.collection.clone(),
+                version_info: Mutex::new(copied.get_version_info()),
+                columns: Mutex::new(copied.columns.lock().clone()),
+                is_loaded,
+                column_pointers: copied.column_pointers.clone(),
+                deletes_pointers: copied.deletes_pointers.clone(),
+                deletes_is_loaded: AtomicBool::new(
+                    copied.deletes_is_loaded.load(Ordering::Relaxed),
+                ),
+                row_start,
+                allocation_size: AtomicU64::new(copied.allocation_size()),
+                has_changes: AtomicBool::new(copied.has_changes()),
+            })
+        }
     }
 }
 

@@ -129,9 +129,11 @@ pub fn write_data_pointer_varchar(
 }
 
 pub fn write_meta_block_pointer(serializer: &mut BinarySerializer<'_>, ptr: &MetaBlockPointer) {
-    if ptr.block_pointer != 0 {
-        serializer.write_varint(100, ptr.block_pointer);
-    }
+    // `MetaBlockPointer { block_pointer: 0, offset: 0 }` is a valid pointer:
+    // block_id=0, block_index=0. DuckDB serializes it explicitly. Omitting
+    // field 100 turns a valid pointer into the default "invalid" value during
+    // deserialization.
+    serializer.write_varint(100, ptr.block_pointer);
     if ptr.offset != 0 {
         serializer.write_varint(101, ptr.offset as u64);
     }
@@ -150,5 +152,51 @@ fn compression_tag(compression: CompressionType) -> u8 {
         CompressionType::Alprd => 9,
         CompressionType::ZStd => 10,
         CompressionType::Auto => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::serializer::BinaryMetadataDeserializer;
+    use crate::storage::metadata::{MetaBlockPointer, ReadStream, WriteStream};
+
+    #[derive(Default)]
+    struct MemStream {
+        buf: Vec<u8>,
+        pos: usize,
+    }
+
+    impl WriteStream for MemStream {
+        fn write_data(&mut self, buf: &[u8]) {
+            self.buf.extend_from_slice(buf);
+        }
+    }
+
+    impl ReadStream for MemStream {
+        fn read_data(&mut self, buf: &mut [u8]) {
+            let end = self.pos + buf.len();
+            buf.copy_from_slice(&self.buf[self.pos..end]);
+            self.pos = end;
+        }
+    }
+
+    #[test]
+    fn meta_block_pointer_zero_roundtrip() {
+        let ptr = MetaBlockPointer {
+            block_pointer: 0,
+            offset: 0,
+        };
+        let mut stream = MemStream::default();
+        {
+            let mut serializer = BinarySerializer::new(&mut stream as &mut dyn WriteStream);
+            serializer.begin_root_object();
+            write_meta_block_pointer(&mut serializer, &ptr);
+            serializer.end_object();
+        }
+        let mut de = BinaryMetadataDeserializer::new(&mut stream);
+        let decoded = de.read_meta_block_pointer().expect("pointer should deserialize");
+        assert_eq!(decoded, ptr);
+        assert!(decoded.is_valid(), "pointer with block_pointer=0 must remain valid");
     }
 }

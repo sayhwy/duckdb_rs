@@ -147,6 +147,12 @@ impl CheckpointManager {
             serializer.end_object();
         }
 
+        // DuckDB forces subsequent appends to start a fresh row group after a
+        // checkpoint so new writes do not continue inside persisted row groups.
+        if table.info.indexes.is_empty() {
+            table.row_groups.set_append_requires_new_row_group();
+        }
+
         Some(table_pointer)
     }
 
@@ -619,5 +625,4 @@ fn write_table_storage_info(
     serializer.begin_list(104, 0);
     serializer.end_list();
 }
-
 

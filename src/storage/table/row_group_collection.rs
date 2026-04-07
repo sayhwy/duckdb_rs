@@ -143,6 +143,10 @@ impl RowGroupCollection {
         tree.append_segment(&mut seg_lock, rg, 0);
     }
 
+    pub fn set_append_requires_new_row_group(&self) {
+        *self.requires_new_row_group.lock() = true;
+    }
+
     // ── Row-group access ──────────────────────────────────────
 
     pub fn total_rows(&self) -> Idx {
@@ -341,20 +345,20 @@ impl RowGroupCollection {
 
         let (target, target_idx, row_group_start) = {
             let tree = self.get_row_groups();
-            let lock = tree.lock();
-            if let Some(last) = lock.0.last() {
-                (last.arc(), last.index(), last.row_start())
-            } else {
-                drop(lock);
-                self.initialize_empty();
-                let tree = self.get_row_groups();
-                let lock = tree.lock();
-                let last = lock
-                    .0
-                    .last()
-                    .expect("row group collection should have a root row group");
-                (last.arc(), last.index(), last.row_start())
+            let mut lock = tree.lock();
+            let need_new_row_group = lock.0.is_empty() || *self.requires_new_row_group.lock();
+            if need_new_row_group {
+                let start_row = self.total_rows();
+                let col_count = self.types.len();
+                let rg = RowGroup::new(Arc::downgrade(self), start_row, col_count);
+                tree.append_segment(&mut lock, rg, start_row);
+                *self.requires_new_row_group.lock() = false;
             }
+            let last = lock
+                .0
+                .last()
+                .expect("row group collection should have a root row group");
+            (last.arc(), last.index(), last.row_start())
         };
 
         state.row_group_append_state.row_group_index = Some(target_idx);
@@ -387,16 +391,6 @@ impl RowGroupCollection {
         let total_append_count = chunk.size() as Idx;
         let mut remaining = total_append_count;
         state.total_append_count += total_append_count;
-
-        // Debug: 每10万行打印一次
-        if state.total_append_count % 100000 < total_append_count {
-            println!(
-                "🔵 [APPEND] total={}, offset_in_rg={}, rg_size={}",
-                state.total_append_count,
-                state.row_group_append_state.offset_in_row_group,
-                row_group_size
-            );
-        }
 
         loop {
             // ── Retrieve the current target row group ─────────────────────────
@@ -444,13 +438,6 @@ impl RowGroupCollection {
 
             // ── Start a new row group ─────────────────────────────────────────
             new_row_group = true;
-            println!(
-                "🟢 [NEW ROW GROUP] Creating new row group! total_append={}, offset_in_rg={}, next_start={}",
-                state.total_append_count,
-                state.row_group_append_state.offset_in_row_group,
-                state.row_group_start + state.row_group_append_state.offset_in_row_group
-            );
-
             let next_start =
                 state.row_group_start + state.row_group_append_state.offset_in_row_group;
 
@@ -568,6 +555,7 @@ impl RowGroupCollection {
 
         for segment in source_segments {
             let count = segment.node().count();
+            let row_group = segment.node().shallow_copy_with_row_start(index);
 
             // Append to our segment tree
             {
@@ -575,7 +563,7 @@ impl RowGroupCollection {
                 let new_index = lock.0.len();
                 lock.0.push(super::segment_tree::SegmentNode::new(
                     index,
-                    segment.arc(),
+                    row_group,
                     new_index,
                 ));
             }

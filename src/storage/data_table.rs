@@ -240,6 +240,9 @@ impl DataTable {
             }
             if data.row_group_count > 0 {
                 table.row_groups.initialize_from_table_data(&data);
+                if table.info.indexes.is_empty() {
+                    table.row_groups.set_append_requires_new_row_group();
+                }
             } else {
                 table.row_groups.initialize_empty();
             }

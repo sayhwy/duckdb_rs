@@ -1768,6 +1768,42 @@ mod tests {
         cleanup_db(&db_path);
     }
 
+    #[test]
+    fn persistent_reopen_and_read_small_values() {
+        let db_path = temp_db_path("reopen_small_values");
+        cleanup_db(&db_path);
+
+        {
+            let mut db = DB::open(&db_path).expect("Failed to create database");
+            db.create_table(
+                "main",
+                "small_test",
+                vec![("id".to_string(), LogicalType::integer())],
+            );
+
+            let values: Vec<i32> = (1..=32).collect();
+            let mut chunk = build_integer_chunk(&values);
+            db.insert_chunk("small_test", &mut chunk)
+                .expect("Insert failed");
+            db.checkpoint().expect("Checkpoint failed");
+        }
+
+        {
+            let db = DB::open(&db_path).expect("Failed to reopen database");
+            let chunks = db
+                .scan_chunks_silent("small_test", None)
+                .expect("Scan failed after reopen");
+            let total_rows: usize = chunks.iter().map(|c| c.size()).sum();
+            assert_eq!(total_rows, 32, "Expected 32 rows after reopen");
+
+            let values: Vec<i32> = chunks.iter().flat_map(|c| read_i32_column(c, 0)).collect();
+            let expected: Vec<i32> = (1..=32).collect();
+            assert_eq!(values, expected, "Values should survive checkpoint + reopen");
+        }
+
+        cleanup_db(&db_path);
+    }
+
     /// Test: persistent database can recover committed rows from WAL without checkpoint.
     #[test]
     fn persistent_reopen_from_wal_replay() {
@@ -1809,6 +1845,186 @@ mod tests {
                 .expect("Scan after WAL replay failed");
             let total_rows: usize = chunks.iter().map(|c| c.size()).sum();
             assert_eq!(total_rows, 2048, "Expected 2048 rows after WAL replay");
+        }
+
+        cleanup_db(&db_path);
+    }
+
+    #[test]
+    fn persistent_checkpoint_after_multiple_bulk_commits_preserves_row_order() {
+        let db_path = temp_db_path("checkpoint_bulk_row_starts");
+        let row_group_size = crate::storage::table::types::ROW_GROUP_SIZE as usize;
+
+        cleanup_db(&db_path);
+
+        {
+            let mut db = DB::open(&db_path).expect("Failed to create database");
+            db.create_table(
+                "main",
+                "bulk_test",
+                vec![("id".to_string(), LogicalType::integer())],
+            );
+            db.checkpoint()
+                .expect("Checkpoint after CREATE TABLE failed");
+
+            let conn = db.connect();
+            let insert_range =
+                |conn: &crate::db::conn::Connection, start: usize, end: usize| {
+                    conn.begin_transaction()
+                        .expect("Failed to begin transaction");
+                    for chunk_start in (start..end).step_by(crate::common::types::STANDARD_VECTOR_SIZE)
+                    {
+                        let chunk_end =
+                            (chunk_start + crate::common::types::STANDARD_VECTOR_SIZE).min(end);
+                        let values: Vec<i32> = (chunk_start..chunk_end)
+                            .map(|value| value as i32)
+                            .collect();
+                        let mut chunk = build_integer_chunk(&values);
+                        conn.insert_chunk("bulk_test", &mut chunk)
+                            .expect("Insert through transaction failed");
+                    }
+                    conn.commit().expect("Commit failed");
+                };
+
+            insert_range(&conn, 0, row_group_size);
+            insert_range(&conn, row_group_size, row_group_size * 2);
+
+            db.checkpoint().expect("Checkpoint failed");
+        }
+
+        {
+            let db = DB::open(&db_path).expect("Failed to reopen database");
+            let chunks = db
+                .scan_chunks_silent("bulk_test", None)
+                .expect("Scan after reopen failed");
+            let values: Vec<i32> = chunks
+                .iter()
+                .flat_map(|chunk| read_i32_column(chunk, 0))
+                .collect();
+
+            assert_eq!(values.len(), row_group_size * 2);
+            for (idx, value) in values.iter().enumerate() {
+                assert_eq!(*value, idx as i32, "row {} should remain in order", idx);
+            }
+        }
+
+        cleanup_db(&db_path);
+    }
+
+    #[test]
+    fn persistent_checkpoint_after_many_small_commits_preserves_values() {
+        let db_path = temp_db_path("checkpoint_small_commits");
+        let batch_size = crate::common::types::STANDARD_VECTOR_SIZE;
+        let total_rows = batch_size * 80;
+
+        cleanup_db(&db_path);
+
+        {
+            let mut db = DB::open(&db_path).expect("Failed to create database");
+            db.create_table(
+                "main",
+                "small_commit_test",
+                vec![("id".to_string(), LogicalType::integer())],
+            );
+            db.checkpoint()
+                .expect("Checkpoint after CREATE TABLE failed");
+
+            let conn = db.connect();
+            for chunk_start in (0..total_rows).step_by(batch_size) {
+                conn.begin_transaction()
+                    .expect("Failed to begin transaction");
+                let values: Vec<i32> = (chunk_start..chunk_start + batch_size)
+                    .map(|value| value as i32)
+                    .collect();
+                let mut chunk = build_integer_chunk(&values);
+                conn.insert_chunk("small_commit_test", &mut chunk)
+                    .expect("Insert through transaction failed");
+                conn.commit().expect("Commit failed");
+            }
+
+            db.checkpoint().expect("Checkpoint failed");
+        }
+
+        {
+            let db = DB::open(&db_path).expect("Failed to reopen database");
+            let chunks = db
+                .scan_chunks_silent("small_commit_test", None)
+                .expect("Scan after reopen failed");
+            let values: Vec<i32> = chunks
+                .iter()
+                .flat_map(|chunk| read_i32_column(chunk, 0))
+                .collect();
+
+            assert_eq!(values.len(), total_rows);
+            for (idx, value) in values.iter().enumerate() {
+                assert_eq!(*value, idx as i32, "row {} should remain in order", idx);
+            }
+        }
+
+        cleanup_db(&db_path);
+    }
+
+    #[test]
+    fn persistent_reopen_from_checkpoint_plus_wal_after_small_commits() {
+        let db_path = temp_db_path("checkpoint_plus_wal_small_commits");
+        let batch_size = crate::common::types::STANDARD_VECTOR_SIZE;
+        let checkpoint_rows = batch_size * 80;
+        let wal_rows = batch_size * 12;
+
+        cleanup_db(&db_path);
+
+        {
+            let mut db = DB::open(&db_path).expect("Failed to create database");
+            db.create_table(
+                "main",
+                "mixed_small_commit_test",
+                vec![("id".to_string(), LogicalType::integer())],
+            );
+            db.checkpoint()
+                .expect("Checkpoint after CREATE TABLE failed");
+
+            let conn = db.connect();
+            for chunk_start in (0..checkpoint_rows).step_by(batch_size) {
+                conn.begin_transaction()
+                    .expect("Failed to begin transaction");
+                let values: Vec<i32> = (chunk_start..chunk_start + batch_size)
+                    .map(|value| value as i32)
+                    .collect();
+                let mut chunk = build_integer_chunk(&values);
+                conn.insert_chunk("mixed_small_commit_test", &mut chunk)
+                    .expect("Insert through checkpoint transaction failed");
+                conn.commit().expect("Commit failed");
+            }
+
+            db.checkpoint().expect("Checkpoint failed");
+
+            for chunk_start in (checkpoint_rows..checkpoint_rows + wal_rows).step_by(batch_size) {
+                conn.begin_transaction()
+                    .expect("Failed to begin transaction");
+                let values: Vec<i32> = (chunk_start..chunk_start + batch_size)
+                    .map(|value| value as i32)
+                    .collect();
+                let mut chunk = build_integer_chunk(&values);
+                conn.insert_chunk("mixed_small_commit_test", &mut chunk)
+                    .expect("Insert through WAL transaction failed");
+                conn.commit().expect("Commit failed");
+            }
+        }
+
+        {
+            let db = DB::open(&db_path).expect("Failed to reopen database");
+            let chunks = db
+                .scan_chunks_silent("mixed_small_commit_test", None)
+                .expect("Scan after reopen failed");
+            let values: Vec<i32> = chunks
+                .iter()
+                .flat_map(|chunk| read_i32_column(chunk, 0))
+                .collect();
+
+            assert_eq!(values.len(), checkpoint_rows + wal_rows);
+            for (idx, value) in values.iter().enumerate() {
+                assert_eq!(*value, idx as i32, "row {} should remain in order", idx);
+            }
         }
 
         cleanup_db(&db_path);
