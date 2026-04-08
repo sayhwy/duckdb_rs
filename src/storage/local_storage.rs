@@ -28,12 +28,13 @@ use std::sync::{Arc, atomic::AtomicU8};
 use parking_lot::Mutex;
 
 use crate::catalog::table_catalog_entry::PhysicalIndex;
+use crate::common::errors::StorageResult;
 use crate::common::types::DataChunk;
 use crate::storage::data_table::{ClientContext, ColumnDefinition, DataTable, StorageIndex};
 use crate::storage::optimistic_data_writer::{
     OptimisticDataWriter, OptimisticWriteCollection, OptimisticWritePartialManagers,
 };
-use crate::storage::storage_info::{StorageError, StorageResult};
+use crate::storage::storage_info::StorageError;
 use crate::storage::storage_manager::StorageCommitState;
 use crate::storage::table::append_state::{BoundConstraint, LocalAppendState, TableAppendState};
 use crate::storage::table::data_table_info::DataTableInfo;

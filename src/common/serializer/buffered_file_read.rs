@@ -1,9 +1,8 @@
 #![allow(non_snake_case)]
 
+use crate::common::errors::StorageResult;
 use crate::common::serializer::read_stream::{QueryContext, ReadStream};
-use crate::storage::storage_info::{
-    FileHandle, FileOpenFlags, FileSystem, StorageError, StorageResult,
-};
+use crate::storage::storage_info::{FileHandle, FileOpenFlags, FileSystem, StorageError};
 
 use super::buffered_file_write::FILE_BUFFER_SIZE;
 

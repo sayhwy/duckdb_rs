@@ -2,7 +2,7 @@
 
 use std::mem::size_of;
 
-use crate::storage::storage_info::StorageResult;
+use crate::common::errors::StorageResult;
 
 pub trait WriteStream {
     // Writes a set amount of data from the specified buffer into the stream and

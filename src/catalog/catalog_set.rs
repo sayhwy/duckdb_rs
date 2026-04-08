@@ -31,6 +31,7 @@ use super::dependency::LogicalDependencyList;
 use super::entry::{CatalogEntryBase, CatalogEntryKind, CatalogEntryNode};
 use super::entry_lookup::SimilarCatalogEntry;
 use super::error::CatalogError;
+use crate::common::errors::CatalogResult;
 use super::transaction::{CatalogTransaction, has_conflict, is_visible};
 use super::types::{AlterInfo, CatalogType, CreateInfo, DropInfo};
 use crate::transaction::types::{TRANSACTION_ID_START, TransactionId};
@@ -214,7 +215,7 @@ impl CatalogSet {
         name: &str,
         node: Box<CatalogEntryNode>,
         _dependencies: &LogicalDependencyList,
-    ) -> Result<bool, CatalogError> {
+    ) -> CatalogResult<bool> {
         let lower = name.to_lowercase();
         let mut map = self.map.write();
 
@@ -258,7 +259,7 @@ impl CatalogSet {
         name: &str,
         node: Box<CatalogEntryNode>,
         dependencies: &LogicalDependencyList,
-    ) -> Result<bool, CatalogError> {
+    ) -> CatalogResult<bool> {
         let lower = name.to_lowercase();
         let mut map = self.map.write();
 
@@ -286,7 +287,7 @@ impl CatalogSet {
         txn: &CatalogTransaction,
         name: &str,
         info: &AlterInfo,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         let lower = name.to_lowercase();
         let mut map = self.map.write();
 
@@ -321,7 +322,7 @@ impl CatalogSet {
         name: &str,
         cascade: bool,
         allow_drop_internal: bool,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         let lower = name.to_lowercase();
         let mut map = self.map.write();
 
@@ -598,7 +599,7 @@ impl CatalogSet {
     // ─── 验证 ──────────────────────────────────────────────────────────────────
 
     /// 验证集合的一致性（C++: `CatalogSet::Verify`）。
-    pub fn verify(&self) -> Result<(), CatalogError> {
+    pub fn verify(&self) -> CatalogResult<()> {
         let map = self.map.read();
         for (key, head) in map.entries.iter() {
             let expected_key = head.base.name.to_lowercase();
@@ -617,7 +618,7 @@ impl CatalogSet {
         &self,
         txn: &CatalogTransaction,
         dep_name: &str,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         let lower = dep_name.to_lowercase();
         let map = self.map.read();
         let (node, reason) = map.get_visible_detailed(txn, &lower);

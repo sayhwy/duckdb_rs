@@ -21,13 +21,14 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use crate::common::errors::StorageResult;
 use crate::storage::buffer::{
     BlockGuard, BlockHandle, BlockId, BlockManager, BlockState, BufferHandle, BufferManager,
     BufferPool, BufferPoolReservation, DestroyBufferUpon, FileBuffer, FileBufferType,
     MAXIMUM_BLOCK, MemoryTag, MemoryTracker,
 };
 
-use super::storage_info::{FileOpenFlags, FileSystem, StorageResult};
+use super::storage_info::{FileOpenFlags, FileSystem};
 
 // ─── 临时目录状态 ─────────────────────────────────────────────
 

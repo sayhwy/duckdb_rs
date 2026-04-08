@@ -923,7 +923,7 @@ impl DuckTransactionManager {
                             commit_state = Some(state);
                         }
                         Err(e) => {
-                            commit_error = Some(ErrorData::new(e));
+                            commit_error = Some(ErrorData::new(e.to_string()));
                         }
                     }
                 } else {
@@ -960,7 +960,7 @@ impl DuckTransactionManager {
                 .lock()
                 .commit(commit_info, commit_state.as_mut(), &tables)
             {
-                commit_error = Some(ErrorData::new(e));
+                commit_error = Some(ErrorData::new(e.to_string()));
             }
         }
 
@@ -1077,7 +1077,7 @@ impl DuckTransactionManager {
             .lock()
             .rollback()
             .err()
-            .map(|e| ErrorData::new(e));
+            .map(|e| ErrorData::new(e.to_string()));
 
         // C++: auto cleanup_info = RemoveTransaction(transaction);
         //      (store_transaction = transaction.ChangesMade())

@@ -14,6 +14,7 @@ use crate::catalog::{
     ColumnDefinition as CatalogColumnDefinition, ColumnList, CreateTableInfo,
     LogicalType as CatalogLogicalType, TableCatalogEntry,
 };
+use crate::common::errors::{StorageResult, WalResult};
 use crate::common::types::{DataChunk, LogicalType, STANDARD_VECTOR_SIZE};
 use crate::db::conn::{Connection, DatabaseInstance, TableHandle};
 use crate::storage::buffer::{BlockAllocator, BlockManager, BufferPool};
@@ -23,12 +24,12 @@ use crate::storage::metadata::{BlockReaderType, MetadataManager, MetadataReader}
 use crate::storage::standard_file_system::LocalFileSystem;
 use crate::storage::storage_info::{
     BLOCK_HEADER_SIZE, DatabaseHeader, FILE_HEADER_SIZE, FileOpenFlags, FileSystem, INVALID_BLOCK,
-    MainHeader, StorageError, StorageManagerOptions, StorageResult,
+    MainHeader, StorageError, StorageManagerOptions,
 };
 use crate::storage::storage_manager::{SingleFileStorageManager, StorageManager, StorageOptions};
 use crate::storage::table::persistent_table_data::{PersistentStorageRuntime, PersistentTableData};
 use crate::storage::wal_replay::{
-    CatalogOps, DB_IDENTIFIER_LEN, ReplayIndexInfo, WalError, WalReplayer, WalResult,
+    CatalogOps, DB_IDENTIFIER_LEN, ReplayIndexInfo, WalError, WalReplayer,
 };
 use crate::storage::write_ahead_log::WalInitState;
 use crate::storage::{SingleFileBlockManager, StandardBufferManager};
@@ -182,7 +183,7 @@ impl DatabaseInstance {
     ) -> StorageResult<()> {
         let conn = self.connect();
         conn.insert_chunk(table_name, chunk)
-            .map_err(|e| StorageError::Corrupt { msg: e })
+            .map_err(|e| StorageError::Corrupt { msg: e.to_string() })
     }
 
     /// 更新表中指定行（便捷方法，使用自动提交模式）。
@@ -195,7 +196,7 @@ impl DatabaseInstance {
     ) -> StorageResult<()> {
         let conn = self.connect();
         conn.update_chunk(table_name, row_ids, column_ids, updates)
-            .map_err(|e| StorageError::Corrupt { msg: e })
+            .map_err(|e| StorageError::Corrupt { msg: e.to_string() })
     }
 
     pub fn delete_chunk(
@@ -205,7 +206,7 @@ impl DatabaseInstance {
     ) -> StorageResult<usize> {
         let conn = self.connect();
         conn.delete_chunk(table_name, row_ids)
-            .map_err(|e| StorageError::Corrupt { msg: e })
+            .map_err(|e| StorageError::Corrupt { msg: e.to_string() })
     }
 
     /// 扫描表数据（便捷方法，打印输出）。
@@ -714,7 +715,7 @@ impl CatalogOps for RecoveryCatalog {
         let mut chunk = decode_insert_chunk_payload(chunk_payload, &handle.storage.get_types())?;
         self.conn
             .insert_chunk(table, &mut chunk)
-            .map_err(WalError::Corrupt)
+            .map_err(|e| WalError::Corrupt(e.to_string()))
     }
 
     fn merge_row_group_data(
@@ -734,7 +735,7 @@ impl CatalogOps for RecoveryCatalog {
         self.conn
             .delete_chunk(table, &row_ids)
             .map(|_| ())
-            .map_err(WalError::Corrupt)
+            .map_err(|e| WalError::Corrupt(e.to_string()))
     }
 
     fn update_rows(
@@ -749,7 +750,7 @@ impl CatalogOps for RecoveryCatalog {
             decode_update_payload(column_indexes_payload, chunk_payload, &handle)?;
         self.conn
             .update_chunk(table, &row_ids, &column_ids, &mut updates)
-            .map_err(WalError::Corrupt)
+            .map_err(|e| WalError::Corrupt(e.to_string()))
     }
 
     fn commit(&mut self) -> WalResult<()> {

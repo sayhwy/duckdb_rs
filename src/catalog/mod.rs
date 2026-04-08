@@ -47,6 +47,7 @@ pub use types::{
 };
 
 pub use error::CatalogError;
+pub use crate::common::errors::CatalogResult;
 
 pub use dependency::{
     CatalogEntryInfo, DependencyDependent, DependencyDependentFlags, DependencyInfo,

@@ -40,8 +40,9 @@ use super::storage_info::{
     BLOCK_HEADER_SIZE, DatabaseHeader, FileHandle, FileOpenFlags, FileSystem, MainHeader,
     StorageManagerOptions,
 };
-use super::storage_info::{StorageError, StorageResult};
+use super::storage_info::StorageError;
 use super::write_ahead_log::{WalInitState, WalWriter, WriteAheadLog};
+use crate::common::errors::StorageResult;
 use crate::db::conn::DatabaseInstance;
 use parking_lot::Mutex;
 use std::io;

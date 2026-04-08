@@ -45,7 +45,7 @@ use crate::common::types::LogicalType;
 // ─── Error Type ───────────────────────────────────────────────────────────────
 
 /// 引擎/连接操作的错误类型。
-pub type EngineError = String;
+pub type EngineError = crate::common::errors::Error;
 
 // ─── Schema Types ─────────────────────────────────────────────────────────────
 

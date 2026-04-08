@@ -3,7 +3,7 @@
 use std::mem::{MaybeUninit, size_of};
 
 pub use crate::storage::checkpoint::QueryContext;
-use crate::storage::storage_info::StorageResult;
+use crate::common::errors::StorageResult;
 
 pub trait ReadStream {
     // Reads a set amount of data from the stream into the specified buffer and

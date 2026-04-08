@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use duckdb_rs::common::errors::{Result, anyhow};
 use duckdb_rs::common::types::{DataChunk, LogicalType, STANDARD_VECTOR_SIZE};
 use duckdb_rs::db::DuckEngine;
 
@@ -64,7 +65,7 @@ fn run_scenario(
     db_path: &str,
     total_rows: usize,
     expectation: ScenarioExpectation,
-) -> Result<(), String> {
+) -> Result<()> {
     cleanup(db_path);
 
     let wal_path = format!("{}.wal", db_path);
@@ -76,24 +77,24 @@ fn run_scenario(
 
     let before_reopen = {
         let engine =
-            DuckEngine::open(db_path).map_err(|e| format!("{} 打开数据库失败: {}", name, e))?;
+            DuckEngine::open(db_path).map_err(|e| anyhow!("{name} 打开数据库失败: {e}"))?;
         let mut conn = engine.connect();
         create_students_table(&mut conn);
 
         // 先把表结构持久化，避免后续观测混入 CREATE TABLE 的 WAL。
         engine
             .checkpoint()
-            .map_err(|e| format!("{} 创建表后的 checkpoint 失败: {}", name, e))?;
+            .map_err(|e| anyhow!("{name} 创建表后的 checkpoint 失败: {e}"))?;
 
         conn.begin_transaction()
-            .map_err(|e| format!("{} begin_transaction 失败: {}", name, e))?;
+            .map_err(|e| anyhow!("{name} begin_transaction 失败: {e}"))?;
         insert_students(&conn, total_rows);
         conn.commit()
-            .map_err(|e| format!("{} commit 失败: {}", name, e))?;
+            .map_err(|e| anyhow!("{name} commit 失败: {e}"))?;
 
         let visible_rows = count_rows(&engine);
         if visible_rows != total_rows {
-            return Err(format!(
+            return Err(anyhow!(
                 "{} 关闭前可见行数不符合预期: expected {}, got {}",
                 name, total_rows, visible_rows
             ));
@@ -122,7 +123,7 @@ fn run_scenario(
 
     let after_reopen = {
         let engine =
-            DuckEngine::open(db_path).map_err(|e| format!("{} 重启数据库失败: {}", name, e))?;
+            DuckEngine::open(db_path).map_err(|e| anyhow!("{name} 重启数据库失败: {e}"))?;
         let visible_rows = count_rows(&engine);
 
         let db_state = file_state(db_path);
@@ -148,52 +149,52 @@ fn run_scenario(
     match expectation {
         ScenarioExpectation::RecoverWalOnRestart => {
             if after_reopen.rows != total_rows {
-                return Err(format!(
+                return Err(anyhow!(
                     "{} 重启后行数异常: expected {}, got {}",
                     name, total_rows, after_reopen.rows
                 ));
             }
             if !(before_reopen.wal.exists && before_reopen.wal.len > 0) {
-                return Err(format!("{} 关闭前应该存在非空 WAL", name));
+                return Err(anyhow!("{} 关闭前应该存在非空 WAL", name));
             }
             if !(after_reopen.db.exists && after_reopen.db.len >= before_reopen.db.len) {
-                return Err(format!("{} 重启后 db 文件应包含 WAL 回放后的数据", name));
+                return Err(anyhow!("{} 重启后 db 文件应包含 WAL 回放后的数据", name));
             }
             if after_reopen.wal.exists {
-                return Err(format!("{} 重启后 WAL 应已被 checkpoint 并清理", name));
+                return Err(anyhow!("{} 重启后 WAL 应已被 checkpoint 并清理", name));
             }
             if after_reopen.checkpoint_wal.exists {
-                return Err(format!("{} 重启后不应遗留 checkpoint WAL", name));
+                return Err(anyhow!("{} 重启后不应遗留 checkpoint WAL", name));
             }
             println!("结论: 场景1重启时会从 WAL 完整恢复数据，并将 WAL checkpoint 回 db 后清理。");
         }
         ScenarioExpectation::CheckpointBeforeClose => {
             if after_reopen.rows != total_rows {
-                return Err(format!(
+                return Err(anyhow!(
                     "{} 重启后行数异常: expected {}, got {}",
                     name, total_rows, after_reopen.rows
                 ));
             }
             if !(before_reopen.db.exists && before_reopen.db.len > 0) {
-                return Err(format!("{} 关闭前 db 文件应已有持久化数据", name));
+                return Err(anyhow!("{} 关闭前 db 文件应已有持久化数据", name));
             }
             if before_reopen.checkpoint_wal.exists {
-                return Err(format!("{} 关闭前不应遗留 checkpoint WAL", name));
+                return Err(anyhow!("{} 关闭前不应遗留 checkpoint WAL", name));
             }
             if before_reopen.wal.exists && before_reopen.wal.len >= 16 * 1024 * 1024 {
-                return Err(format!(
+                return Err(anyhow!(
                     "{} 自动 checkpoint 后 WAL 仍然大于等于 16 MiB",
                     name
                 ));
             }
             if !(after_reopen.db.exists && after_reopen.db.len >= before_reopen.db.len) {
-                return Err(format!("{} 重启后 db 文件不应回退", name));
+                return Err(anyhow!("{} 重启后 db 文件不应回退", name));
             }
             if after_reopen.checkpoint_wal.exists {
-                return Err(format!("{} 重启后不应遗留 checkpoint WAL", name));
+                return Err(anyhow!("{} 重启后不应遗留 checkpoint WAL", name));
             }
             if after_reopen.wal.exists {
-                return Err(format!("{} 重启后不应遗留 WAL", name));
+                return Err(anyhow!("{} 重启后不应遗留 WAL", name));
             }
             println!("结论: 场景2在关闭前已经触发自动 checkpoint，重启后可直接读到全部数据。");
         }

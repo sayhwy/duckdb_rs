@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use crate::catalog::{ColumnDefinition, LogicalType, TableCatalogEntry};
+use crate::common::errors::StorageResult;
 use crate::common::serializer::BinarySerializer;
 use crate::common::types::LogicalTypeId;
 use crate::storage::buffer::BlockManager;
@@ -20,7 +21,7 @@ use crate::storage::data_table::DataTable;
 use crate::storage::metadata::WriteStream;
 use crate::storage::metadata::{MetaBlockPointer, MetadataManager, MetadataWriter};
 use crate::storage::serialization as storage_serialization;
-use crate::storage::storage_info::{DatabaseHeader, INVALID_BLOCK, StorageResult};
+use crate::storage::storage_info::{DatabaseHeader, INVALID_BLOCK};
 use crate::storage::table::column_data::ColumnData;
 use crate::storage::table::column_segment::ColumnSegmentType;
 use crate::storage::table::row_group::RowGroupPointer;

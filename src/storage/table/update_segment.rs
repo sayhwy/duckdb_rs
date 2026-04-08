@@ -6,8 +6,9 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use parking_lot::{Mutex, RwLock};
 
+use crate::common::errors::StorageResult;
 use crate::common::types::Vector;
-use crate::storage::storage_info::{StorageError, StorageResult};
+use crate::storage::storage_info::StorageError;
 use crate::transaction::update_info::UpdateInfo as TxnUpdateInfo;
 
 use super::types::{Idx, RowId, STANDARD_VECTOR_SIZE, TransactionData, TransactionId};

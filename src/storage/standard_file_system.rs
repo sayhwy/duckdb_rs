@@ -7,7 +7,9 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use super::storage_info::{FileHandle, FileOpenFlags, FileSystem, StorageError, StorageResult};
+use crate::common::errors::StorageResult;
+
+use super::storage_info::{FileHandle, FileOpenFlags, FileSystem, StorageError};
 
 // ── LocalFileHandle ───────────────────────────────────────────
 

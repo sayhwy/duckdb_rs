@@ -11,6 +11,8 @@
 //! - **Commit**：正向遍历，设置版本号 / 写入 WAL。
 //! - **Cleanup**：正向遍历，回收 MVCC 旧版本（在无活跃事务可见它时）。
 
+use crate::common::errors::{Result, anyhow};
+
 use super::cleanup_state::CleanupState;
 use super::commit_state::CommitState;
 use super::rollback_state::RollbackState;
@@ -193,10 +195,10 @@ impl UndoBuffer {
             std::sync::Arc<crate::storage::data_table::DataTable>,
         >,
         include_appends: bool,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let wal = commit_state
             .wal()
-            .ok_or_else(|| "StorageCommitState does not expose WAL".to_string())?;
+            .ok_or_else(|| anyhow!("StorageCommitState does not expose WAL"))?;
 
         let table_names = tables
             .iter()

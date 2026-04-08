@@ -19,6 +19,7 @@
 //! | `MangledEntryName` / `MangledDependencyName` | 同名结构体 |
 
 use super::error::CatalogError;
+use crate::common::errors::CatalogResult;
 use super::types::CatalogType;
 use std::collections::HashSet;
 
@@ -315,7 +316,7 @@ impl LogicalDependencyList {
         &self,
         catalog_name: &str,
         entry_name: &str,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         // 在 Rust 中无法在此直接访问 Catalog，调用方需要在更高层验证。
         // 此处仅做基本检查（空名称等）。
         for dep in &self.set {

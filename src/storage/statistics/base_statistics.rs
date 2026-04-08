@@ -1,5 +1,6 @@
 use crate::common::serializer::BinarySerializer;
 use crate::common::serializer::{BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID};
+use crate::common::errors::Result;
 use crate::common::types::{LogicalType, LogicalTypeId, SelectionVector, Vector};
 use std::fmt;
 use std::io;
@@ -325,7 +326,7 @@ impl BaseStatistics {
         _vector: &Vector,
         _sel: &SelectionVector,
         _count: usize,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         // TODO: Implement verification logic
         Ok(())
     }

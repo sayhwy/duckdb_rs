@@ -29,6 +29,7 @@ use super::types::{
     CreateIndexInfo, CreatePragmaFunctionInfo, CreateSequenceInfo, CreateTableInfo, CreateTypeInfo,
     CreateViewInfo, DropInfo, OnCreateConflict, OnEntryNotFound,
 };
+use crate::common::errors::CatalogResult;
 
 // ─── SchemaCatalogEntry trait ─────────────────────────────────────────────────
 
@@ -45,52 +46,52 @@ pub trait SchemaCatalogEntry: Send + Sync {
         &self,
         txn: &CatalogTransaction,
         info: &CreateTableInfo,
-    ) -> Result<CatalogEntryNode, CatalogError>;
+    ) -> CatalogResult<CatalogEntryNode>;
     fn create_view(
         &self,
         txn: &CatalogTransaction,
         info: &CreateViewInfo,
-    ) -> Result<CatalogEntryNode, CatalogError>;
+    ) -> CatalogResult<CatalogEntryNode>;
     fn create_sequence(
         &self,
         txn: &CatalogTransaction,
         info: &CreateSequenceInfo,
-    ) -> Result<CatalogEntryNode, CatalogError>;
+    ) -> CatalogResult<CatalogEntryNode>;
     fn create_type(
         &self,
         txn: &CatalogTransaction,
         info: &CreateTypeInfo,
-    ) -> Result<CatalogEntryNode, CatalogError>;
+    ) -> CatalogResult<CatalogEntryNode>;
     fn create_index(
         &self,
         txn: &CatalogTransaction,
         info: &CreateIndexInfo,
-    ) -> Result<CatalogEntryNode, CatalogError>;
+    ) -> CatalogResult<CatalogEntryNode>;
     fn create_function(
         &self,
         txn: &CatalogTransaction,
         info: &CreateFunctionInfo,
-    ) -> Result<CatalogEntryNode, CatalogError>;
+    ) -> CatalogResult<CatalogEntryNode>;
     fn create_table_function(
         &self,
         txn: &CatalogTransaction,
         info: &CreateFunctionInfo,
-    ) -> Result<CatalogEntryNode, CatalogError>;
+    ) -> CatalogResult<CatalogEntryNode>;
     fn create_copy_function(
         &self,
         txn: &CatalogTransaction,
         info: &CreateCopyFunctionInfo,
-    ) -> Result<CatalogEntryNode, CatalogError>;
+    ) -> CatalogResult<CatalogEntryNode>;
     fn create_pragma_function(
         &self,
         txn: &CatalogTransaction,
         info: &CreatePragmaFunctionInfo,
-    ) -> Result<CatalogEntryNode, CatalogError>;
+    ) -> CatalogResult<CatalogEntryNode>;
     fn create_collation(
         &self,
         txn: &CatalogTransaction,
         info: &CreateCollationInfo,
-    ) -> Result<CatalogEntryNode, CatalogError>;
+    ) -> CatalogResult<CatalogEntryNode>;
 
     // ── 查找操作 ──────────────────────────────────────────────────────────────
     fn lookup_entry(
@@ -105,8 +106,8 @@ pub trait SchemaCatalogEntry: Send + Sync {
     ) -> SimilarCatalogEntry;
 
     // ── 修改与删除 ────────────────────────────────────────────────────────────
-    fn alter(&self, txn: &CatalogTransaction, info: &AlterInfo) -> Result<(), CatalogError>;
-    fn drop_entry(&self, txn: &CatalogTransaction, info: &DropInfo) -> Result<(), CatalogError>;
+    fn alter(&self, txn: &CatalogTransaction, info: &AlterInfo) -> CatalogResult<()>;
+    fn drop_entry(&self, txn: &CatalogTransaction, info: &DropInfo) -> CatalogResult<()>;
 
     // ── 遍历 ──────────────────────────────────────────────────────────────────
     fn scan(
@@ -205,7 +206,7 @@ impl DuckSchemaEntry {
         node: Box<CatalogEntryNode>,
         on_conflict: OnCreateConflict,
         dependencies: &LogicalDependencyList,
-    ) -> Result<CatalogEntryNode, CatalogError> {
+    ) -> CatalogResult<CatalogEntryNode> {
         let name = node.base.name.clone();
         let entry_type = node.base.entry_type;
         let set = self.get_catalog_set(entry_type);
@@ -273,7 +274,7 @@ impl SchemaCatalogEntry for DuckSchemaEntry {
         &self,
         txn: &CatalogTransaction,
         info: &CreateTableInfo,
-    ) -> Result<CatalogEntryNode, CatalogError> {
+    ) -> CatalogResult<CatalogEntryNode> {
         let oid = Self::next_oid(&info.table, CatalogType::TableEntry);
         let mut base = CatalogEntryBase::new(
             oid,
@@ -302,7 +303,7 @@ impl SchemaCatalogEntry for DuckSchemaEntry {
         &self,
         txn: &CatalogTransaction,
         info: &CreateViewInfo,
-    ) -> Result<CatalogEntryNode, CatalogError> {
+    ) -> CatalogResult<CatalogEntryNode> {
         let oid = Self::next_oid(&info.view_name, CatalogType::ViewEntry);
         let mut base = CatalogEntryBase::new(
             oid,
@@ -333,7 +334,7 @@ impl SchemaCatalogEntry for DuckSchemaEntry {
         &self,
         txn: &CatalogTransaction,
         info: &CreateSequenceInfo,
-    ) -> Result<CatalogEntryNode, CatalogError> {
+    ) -> CatalogResult<CatalogEntryNode> {
         let oid = Self::next_oid(&info.name, CatalogType::SequenceEntry);
         let mut base = CatalogEntryBase::new(
             oid,
@@ -361,7 +362,7 @@ impl SchemaCatalogEntry for DuckSchemaEntry {
         &self,
         txn: &CatalogTransaction,
         info: &CreateTypeInfo,
-    ) -> Result<CatalogEntryNode, CatalogError> {
+    ) -> CatalogResult<CatalogEntryNode> {
         let oid = Self::next_oid(&info.name, CatalogType::TypeEntry);
         let mut base = CatalogEntryBase::new(
             oid,
@@ -387,7 +388,7 @@ impl SchemaCatalogEntry for DuckSchemaEntry {
         &self,
         txn: &CatalogTransaction,
         info: &CreateIndexInfo,
-    ) -> Result<CatalogEntryNode, CatalogError> {
+    ) -> CatalogResult<CatalogEntryNode> {
         let oid = Self::next_oid(&info.index_name, CatalogType::IndexEntry);
         let mut base = CatalogEntryBase::new(
             oid,
@@ -423,7 +424,7 @@ impl SchemaCatalogEntry for DuckSchemaEntry {
         &self,
         txn: &CatalogTransaction,
         info: &CreateFunctionInfo,
-    ) -> Result<CatalogEntryNode, CatalogError> {
+    ) -> CatalogResult<CatalogEntryNode> {
         let oid = Self::next_oid(&info.name, info.base.catalog_type);
         let mut base = CatalogEntryBase::new(
             oid,
@@ -451,7 +452,7 @@ impl SchemaCatalogEntry for DuckSchemaEntry {
         &self,
         txn: &CatalogTransaction,
         info: &CreateFunctionInfo,
-    ) -> Result<CatalogEntryNode, CatalogError> {
+    ) -> CatalogResult<CatalogEntryNode> {
         self.create_function(txn, info)
     }
 
@@ -459,7 +460,7 @@ impl SchemaCatalogEntry for DuckSchemaEntry {
         &self,
         txn: &CatalogTransaction,
         info: &CreateCopyFunctionInfo,
-    ) -> Result<CatalogEntryNode, CatalogError> {
+    ) -> CatalogResult<CatalogEntryNode> {
         self.create_function(txn, info)
     }
 
@@ -467,7 +468,7 @@ impl SchemaCatalogEntry for DuckSchemaEntry {
         &self,
         txn: &CatalogTransaction,
         info: &CreatePragmaFunctionInfo,
-    ) -> Result<CatalogEntryNode, CatalogError> {
+    ) -> CatalogResult<CatalogEntryNode> {
         self.create_function(txn, info)
     }
 
@@ -475,7 +476,7 @@ impl SchemaCatalogEntry for DuckSchemaEntry {
         &self,
         txn: &CatalogTransaction,
         info: &CreateCollationInfo,
-    ) -> Result<CatalogEntryNode, CatalogError> {
+    ) -> CatalogResult<CatalogEntryNode> {
         let oid = Self::next_oid(&info.name, CatalogType::CollateCatalogEntry);
         let mut base = CatalogEntryBase::new(
             oid,
@@ -519,12 +520,12 @@ impl SchemaCatalogEntry for DuckSchemaEntry {
 
     // ── 修改与删除 ────────────────────────────────────────────────────────────
 
-    fn alter(&self, txn: &CatalogTransaction, info: &AlterInfo) -> Result<(), CatalogError> {
+    fn alter(&self, txn: &CatalogTransaction, info: &AlterInfo) -> CatalogResult<()> {
         let set = self.get_catalog_set(info.catalog_type);
         set.alter_entry(txn, &info.name, info)
     }
 
-    fn drop_entry(&self, txn: &CatalogTransaction, info: &DropInfo) -> Result<(), CatalogError> {
+    fn drop_entry(&self, txn: &CatalogTransaction, info: &DropInfo) -> CatalogResult<()> {
         let set = self.get_catalog_set(info.catalog_type);
         match set.drop_entry(txn, &info.name, info.cascade, info.allow_drop_internal) {
             Ok(()) => Ok(()),

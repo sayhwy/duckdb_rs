@@ -39,6 +39,7 @@ use super::types::{
     AlterInfo, AlterKind, CatalogType, ColumnDefinition, ColumnList, ConstraintType, CreateInfo,
     CreateTableInfo, LogicalType, Value,
 };
+use crate::common::errors::CatalogResult;
 
 // ─── 常量 ──────────────────────────────────────────────────────────────────────
 
@@ -234,7 +235,7 @@ impl TableCatalogEntry {
     /// 按名称获取列定义（C++: `const ColumnDefinition& GetColumn(const string& name) const`）。
     ///
     /// 列不存在时返回 `Err`（C++: 抛出 `CatalogException`）。
-    pub fn get_column_by_name(&self, name: &str) -> Result<&ColumnDefinition, CatalogError> {
+    pub fn get_column_by_name(&self, name: &str) -> CatalogResult<&ColumnDefinition> {
         self.columns
             .get_by_name(name)
             .ok_or_else(|| CatalogError::not_found(CatalogType::Invalid, name))
@@ -244,7 +245,7 @@ impl TableCatalogEntry {
     pub fn get_column_by_index(
         &self,
         idx: LogicalIndex,
-    ) -> Result<&ColumnDefinition, CatalogError> {
+    ) -> CatalogResult<&ColumnDefinition> {
         self.columns
             .get_by_index(idx.0)
             .ok_or_else(|| CatalogError::other(format!("Column index {} out of range", idx.0)))
@@ -285,7 +286,7 @@ impl TableCatalogEntry {
         &self,
         column_name: &str,
         if_exists: bool,
-    ) -> Result<LogicalIndex, CatalogError> {
+    ) -> CatalogResult<LogicalIndex> {
         match self.columns.logical_index_of(column_name) {
             Some(idx) => Ok(LogicalIndex(idx)),
             None if if_exists => Ok(LogicalIndex::INVALID),
@@ -539,7 +540,7 @@ impl TableCatalogEntry {
     /// C++: `virtual unique_ptr<CatalogEntry> AlterEntry(ClientContext&, AlterInfo&)`
     ///
     /// 所有 Alter 操作产生新条目（MVCC），旧条目不变。
-    pub fn alter_entry(&self, info: &AlterInfo) -> Result<TableCatalogEntry, CatalogError> {
+    pub fn alter_entry(&self, info: &AlterInfo) -> CatalogResult<TableCatalogEntry> {
         let mut new_entry = self.clone();
         let fields = new_entry.base.fields_mut();
 
@@ -689,7 +690,7 @@ impl TableCatalogEntry {
     /// 获取底层存储（C++: `virtual DataTable& GetStorage()`）。
     ///
     /// 基类实现抛出 `InternalException`；`DuckTableEntry` 覆盖此方法。
-    pub fn get_storage(&self) -> Result<(), CatalogError> {
+    pub fn get_storage(&self) -> CatalogResult<()> {
         Err(CatalogError::other(
             "Calling GetStorage on a TableCatalogEntry that is not a DuckTableEntry",
         ))

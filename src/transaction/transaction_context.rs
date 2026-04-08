@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 
+use crate::common::errors::{Result, anyhow};
+
 use super::duck_transaction_manager::{DuckTransactionManager, DuckTxnHandle};
 use super::transaction::Transaction;
 use super::transaction_manager::ErrorData;
@@ -25,34 +27,7 @@ use super::types::{MAXIMUM_QUERY_ID, TransactionId};
 // ─── TransactionError ──────────────────────────────────────────────────────────
 
 /// 事务操作错误。
-#[derive(Debug, Clone)]
-pub struct TransactionError {
-    pub message: String,
-}
-
-impl TransactionError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for TransactionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for TransactionError {}
-
-impl From<ErrorData> for TransactionError {
-    fn from(err: ErrorData) -> Self {
-        Self {
-            message: err.message,
-        }
-    }
-}
+pub type TransactionError = crate::common::errors::Error;
 
 // ─── TransactionContext ────────────────────────────────────────────────────────
 
@@ -135,12 +110,10 @@ impl TransactionContext {
     ///
     /// # Errors
     /// 若已有活跃事务，返回错误。
-    pub fn begin_transaction(&self) -> Result<(), TransactionError> {
+    pub fn begin_transaction(&self) -> Result<()> {
         let mut current = self.current_transaction.lock();
         if current.is_some() {
-            return Err(TransactionError::new(
-                "cannot begin transaction: already in transaction",
-            ));
+            return Err(anyhow!("cannot begin transaction: already in transaction"));
         }
         *current = Some(self.transaction_manager.start_duck_transaction(false));
         self.auto_commit.store(false, Ordering::Relaxed);
@@ -151,12 +124,12 @@ impl TransactionContext {
     ///
     /// # Errors
     /// 若无活跃事务或提交失败，返回错误。
-    pub fn commit(&self) -> Result<(), TransactionError> {
+    pub fn commit(&self) -> Result<()> {
         let txn = self
             .current_transaction
             .lock()
             .take()
-            .ok_or_else(|| TransactionError::new("commit called without active transaction"))?;
+            .ok_or_else(|| anyhow!("commit called without active transaction"))?;
         self.auto_commit.store(true, Ordering::Relaxed);
 
         let txn_ref = Arc::clone(&txn) as Arc<dyn Transaction>;
@@ -165,14 +138,14 @@ impl TransactionContext {
             .commit_transaction(&self.db, &txn_ref)
         {
             None => Ok(()),
-            Some(err) => Err(err.into()),
+            Some(err) => Err(anyhow!(err)),
         }
     }
 
     /// 回滚当前事务。
     ///
     /// 若无活跃事务，静默成功（幂等）。
-    pub fn rollback(&self) -> Result<(), TransactionError> {
+    pub fn rollback(&self) -> Result<()> {
         if let Some(txn) = self.current_transaction.lock().take() {
             self.auto_commit.store(true, Ordering::Relaxed);
             self.transaction_manager.rollback_duck_transaction(&txn);

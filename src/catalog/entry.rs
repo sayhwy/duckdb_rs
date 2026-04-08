@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::dependency::LogicalDependencyList;
 use super::error::CatalogError;
+use crate::common::errors::CatalogResult;
 use super::transaction::CatalogTransaction;
 use super::types::{
     AlterInfo, AlterKind, CatalogType, ColumnList, ConstraintType, CreateCollationInfo,
@@ -210,7 +211,7 @@ impl TableEntryData {
         &self,
         base: &CatalogEntryBase,
         info: &AlterInfo,
-    ) -> Result<(CatalogEntryBase, CatalogEntryKind), CatalogError> {
+    ) -> CatalogResult<(CatalogEntryBase, CatalogEntryKind)> {
         let mut new_base = base.clone();
         let mut new_data = self.clone();
 
@@ -371,7 +372,7 @@ impl ViewEntryData {
         &self,
         base: &CatalogEntryBase,
         info: &AlterInfo,
-    ) -> Result<(CatalogEntryBase, CatalogEntryKind), CatalogError> {
+    ) -> CatalogResult<(CatalogEntryBase, CatalogEntryKind)> {
         let mut new_base = base.clone();
         let new_data = self.clone();
         match &info.kind {
@@ -649,7 +650,7 @@ impl CatalogEntryNode {
     }
 
     /// 应用 Alter 操作，返回新版本节点（C++: `virtual AlterEntry`）。
-    pub fn alter(&self, info: &AlterInfo) -> Result<CatalogEntryNode, CatalogError> {
+    pub fn alter(&self, info: &AlterInfo) -> CatalogResult<CatalogEntryNode> {
         let (new_base, new_kind) = match &self.kind {
             CatalogEntryKind::Table(d) => d.apply_alter(&self.base, info)?,
             CatalogEntryKind::View(d) => d.apply_alter(&self.base, info)?,

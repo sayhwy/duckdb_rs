@@ -22,6 +22,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::common::errors::{Result, anyhow};
+
 use super::block_handle::BlockHandle;
 use super::buffer_pool_reservation::{MemoryTracker, TempBufferPoolReservation};
 use super::eviction_queue::{EvictionNode, EvictionQueue};
@@ -156,7 +158,7 @@ impl BufferPool {
     // ─── 限制管理 ─────────────────────────────────────────────
 
     /// 对应 C++ SetLimit(idx_t limit, const char *exception_postscript)
-    pub fn set_limit(self: &Arc<Self>, limit: usize) -> Result<(), String> {
+    pub fn set_limit(self: &Arc<Self>, limit: usize) -> Result<()> {
         let _guard = self.limit_lock.lock();
 
         // 第一次驱逐：尝试腾出空间
@@ -165,7 +167,7 @@ impl BufferPool {
             .evict_blocks(MemoryTag::Extension, 0, limit, &mut dummy)
             .success
         {
-            return Err(format!(
+            return Err(anyhow!(
                 "Failed to change memory limit to {limit}: \
                  could not free up enough memory for the new limit"
             ));
@@ -179,7 +181,7 @@ impl BufferPool {
             .success
         {
             self.maximum_memory.store(old_limit, Ordering::Relaxed);
-            return Err(format!(
+            return Err(anyhow!(
                 "Failed to change memory limit to {limit}: \
                  could not free up enough memory for the new limit"
             ));

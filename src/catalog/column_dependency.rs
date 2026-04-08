@@ -16,6 +16,7 @@
 //! | `logical_index_set_t deleted_columns` | `HashSet<usize>` |
 
 use super::error::CatalogError;
+use crate::common::errors::CatalogResult;
 use super::types::ColumnList;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -204,7 +205,7 @@ impl ColumnDependencyManager {
     }
 
     /// 验证不存在循环依赖。
-    pub fn verify_no_cycles(&self) -> Result<(), CatalogError> {
+    pub fn verify_no_cycles(&self) -> CatalogResult<()> {
         // 检测图中是否存在环（DFS 着色）
         let mut color: HashMap<usize, u8> = HashMap::new();
         let all_nodes: Vec<usize> = self

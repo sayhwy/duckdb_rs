@@ -10,6 +10,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use duckdb_rs::common::errors::{Result, anyhow};
 use duckdb_rs::common::types::{DataChunk, LogicalType};
 use duckdb_rs::db::DuckEngine;
 
@@ -156,18 +157,18 @@ INSERT INTO students VALUES
 
 // ─── Rust 读取 DuckDB 文件 ─────────────────────────────────────────────────────
 
-fn test_rust_read_duckdb_file() -> Result<Vec<String>, String> {
+fn test_rust_read_duckdb_file() -> Result<Vec<String>> {
     let engine = std::panic::catch_unwind(|| DuckEngine::open(TEST_DB_DUCKDB))
         .map_err(|panic| {
             if let Some(msg) = panic.downcast_ref::<&str>() {
-                format!("打开 DuckDB 文件时发生 panic: {msg}")
+                anyhow!("打开 DuckDB 文件时发生 panic: {msg}")
             } else if let Some(msg) = panic.downcast_ref::<String>() {
-                format!("打开 DuckDB 文件时发生 panic: {msg}")
+                anyhow!("打开 DuckDB 文件时发生 panic: {msg}")
             } else {
-                "打开 DuckDB 文件时发生 panic".to_string()
+                anyhow!("打开 DuckDB 文件时发生 panic")
             }
         })?
-        .map_err(|e| format!("无法打开数据库: {:?}", e))?;
+        .map_err(|e| anyhow!("无法打开数据库: {e:?}"))?;
 
     let tables = engine.tables();
 
@@ -175,7 +176,7 @@ fn test_rust_read_duckdb_file() -> Result<Vec<String>, String> {
         let conn = engine.connect();
         let txn = conn
             .begin_transaction()
-            .map_err(|e| format!("begin_transaction 失败: {}", e))?;
+            .map_err(|e| anyhow!("begin_transaction 失败: {e}"))?;
         let _ = &txn;
         let result = conn.scan("students", None);
         conn.commit().ok();
@@ -187,7 +188,7 @@ fn test_rust_read_duckdb_file() -> Result<Vec<String>, String> {
                 let rows = decode_student_rows(&chunks)?;
                 let expected = expected_students();
                 if rows != expected {
-                    return Err(format!(
+                    return Err(anyhow!(
                         "读取结果不匹配: actual={rows:?}, expected={expected:?}"
                     ));
                 }
@@ -207,8 +208,8 @@ fn test_rust_read_duckdb_file() -> Result<Vec<String>, String> {
 
 // ─── Rust 创建学生表 ───────────────────────────────────────────────────────────
 
-fn test_rust_create_student_table() -> Result<(), String> {
-    let engine = DuckEngine::open(TEST_DB_RUST).map_err(|e| format!("无法创建数据库: {:?}", e))?;
+fn test_rust_create_student_table() -> Result<()> {
+    let engine = DuckEngine::open(TEST_DB_RUST).map_err(|e| anyhow!("无法创建数据库: {e:?}"))?;
     let mut conn = engine.connect();
 
     conn.create_table(
@@ -221,7 +222,7 @@ fn test_rust_create_student_table() -> Result<(), String> {
             ("class_id".to_string(), LogicalType::bigint()),
         ],
     )
-    .map_err(|e| format!("创建表失败: {}", e))?;
+    .map_err(|e| anyhow!("创建表失败: {e}"))?;
 
     let students = expected_students();
 
@@ -256,29 +257,29 @@ fn test_rust_create_student_table() -> Result<(), String> {
 
     let txn = conn
         .begin_transaction()
-        .map_err(|e| format!("begin_transaction 失败: {}", e))?;
+        .map_err(|e| anyhow!("begin_transaction 失败: {e}"))?;
     conn.insert("students", &mut chunk)
-        .map_err(|e| format!("插入数据失败: {:?}", e))?;
+        .map_err(|e| anyhow!("插入数据失败: {e:?}"))?;
 
     // 在提交前验证（事务内可见自身写入）
     let results = conn
         .scan("students", None)
-        .map_err(|e| format!("查询失败: {:?}", e))?;
+        .map_err(|e| anyhow!("查询失败: {e:?}"))?;
     let total_rows: usize = results.iter().map(|c| c.size()).sum();
     println!("│  已插入 {} 行数据", total_rows);
     let rows = decode_student_rows(&results)?;
     if rows != students {
-        return Err(format!(
+        return Err(anyhow!(
             "checkpoint 前查询结果不匹配: actual={rows:?}, expected={students:?}"
         ));
     }
 
-    conn.commit().map_err(|e| format!("commit 失败: {}", e))?;
+    conn.commit().map_err(|e| anyhow!("commit 失败: {e}"))?;
 
     println!("│  执行 checkpoint...");
     engine
         .checkpoint()
-        .map_err(|e| format!("Checkpoint 失败: {:?}", e))?;
+        .map_err(|e| anyhow!("Checkpoint 失败: {e:?}"))?;
     println!("│  ✓ Checkpoint 完成");
 
     Ok(())
@@ -294,7 +295,7 @@ fn expected_students() -> Vec<(i32, i32, f64, i64)> {
     ]
 }
 
-fn decode_student_rows(chunks: &[DataChunk]) -> Result<Vec<(i32, i32, f64, i64)>, String> {
+fn decode_student_rows(chunks: &[DataChunk]) -> Result<Vec<(i32, i32, f64, i64)>> {
     let mut rows = Vec::new();
     for chunk in chunks {
         for row_idx in 0..chunk.size() {
@@ -308,29 +309,29 @@ fn decode_student_rows(chunks: &[DataChunk]) -> Result<Vec<(i32, i32, f64, i64)>
     Ok(rows)
 }
 
-fn read_i32(chunk: &DataChunk, col: usize, row: usize) -> Result<i32, String> {
+fn read_i32(chunk: &DataChunk, col: usize, row: usize) -> Result<i32> {
     let raw = chunk.data[col].raw_data();
     let offset = row * 4;
     let bytes = raw
         .get(offset..offset + 4)
-        .ok_or_else(|| format!("列 {col} 第 {row} 行超界"))?;
+        .ok_or_else(|| anyhow!("列 {col} 第 {row} 行超界"))?;
     Ok(i32::from_le_bytes(bytes.try_into().unwrap()))
 }
 
-fn read_i64(chunk: &DataChunk, col: usize, row: usize) -> Result<i64, String> {
+fn read_i64(chunk: &DataChunk, col: usize, row: usize) -> Result<i64> {
     let raw = chunk.data[col].raw_data();
     let offset = row * 8;
     let bytes = raw
         .get(offset..offset + 8)
-        .ok_or_else(|| format!("列 {col} 第 {row} 行超界"))?;
+        .ok_or_else(|| anyhow!("列 {col} 第 {row} 行超界"))?;
     Ok(i64::from_le_bytes(bytes.try_into().unwrap()))
 }
 
-fn read_f64(chunk: &DataChunk, col: usize, row: usize) -> Result<f64, String> {
+fn read_f64(chunk: &DataChunk, col: usize, row: usize) -> Result<f64> {
     let raw = chunk.data[col].raw_data();
     let offset = row * 8;
     let bytes = raw
         .get(offset..offset + 8)
-        .ok_or_else(|| format!("列 {col} 第 {row} 行超界"))?;
+        .ok_or_else(|| anyhow!("列 {col} 第 {row} 行超界"))?;
     Ok(f64::from_le_bytes(bytes.try_into().unwrap()))
 }

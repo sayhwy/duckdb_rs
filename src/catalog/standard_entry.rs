@@ -19,6 +19,7 @@
 use super::catalog_entry::{CatalogEntryFields, CatalogEntryVirtual, InCatalogEntry};
 use super::dependency::LogicalDependencyList;
 use super::error::CatalogError;
+use crate::common::errors::CatalogResult;
 use super::transaction::CatalogTransaction;
 use super::types::{AlterInfo, CatalogType, CreateInfo};
 
@@ -103,7 +104,7 @@ impl StandardEntry {
     /// 一致性校验（C++: 继承 `InCatalogEntry::Verify`）。
     ///
     /// 断言此条目的 `catalog_name` 与传入的 catalog 名称相符。
-    pub fn verify(&self, catalog_name: &str) -> Result<(), CatalogError> {
+    pub fn verify(&self, catalog_name: &str) -> CatalogResult<()> {
         self.base.verify(catalog_name)
     }
 }
@@ -116,17 +117,17 @@ impl StandardEntry {
 /// 实现 `CatalogEntryVirtual`，覆盖 `alter_entry`、`copy`、`get_info`、`to_sql` 等。
 impl CatalogEntryVirtual for StandardEntry {
     /// C++: `SchemaCatalogEntry& ParentSchema() override`
-    fn parent_schema_name(&self) -> Result<&str, CatalogError> {
+    fn parent_schema_name(&self) -> CatalogResult<&str> {
         Ok(&self.schema_name)
     }
 
     /// C++: `Catalog& ParentCatalog() override`（继承自 `InCatalogEntry`）
-    fn parent_catalog_name(&self) -> Result<&str, CatalogError> {
+    fn parent_catalog_name(&self) -> CatalogResult<&str> {
         Ok(self.base.parent_catalog())
     }
 
     /// C++: `void Verify(Catalog& catalog_p) override`（继承自 `InCatalogEntry`）
-    fn verify(&self, catalog_name: &str) -> Result<(), CatalogError> {
+    fn verify(&self, catalog_name: &str) -> CatalogResult<()> {
         self.base.verify(catalog_name)
     }
 

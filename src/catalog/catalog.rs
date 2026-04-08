@@ -33,6 +33,7 @@ use super::types::{
     CreateSequenceInfo, CreateTableInfo, CreateTypeInfo, CreateViewInfo, DatabaseSize, DropInfo,
     MetadataBlockInfo, OnEntryNotFound,
 };
+use crate::common::errors::CatalogResult;
 
 // ─── Catalog trait ─────────────────────────────────────────────────────────────
 
@@ -63,7 +64,7 @@ pub trait Catalog: Send + Sync {
     }
 
     /// 初始化（C++: `virtual void Initialize(bool load_builtin) = 0`）。
-    fn initialize(&mut self, load_builtin: bool) -> Result<(), CatalogError>;
+    fn initialize(&mut self, load_builtin: bool) -> CatalogResult<()>;
 
     /// 获取 Catalog 版本号（C++: `virtual optional_idx GetCatalogVersion`）。
     fn catalog_version(&self) -> Option<u64> {
@@ -77,7 +78,7 @@ pub trait Catalog: Send + Sync {
         &self,
         txn: &CatalogTransaction,
         info: &CreateSchemaInfo,
-    ) -> Result<(), CatalogError>;
+    ) -> CatalogResult<()>;
 
     /// 查找 schema（C++: `virtual LookupSchema = 0`）。
     fn lookup_schema(
@@ -85,14 +86,14 @@ pub trait Catalog: Send + Sync {
         txn: &CatalogTransaction,
         lookup: &EntryLookupInfo,
         if_not_found: OnEntryNotFound,
-    ) -> Result<Option<String>, CatalogError>;
+    ) -> CatalogResult<Option<String>>;
 
     /// 获取 schema（抛出异常版）（C++: `GetSchema(context, name)`）。
     fn get_schema(
         &self,
         txn: &CatalogTransaction,
         schema_name: &str,
-    ) -> Result<String, CatalogError> {
+    ) -> CatalogResult<String> {
         let lookup = EntryLookupInfo::schema_lookup(schema_name);
         self.lookup_schema(txn, &lookup, OnEntryNotFound::ThrowException)?
             .ok_or_else(|| CatalogError::not_found(CatalogType::SchemaEntry, schema_name))
@@ -114,52 +115,52 @@ pub trait Catalog: Send + Sync {
         &self,
         txn: &CatalogTransaction,
         info: &CreateTableInfo,
-    ) -> Result<(), CatalogError>;
+    ) -> CatalogResult<()>;
     fn create_view(
         &self,
         txn: &CatalogTransaction,
         info: &CreateViewInfo,
-    ) -> Result<(), CatalogError>;
+    ) -> CatalogResult<()>;
     fn create_sequence(
         &self,
         txn: &CatalogTransaction,
         info: &CreateSequenceInfo,
-    ) -> Result<(), CatalogError>;
+    ) -> CatalogResult<()>;
     fn create_type(
         &self,
         txn: &CatalogTransaction,
         info: &CreateTypeInfo,
-    ) -> Result<(), CatalogError>;
+    ) -> CatalogResult<()>;
     fn create_index(
         &self,
         txn: &CatalogTransaction,
         info: &CreateIndexInfo,
-    ) -> Result<(), CatalogError>;
+    ) -> CatalogResult<()>;
     fn create_function(
         &self,
         txn: &CatalogTransaction,
         info: &CreateFunctionInfo,
-    ) -> Result<(), CatalogError>;
+    ) -> CatalogResult<()>;
     fn create_table_function(
         &self,
         txn: &CatalogTransaction,
         info: &CreateFunctionInfo,
-    ) -> Result<(), CatalogError>;
+    ) -> CatalogResult<()>;
     fn create_copy_function(
         &self,
         txn: &CatalogTransaction,
         info: &CreateCopyFunctionInfo,
-    ) -> Result<(), CatalogError>;
+    ) -> CatalogResult<()>;
     fn create_pragma_function(
         &self,
         txn: &CatalogTransaction,
         info: &CreatePragmaFunctionInfo,
-    ) -> Result<(), CatalogError>;
+    ) -> CatalogResult<()>;
     fn create_collation(
         &self,
         txn: &CatalogTransaction,
         info: &CreateCollationInfo,
-    ) -> Result<(), CatalogError>;
+    ) -> CatalogResult<()>;
 
     // ── 条目查找 ──────────────────────────────────────────────────────────────
 
@@ -169,12 +170,12 @@ pub trait Catalog: Send + Sync {
         schema_name: &str,
         lookup: &EntryLookupInfo,
         if_not_found: OnEntryNotFound,
-    ) -> Result<Option<CatalogEntryNode>, CatalogError>;
+    ) -> CatalogResult<Option<CatalogEntryNode>>;
 
     // ── 修改与删除 ────────────────────────────────────────────────────────────
 
-    fn drop_entry(&self, txn: &CatalogTransaction, info: &DropInfo) -> Result<(), CatalogError>;
-    fn alter(&self, txn: &CatalogTransaction, info: &AlterInfo) -> Result<(), CatalogError>;
+    fn drop_entry(&self, txn: &CatalogTransaction, info: &DropInfo) -> CatalogResult<()>;
+    fn alter(&self, txn: &CatalogTransaction, info: &AlterInfo) -> CatalogResult<()>;
 
     // ── 统计信息 ──────────────────────────────────────────────────────────────
 
@@ -324,7 +325,7 @@ impl DuckCatalog {
         &self,
         txn: &CatalogTransaction,
         schema_name: &str,
-    ) -> Result<Arc<DuckSchemaEntry>, CatalogError> {
+    ) -> CatalogResult<Arc<DuckSchemaEntry>> {
         // 确保 schema 在 CatalogSet 中存在（触发默认生成器）
         let entry_name = {
             let lower = schema_name.to_lowercase();
@@ -364,7 +365,7 @@ impl Catalog for DuckCatalog {
         Some(self.catalog_version.load(Ordering::SeqCst))
     }
 
-    fn initialize(&mut self, load_builtin: bool) -> Result<(), CatalogError> {
+    fn initialize(&mut self, load_builtin: bool) -> CatalogResult<()> {
         let sys_txn = CatalogTransaction::system(self.oid);
 
         // 创建内置 schema（main, pg_catalog, information_schema）
@@ -389,7 +390,7 @@ impl Catalog for DuckCatalog {
         &self,
         txn: &CatalogTransaction,
         info: &CreateSchemaInfo,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         let _lock = self.write_lock.lock();
         let schema_name = info.schema_name();
         let oid = schema_name.len() as u64 ^ self.oid;
@@ -426,7 +427,7 @@ impl Catalog for DuckCatalog {
         txn: &CatalogTransaction,
         lookup: &EntryLookupInfo,
         if_not_found: OnEntryNotFound,
-    ) -> Result<Option<String>, CatalogError> {
+    ) -> CatalogResult<Option<String>> {
         let result = self.schemas.get_entry_detailed(txn, &lookup.name);
         match result.reason {
             LookupFailureReason::Success => Ok(Some(
@@ -470,7 +471,7 @@ impl Catalog for DuckCatalog {
         &self,
         txn: &CatalogTransaction,
         info: &CreateTableInfo,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         let _lock = self.write_lock.lock();
         let schema = self.get_schema_for_op(txn, &info.base.schema)?;
         schema.create_table(txn, info)?;
@@ -482,7 +483,7 @@ impl Catalog for DuckCatalog {
         &self,
         txn: &CatalogTransaction,
         info: &CreateViewInfo,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         let _lock = self.write_lock.lock();
         let schema = self.get_schema_for_op(txn, &info.base.schema)?;
         schema.create_view(txn, info)?;
@@ -494,7 +495,7 @@ impl Catalog for DuckCatalog {
         &self,
         txn: &CatalogTransaction,
         info: &CreateSequenceInfo,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         let _lock = self.write_lock.lock();
         let schema = self.get_schema_for_op(txn, &info.base.schema)?;
         schema.create_sequence(txn, info)?;
@@ -506,7 +507,7 @@ impl Catalog for DuckCatalog {
         &self,
         txn: &CatalogTransaction,
         info: &CreateTypeInfo,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         let _lock = self.write_lock.lock();
         let schema = self.get_schema_for_op(txn, &info.base.schema)?;
         schema.create_type(txn, info)?;
@@ -518,7 +519,7 @@ impl Catalog for DuckCatalog {
         &self,
         txn: &CatalogTransaction,
         info: &CreateIndexInfo,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         let _lock = self.write_lock.lock();
         let schema = self.get_schema_for_op(txn, &info.base.schema)?;
         schema.create_index(txn, info)?;
@@ -530,7 +531,7 @@ impl Catalog for DuckCatalog {
         &self,
         txn: &CatalogTransaction,
         info: &CreateFunctionInfo,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         let _lock = self.write_lock.lock();
         let schema = self.get_schema_for_op(txn, &info.base.schema)?;
         schema.create_function(txn, info)?;
@@ -542,7 +543,7 @@ impl Catalog for DuckCatalog {
         &self,
         txn: &CatalogTransaction,
         info: &CreateFunctionInfo,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         self.create_function(txn, info)
     }
 
@@ -550,7 +551,7 @@ impl Catalog for DuckCatalog {
         &self,
         txn: &CatalogTransaction,
         info: &CreateCopyFunctionInfo,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         self.create_function(txn, info)
     }
 
@@ -558,7 +559,7 @@ impl Catalog for DuckCatalog {
         &self,
         txn: &CatalogTransaction,
         info: &CreatePragmaFunctionInfo,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         self.create_function(txn, info)
     }
 
@@ -566,7 +567,7 @@ impl Catalog for DuckCatalog {
         &self,
         txn: &CatalogTransaction,
         info: &CreateCollationInfo,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         let _lock = self.write_lock.lock();
         let schema = self.get_schema_for_op(txn, &info.base.schema)?;
         schema.create_collation(txn, info)?;
@@ -582,7 +583,7 @@ impl Catalog for DuckCatalog {
         schema_name: &str,
         lookup: &EntryLookupInfo,
         if_not_found: OnEntryNotFound,
-    ) -> Result<Option<CatalogEntryNode>, CatalogError> {
+    ) -> CatalogResult<Option<CatalogEntryNode>> {
         let schema = match self.get_schema_for_op(txn, schema_name) {
             Ok(s) => s,
             Err(e) => {
@@ -616,7 +617,7 @@ impl Catalog for DuckCatalog {
 
     // ── 修改与删除 ────────────────────────────────────────────────────────────
 
-    fn drop_entry(&self, txn: &CatalogTransaction, info: &DropInfo) -> Result<(), CatalogError> {
+    fn drop_entry(&self, txn: &CatalogTransaction, info: &DropInfo) -> CatalogResult<()> {
         let _lock = self.write_lock.lock();
 
         if info.catalog_type == CatalogType::SchemaEntry {
@@ -660,7 +661,7 @@ impl Catalog for DuckCatalog {
         Ok(())
     }
 
-    fn alter(&self, txn: &CatalogTransaction, info: &AlterInfo) -> Result<(), CatalogError> {
+    fn alter(&self, txn: &CatalogTransaction, info: &AlterInfo) -> CatalogResult<()> {
         let _lock = self.write_lock.lock();
         let schema = self.get_schema_for_op(txn, &info.schema)?;
         schema.alter(txn, info)?;

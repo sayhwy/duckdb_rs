@@ -1,9 +1,8 @@
 #![allow(non_snake_case)]
 
+use crate::common::errors::StorageResult;
 use crate::common::serializer::write_stream::WriteStream;
-use crate::storage::storage_info::{
-    FileHandle, FileOpenFlags, FileSystem, StorageError, StorageResult,
-};
+use crate::storage::storage_info::{FileHandle, FileOpenFlags, FileSystem, StorageError};
 
 pub const FILE_BUFFER_SIZE: usize = 4096;
 

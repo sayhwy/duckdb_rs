@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+
 use super::engine::{EngineError, SchemaInfo, SchemaTableInfo};
+use crate::common::errors::{Result, anyhow};
 use crate::common::types::{DataChunk, LogicalType};
 use crate::db::conn::{Connection, DatabaseInstance};
 
@@ -18,7 +20,7 @@ impl DuckEngine {
     /// - `path = ":memory:"` → 纯内存数据库，进程退出后数据丢失。
     /// - `path = "mydb.db"` → 持久化文件，自动加载已有数据并回放 WAL。
     pub fn open(path: impl Into<String>) -> Result<Self, EngineError> {
-        let db = DatabaseInstance::open(path).map_err(|e| format!("open db failed: {:?}", e))?;
+        let db = DatabaseInstance::open(path).map_err(|e| anyhow!("open db failed: {e:?}"))?;
         Ok(Self { db })
     }
 
@@ -31,7 +33,7 @@ impl DuckEngine {
     pub fn checkpoint(&self) -> Result<(), EngineError> {
         self.db
             .checkpoint()
-            .map_err(|e| format!("checkpoint failed: {:?}", e))
+            .map_err(|e| anyhow!("checkpoint failed: {e:?}"))
     }
 
     /// 返回默认 schema（`"main"`）下的所有表名。
@@ -81,17 +83,17 @@ impl DuckConnection {
 
     /// 开启事务（`BEGIN TRANSACTION`）。
     pub fn begin_transaction(&self) -> Result<(), EngineError> {
-        self.conn.begin_transaction().map_err(|e| e.to_string())
+        self.conn.begin_transaction()
     }
 
     /// 提交当前事务。
     pub fn commit(&self) -> Result<(), EngineError> {
-        self.conn.commit().map_err(|e| e.to_string())
+        self.conn.commit()
     }
 
     /// 回滚当前事务，丢弃所有未提交修改。
     pub fn rollback(&self) -> Result<(), EngineError> {
-        self.conn.rollback().map_err(|e| e.to_string())
+        self.conn.rollback()
     }
 
     // ── DML ───────────────────────────────────────────────────────────────────
@@ -147,7 +149,7 @@ impl DuckConnection {
     /// 若 schema 未通过 [`create_schema`] 注册，返回错误。
     pub fn get_schema(&self, schema_name: &str) -> Result<SchemaInfo, EngineError> {
         if !self.schemas.contains(schema_name) {
-            return Err(format!("Schema '{}' not found", schema_name));
+            return Err(anyhow!("schema '{}' not found", schema_name));
         }
         let tables_guard = self.db.tables.lock();
         let schema_tables: Vec<SchemaTableInfo> = tables_guard
@@ -180,7 +182,7 @@ impl DuckConnection {
         columns: Vec<(String, LogicalType)>,
     ) -> Result<(), EngineError> {
         if !self.schemas.contains(schema) {
-            return Err(format!(
+            return Err(anyhow!(
                 "Schema '{}' not found. Call create_schema(\"{}\") first.",
                 schema, schema
             ));

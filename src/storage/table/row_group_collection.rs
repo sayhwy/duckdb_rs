@@ -23,6 +23,8 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+use crate::common::errors::StorageResult;
+use crate::storage::storage_info::StorageError;
 use super::append_state::TableAppendState;
 use super::column_data::{PersistentCollectionData, PersistentRowGroupData};
 use super::data_table_info::DataTableInfo;
@@ -34,7 +36,6 @@ use super::segment_tree::SegmentTree;
 use super::table_statistics::TableStatistics;
 use super::types::{Idx, LogicalType, MetaBlockPointer, RowId, TransactionData, TransactionId};
 use crate::common::types::DataChunk;
-use crate::storage::storage_info::{StorageError, StorageResult};
 use parking_lot::Mutex;
 
 /// Type alias for the row-group segment tree.
@@ -701,7 +702,7 @@ impl RowGroupCollection {
         ids: &[RowId],
         column_ids: &[crate::catalog::PhysicalIndex],
         updates: &crate::common::types::DataChunk,
-    ) -> crate::storage::storage_info::StorageResult<()> {
+    ) -> crate::common::errors::StorageResult<()> {
         if ids.is_empty() || updates.size() == 0 {
             return Ok(());
         }

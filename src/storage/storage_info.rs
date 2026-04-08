@@ -17,6 +17,7 @@
 //! - **`FileHandle` / `FileSystem`**：文件 I/O 抽象 trait
 
 use crate::storage::buffer::BlockId;
+use crate::common::errors::{ErrorCode, HasErrorCode};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 块 / 行组 大小常量
@@ -957,8 +958,22 @@ impl From<std::io::Error> for StorageError {
     }
 }
 
+impl std::error::Error for StorageError {}
+
+impl HasErrorCode for StorageError {
+    fn error_code(&self) -> ErrorCode {
+        match self {
+            StorageError::NotFound { .. } => ErrorCode::NotFound,
+            StorageError::Io(_)
+            | StorageError::Corrupt { .. }
+            | StorageError::ReadOnly
+            | StorageError::Other(_) => ErrorCode::Storage,
+        }
+    }
+}
+
 /// 存储层操作结果类型。
-pub type StorageResult<T> = Result<T, StorageError>;
+pub use crate::common::errors::StorageResult;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FileHandle / FileSystem

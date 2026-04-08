@@ -35,6 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::error::CatalogError;
 use super::transaction::CatalogTransaction;
 use super::types::{AlterInfo, CatalogType, CreateInfo, Value};
+use crate::common::errors::CatalogResult;
 
 // ─── CatalogEntryFields ────────────────────────────────────────────────────────
 
@@ -121,7 +122,7 @@ pub trait CatalogEntryVirtual: Send + Sync {
     /// C++: `virtual unique_ptr<CatalogEntry> AlterEntry(ClientContext&, AlterInfo&)`
     ///
     /// 默认实现：抛出"不支持"错误（对应 C++ 的 `throw InternalException`）。
-    fn alter_entry(&self, _info: &AlterInfo) -> Result<Box<dyn CatalogEntryVirtual>, CatalogError> {
+    fn alter_entry(&self, _info: &AlterInfo) -> CatalogResult<Box<dyn CatalogEntryVirtual>> {
         Err(CatalogError::other(
             "Unsupported alter type for catalog entry!",
         ))
@@ -137,7 +138,7 @@ pub trait CatalogEntryVirtual: Send + Sync {
         &self,
         transaction: &CatalogTransaction,
         info: &AlterInfo,
-    ) -> Result<Box<dyn CatalogEntryVirtual>, CatalogError> {
+    ) -> CatalogResult<Box<dyn CatalogEntryVirtual>> {
         if !transaction.has_context {
             return Err(CatalogError::other(
                 "Cannot AlterEntry without client context",
@@ -160,14 +161,14 @@ pub trait CatalogEntryVirtual: Send + Sync {
     // ── Copy / GetInfo ────────────────────────────────────────────────────────
 
     /// 深拷贝此条目（C++: `virtual unique_ptr<CatalogEntry> Copy(ClientContext&) const`）。
-    fn copy(&self) -> Result<Box<dyn CatalogEntryVirtual>, CatalogError> {
+    fn copy(&self) -> CatalogResult<Box<dyn CatalogEntryVirtual>> {
         Err(CatalogError::other(
             "Unsupported copy type for catalog entry!",
         ))
     }
 
     /// 获取条目的 `CreateInfo`（C++: `virtual unique_ptr<CreateInfo> GetInfo() const`）。
-    fn get_info(&self) -> Result<CreateInfo, CatalogError> {
+    fn get_info(&self) -> CatalogResult<CreateInfo> {
         Err(CatalogError::other(
             "Unsupported type for CatalogEntry::GetInfo!",
         ))
@@ -181,7 +182,7 @@ pub trait CatalogEntryVirtual: Send + Sync {
     fn set_as_root(&mut self) {}
 
     /// 生成重建此条目的 SQL（C++: `virtual string ToSQL() const`）。
-    fn to_sql(&self) -> Result<String, CatalogError> {
+    fn to_sql(&self) -> CatalogResult<String> {
         Err(CatalogError::other("Unsupported catalog type for ToSQL()"))
     }
 
@@ -190,7 +191,7 @@ pub trait CatalogEntryVirtual: Send + Sync {
     /// 返回所属 Catalog 名称（C++: `virtual Catalog& ParentCatalog()`）。
     ///
     /// 默认实现：抛出错误（基类无 catalog 引用）。
-    fn parent_catalog_name(&self) -> Result<&str, CatalogError> {
+    fn parent_catalog_name(&self) -> CatalogResult<&str> {
         Err(CatalogError::other(
             "CatalogEntry::ParentCatalog called on catalog entry without catalog",
         ))
@@ -199,7 +200,7 @@ pub trait CatalogEntryVirtual: Send + Sync {
     /// 返回所属 Schema 名称（C++: `virtual SchemaCatalogEntry& ParentSchema()`）。
     ///
     /// 默认实现：抛出错误（基类无 schema 引用）。
-    fn parent_schema_name(&self) -> Result<&str, CatalogError> {
+    fn parent_schema_name(&self) -> CatalogResult<&str> {
         Err(CatalogError::other(
             "CatalogEntry::ParentSchema called on catalog entry without schema",
         ))
@@ -210,14 +211,14 @@ pub trait CatalogEntryVirtual: Send + Sync {
     /// 一致性校验（C++: `virtual void Verify(Catalog&)`）。
     ///
     /// 默认实现为空（对应 C++ 基类的空实现）。
-    fn verify(&self, _catalog_name: &str) -> Result<(), CatalogError> {
+    fn verify(&self, _catalog_name: &str) -> CatalogResult<()> {
         Ok(())
     }
 
     /// 序列化条目（C++: `void Serialize(Serializer&) const`）。
     ///
     /// 通过 `get_info()` 获取 `CreateInfo` 再序列化，与 C++ 实现对应。
-    fn serialize(&self) -> Result<Vec<u8>, CatalogError> {
+    fn serialize(&self) -> CatalogResult<Vec<u8>> {
         // C++: `const auto info = GetInfo(); info->Serialize(serializer);`
         let _info = self.get_info()?;
         // 实际序列化由 Serializer 子系统完成；此处返回占位字节流。
@@ -319,7 +320,7 @@ impl InCatalogEntry {
     /// 一致性校验（C++: `void Verify(Catalog& catalog_p) override`）。
     ///
     /// 对应 C++ 中的 `D_ASSERT(&catalog_p == &catalog)` —— 检查 catalog 名称相符。
-    pub fn verify(&self, catalog_name: &str) -> Result<(), CatalogError> {
+    pub fn verify(&self, catalog_name: &str) -> CatalogResult<()> {
         if self.catalog_name != catalog_name {
             return Err(CatalogError::other(format!(
                 "InCatalogEntry::Verify failed: entry '{}' belongs to catalog '{}', not '{}'",

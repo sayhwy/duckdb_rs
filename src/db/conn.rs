@@ -31,6 +31,7 @@ use parking_lot::Mutex;
 
 use crate::catalog::PhysicalIndex;
 use crate::catalog::TableCatalogEntry;
+use crate::common::errors::{Result, anyhow};
 use crate::common::types::{DataChunk, LogicalType, STANDARD_VECTOR_SIZE};
 use crate::storage::data_table::DataTable;
 use crate::storage::storage_manager::StorageManager;
@@ -157,19 +158,15 @@ impl ClientContext {
         self.interrupted.store(false, Ordering::Relaxed);
     }
 
-    pub fn begin_transaction(
-        &self,
-    ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
+    pub fn begin_transaction(&self) -> Result<()> {
         self.transaction.begin_transaction()
     }
 
-    pub fn commit(&self) -> Result<(), crate::transaction::transaction_context::TransactionError> {
+    pub fn commit(&self) -> Result<()> {
         self.transaction.commit()
     }
 
-    pub fn rollback(
-        &self,
-    ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
+    pub fn rollback(&self) -> Result<()> {
         self.transaction.rollback()
     }
 
@@ -227,19 +224,15 @@ impl Connection {
 
     // ── 事务控制 ──────────────────────────────────────────────────────────────
 
-    pub fn begin_transaction(
-        &self,
-    ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
+    pub fn begin_transaction(&self) -> Result<()> {
         self.context.lock().begin_transaction()
     }
 
-    pub fn commit(&self) -> Result<(), crate::transaction::transaction_context::TransactionError> {
+    pub fn commit(&self) -> Result<()> {
         self.context.lock().commit()
     }
 
-    pub fn rollback(
-        &self,
-    ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
+    pub fn rollback(&self) -> Result<()> {
         self.context.lock().rollback()
     }
 
@@ -282,7 +275,7 @@ impl Connection {
     /// `table_name` 支持两种格式：
     /// - 非限定：`"users"`  → 在默认 schema `"main"` 下查找
     /// - 限定：  `"main.users"` → 在指定 schema 下查找
-    fn get_table(&self, table_name: &str) -> Result<TableHandle, String> {
+    fn get_table(&self, table_name: &str) -> Result<TableHandle> {
         let key = parse_table_name(table_name);
         let ctx = self.context.lock();
         ctx.db
@@ -290,7 +283,7 @@ impl Connection {
             .lock()
             .get(&key)
             .cloned()
-            .ok_or_else(|| format!("Table '{}' not found", table_name))
+            .ok_or_else(|| anyhow!("table '{}' not found", table_name))
     }
 
     // ── 事务获取辅助（短暂锁，立即释放）────────────────────────────────────
@@ -298,10 +291,10 @@ impl Connection {
     /// 在 auto_commit 模式下开始事务，返回"是否需要 auto-commit"标志。
     ///
     /// 调用方在操作完成后应调用 `commit_if_auto_commit`。
-    fn ensure_write_transaction(&self) -> Result<bool, String> {
+    fn ensure_write_transaction(&self) -> Result<bool> {
         let auto_commit = self.is_auto_commit();
         if auto_commit && !self.has_active_transaction() {
-            self.begin_transaction().map_err(|e| e.to_string())?;
+            self.begin_transaction()?;
         }
         Ok(auto_commit)
     }
@@ -324,9 +317,9 @@ impl Connection {
     }
 
     /// 若 `auto_commit` 为 true 则提交。
-    fn commit_if_auto_commit(&self, auto_commit: bool) -> Result<(), String> {
+    fn commit_if_auto_commit(&self, auto_commit: bool) -> Result<()> {
         if auto_commit {
-            self.context.lock().commit().map_err(|e| e.to_string())?;
+            self.context.lock().commit()?;
         }
         Ok(())
     }
@@ -375,7 +368,7 @@ impl Connection {
     ///
     /// 在 auto_commit 模式下自动包裹事务。
     /// `context` 锁在获取事务句柄后立即释放，不跨越 I/O 操作持有。
-    pub fn insert_chunk(&self, table_name: &str, chunk: &mut DataChunk) -> Result<(), String> {
+    pub fn insert_chunk(&self, table_name: &str, chunk: &mut DataChunk) -> Result<()> {
         let table = self.get_table(table_name)?;
         let auto_commit = self.ensure_write_transaction()?;
 
@@ -386,7 +379,7 @@ impl Connection {
         table
             .storage
             .local_append(&table.catalog_entry, &storage_context, chunk, &[])
-            .map_err(|e| format!("Append failed: {:?}", e))?;
+            .map_err(|e| anyhow!("append failed: {e:?}"))?;
 
         self.commit_if_auto_commit(auto_commit)
     }
@@ -396,7 +389,7 @@ impl Connection {
         &self,
         table_name: &str,
         column_ids: Option<Vec<u64>>,
-    ) -> Result<Vec<DataChunk>, String> {
+    ) -> Result<Vec<DataChunk>> {
         let table = self.get_table(table_name)?;
 
         let column_ids = column_ids.unwrap_or_else(|| {
@@ -454,7 +447,7 @@ impl Connection {
         row_ids: &[i64],
         column_ids: &[u64],
         updates: &mut DataChunk,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let table = self.get_table(table_name)?;
         let auto_commit = self.ensure_write_transaction()?;
 
@@ -467,7 +460,7 @@ impl Connection {
         let mut state = table
             .storage
             .initialize_update()
-            .map_err(|e| format!("Initialize update failed: {:?}", e))?;
+            .map_err(|e| anyhow!("initialize update failed: {e:?}"))?;
         table
             .storage
             .update(
@@ -477,13 +470,13 @@ impl Connection {
                 &physical_column_ids,
                 updates,
             )
-            .map_err(|e| format!("Update failed: {:?}", e))?;
+            .map_err(|e| anyhow!("update failed: {e:?}"))?;
 
         self.commit_if_auto_commit(auto_commit)
     }
 
     /// 按 Row ID 删除行，返回实际删除行数。
-    pub fn delete_chunk(&self, table_name: &str, row_ids: &[i64]) -> Result<usize, String> {
+    pub fn delete_chunk(&self, table_name: &str, row_ids: &[i64]) -> Result<usize> {
         let table = self.get_table(table_name)?;
         let auto_commit = self.ensure_write_transaction()?;
 
@@ -501,7 +494,7 @@ impl Connection {
                 &mut row_id_vector,
                 row_ids.len() as u64,
             )
-            .map_err(|e| format!("Delete failed: {:?}", e))?;
+            .map_err(|e| anyhow!("delete failed: {e:?}"))?;
 
         self.commit_if_auto_commit(auto_commit)?;
         Ok(deleted as usize)

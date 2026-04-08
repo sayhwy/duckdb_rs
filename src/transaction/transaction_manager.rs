@@ -11,7 +11,10 @@
 //! 外部持有 `Arc<dyn TransactionManager>` 或直接 `Arc<DuckTransactionManager>`。
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
+
+use crate::common::errors::{ErrorCode, HasErrorCode};
 
 use super::transaction::TransactionRef;
 use crate::storage::data_table::DataTable;
@@ -33,6 +36,20 @@ impl ErrorData {
         Self {
             message: msg.into(),
         }
+    }
+}
+
+impl fmt::Display for ErrorData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ErrorData {}
+
+impl HasErrorCode for ErrorData {
+    fn error_code(&self) -> ErrorCode {
+        ErrorCode::Transaction
     }
 }
 

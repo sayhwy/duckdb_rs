@@ -1214,7 +1214,7 @@ impl ColumnDataKind {
         &self,
         row_in_column: Idx,
         value_bytes: &[u8],
-    ) -> crate::storage::storage_info::StorageResult<()> {
+    ) -> crate::common::errors::StorageResult<()> {
         use crate::storage::storage_info::StorageError;
         use crate::storage::table::column_segment::ColumnSegmentType;
 

@@ -31,6 +31,7 @@ use super::dependency::{
 };
 use super::entry::{CatalogEntryBase, CatalogEntryKind, CatalogEntryNode, DependencyRelationData};
 use super::error::CatalogError;
+use crate::common::errors::CatalogResult;
 use super::transaction::CatalogTransaction;
 use super::types::CatalogType;
 
@@ -61,7 +62,7 @@ impl<'a> DependencyCatalogSet<'a> {
         txn: &CatalogTransaction,
         dep_name: &MangledEntryName,
         data: DependencyRelationData,
-    ) -> Result<bool, CatalogError> {
+    ) -> CatalogResult<bool> {
         let oid = dep_name.name.len() as u64;
         let mut base = CatalogEntryBase::new(
             oid,
@@ -94,7 +95,7 @@ impl<'a> DependencyCatalogSet<'a> {
         &self,
         txn: &CatalogTransaction,
         dep_name: &MangledEntryName,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         self.set.drop_entry(txn, &dep_name.name, false, true)
     }
 
@@ -160,7 +161,7 @@ impl DependencyManager {
         txn: &CatalogTransaction,
         dependent_info: &CatalogEntryInfo,
         dep_list: &LogicalDependencyList,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         let _lock = self.write_lock.lock();
         let dep_mangled = MangledEntryName::new(dependent_info);
 
@@ -215,7 +216,7 @@ impl DependencyManager {
         txn: &CatalogTransaction,
         owner_info: &CatalogEntryInfo,
         owned_info: &CatalogEntryInfo,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         let _lock = self.write_lock.lock();
         let owner_mangled = MangledEntryName::new(owner_info);
         let owned_mangled = MangledEntryName::new(owned_info);
@@ -252,7 +253,7 @@ impl DependencyManager {
         txn: &CatalogTransaction,
         subject_info: &CatalogEntryInfo,
         cascade: bool,
-    ) -> Result<Vec<CatalogEntryInfo>, CatalogError> {
+    ) -> CatalogResult<Vec<CatalogEntryInfo>> {
         // 收集所有依赖 subject 的条目
         let mut to_drop = Vec::new();
         let subject_mangled = MangledEntryName::new(subject_info);
@@ -288,7 +289,7 @@ impl DependencyManager {
         &self,
         txn: &CatalogTransaction,
         info: &CatalogEntryInfo,
-    ) -> Result<(), CatalogError> {
+    ) -> CatalogResult<()> {
         let _lock = self.write_lock.lock();
         let mangled = MangledEntryName::new(info);
 

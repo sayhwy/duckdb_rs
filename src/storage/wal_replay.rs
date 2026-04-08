@@ -46,6 +46,8 @@
 
 use std::io::{self, Read, Seek, SeekFrom};
 
+use crate::common::errors::{ErrorCode, HasErrorCode};
+
 use super::metadata::MetaBlockPointer;
 use super::write_ahead_log::WalType;
 
@@ -110,7 +112,25 @@ impl From<io::Error> for WalError {
     }
 }
 
-pub type WalResult<T> = Result<T, WalError>;
+impl std::error::Error for WalError {}
+
+impl HasErrorCode for WalError {
+    fn error_code(&self) -> ErrorCode {
+        match self {
+            WalError::NoCurrentTable
+            | WalError::ColumnIndexOutOfBounds
+            | WalError::RowIdOutOfBounds
+            | WalError::Io(_)
+            | WalError::Corrupt(_)
+            | WalError::VersionMismatch(_)
+            | WalError::InvalidCheckpointWal(_)
+            | WalError::UnsupportedVersion(_)
+            | WalError::UnknownWalType(_) => ErrorCode::Wal,
+        }
+    }
+}
+
+pub use crate::common::errors::WalResult;
 
 // ─── WalVersion ───────────────────────────────────────────────────────────────
 

@@ -33,6 +33,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use crate::common::errors::{Result, anyhow};
+
 use super::append_info::AppendInfo;
 use super::delete_info::DeleteInfo;
 use super::transaction::Transaction;
@@ -685,7 +687,7 @@ impl DuckTransaction {
         &mut self,
         storage_manager: &dyn StorageManager,
         tables: &HashMap<u64, Arc<crate::storage::data_table::DataTable>>,
-    ) -> Result<Box<dyn crate::storage::storage_manager::StorageCommitState>, String> {
+    ) -> Result<Box<dyn crate::storage::storage_manager::StorageCommitState>> {
         // C++: D_ASSERT(ShouldWriteToWAL(db));
         // 调用方应在调用前检查 should_write_to_wal()
 
@@ -693,7 +695,7 @@ impl DuckTransaction {
         //      auto wal = storage_manager.GetWAL();
         //      commit_state = storage_manager.GenStorageCommitState(*wal);
         let mut commit_state = storage_manager.gen_storage_commit_state().ok_or_else(|| {
-            "Failed to generate StorageCommitState (WAL not available)".to_string()
+            anyhow!("failed to generate StorageCommitState (WAL not available)")
         })?;
 
         // 使用 catch_unwind 捕获 panic，模拟 C++ 的 try-catch
@@ -701,7 +703,7 @@ impl DuckTransaction {
             let append_entries = self
                 .storage
                 .commit(Some(commit_state.as_mut()), tables)
-                .map_err(|e| format!("LocalStorage commit failed: {:?}", e))?;
+                .map_err(|e| anyhow!("LocalStorage commit failed: {e:?}"))?;
             for (table_id, row_start, row_count) in append_entries {
                 self.push_append(table_id, row_start, row_count);
             }
@@ -716,7 +718,7 @@ impl DuckTransaction {
                     tables,
                     true,
                 )
-                .map_err(|e| format!("UndoBuffer write_to_wal failed: {:?}", e))?;
+                .map_err(|e| anyhow!("UndoBuffer write_to_wal failed: {e:?}"))?;
 
             // C++: if (commit_state->HasRowGroupData()) {
             //          storage_manager.GetBlockManager().FileSync();
@@ -728,7 +730,7 @@ impl DuckTransaction {
                 // TODO: 添加 storage_manager.file_sync() 方法
             }
 
-            Ok::<_, String>(())
+            Ok::<_, crate::common::errors::Error>(())
         }));
 
         // C++: if (commit_state && error_data.HasError()) {
@@ -748,7 +750,7 @@ impl DuckTransaction {
             Err(_) => {
                 // Panic：回滚 commit_state（截断 WAL）
                 commit_state.revert_commit();
-                Err("WriteToWAL panicked".to_string())
+                Err(anyhow!("WriteToWAL panicked"))
             }
         }
     }
@@ -804,7 +806,7 @@ impl DuckTransaction {
         commit_info: CommitInfo,
         mut commit_state: Option<&mut Box<dyn crate::storage::storage_manager::StorageCommitState>>,
         tables: &HashMap<u64, Arc<crate::storage::data_table::DataTable>>,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         // C++: this->commit_id = commit_info.commit_id;
         self.commit_id = commit_info.commit_id;
 
@@ -844,7 +846,7 @@ impl DuckTransaction {
                     cs.revert_commit();
                 }
 
-                return Err(format!("LocalStorage commit failed: {:?}", e));
+                return Err(anyhow!("LocalStorage commit failed: {e:?}"));
             }
         };
         for (table_id, row_start, row_count) in append_entries {
@@ -868,7 +870,7 @@ impl DuckTransaction {
                 cs.revert_commit();
             }
 
-            return Err("UndoBuffer commit panicked".to_string());
+            return Err(anyhow!("UndoBuffer commit panicked"));
         }
 
         // 步骤 3: 刷新 WAL
@@ -880,7 +882,7 @@ impl DuckTransaction {
                     .revert_commit(&iterator_state, self.transaction_id);
                 cs.revert_commit();
 
-                return Err(format!("FlushCommit failed: {:?}", e));
+                return Err(anyhow!("FlushCommit failed: {e:?}"));
             }
         }
 
@@ -894,7 +896,7 @@ impl DuckTransaction {
     /// 仅执行 UndoBuffer 提交，不执行 LocalStorage 合并。
     ///
     /// 注意：调用方需要确保 LocalStorage 已在调用前单独提交。
-    pub fn commit_undo_only(&mut self, commit_info: CommitInfo) -> Result<(), String> {
+    pub fn commit_undo_only(&mut self, commit_info: CommitInfo) -> Result<()> {
         // C++: this->commit_id = commit_info.commit_id;
         self.commit_id = commit_info.commit_id;
 
@@ -916,7 +918,7 @@ impl DuckTransaction {
     /// 回滚（C++: `DuckTransaction::Rollback()`）。
     ///
     /// 顺序：先回滚 local_storage（释放乐观写块），再回滚 undo_buffer（恢复 MVCC 版本号）。
-    pub fn rollback(&mut self) -> Result<(), String> {
+    pub fn rollback(&mut self) -> Result<()> {
         // C++: storage->Rollback();
         self.storage.rollback();
         // C++: undo_buffer.Rollback();

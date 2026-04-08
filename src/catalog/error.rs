@@ -3,6 +3,7 @@
 //! 对应 C++: `duckdb/common/exception/catalog_exception.hpp`
 
 use super::types::CatalogType;
+use crate::common::errors::{ErrorCode, HasErrorCode};
 use std::fmt;
 
 // ─── CatalogError ──────────────────────────────────────────────────────────────
@@ -149,3 +150,18 @@ impl fmt::Display for CatalogError {
 }
 
 impl std::error::Error for CatalogError {}
+
+impl HasErrorCode for CatalogError {
+    fn error_code(&self) -> ErrorCode {
+        match self {
+            CatalogError::EntryNotFound { .. } => ErrorCode::NotFound,
+            CatalogError::AlreadyExists { .. }
+            | CatalogError::DependencyViolation { .. }
+            | CatalogError::TypeMismatch { .. }
+            | CatalogError::InvalidOperation(_)
+            | CatalogError::Io(_)
+            | CatalogError::Other(_) => ErrorCode::Catalog,
+            CatalogError::TransactionConflict { .. } => ErrorCode::Transaction,
+        }
+    }
+}

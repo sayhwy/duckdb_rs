@@ -31,10 +31,11 @@
 //! 结构字段、公开 API 签名、版本控制逻辑和简单查询方法已完整实现。
 
 use crate::catalog::{PhysicalIndex, TableCatalogEntry};
+use crate::common::errors::StorageResult;
 use crate::common::types::{DataChunk, LogicalType, Vector};
 use crate::storage::local_storage::LocalStorage;
+use crate::storage::storage_info::StorageError;
 use crate::storage::local_storage::MAX_ROW_ID;
-use crate::storage::storage_info::{StorageError, StorageResult};
 use crate::storage::storage_lock::StorageLockKey;
 use crate::storage::storage_manager::StorageCommitState;
 use crate::storage::table::append_state::TableAppendState as PhysicalTableAppendState;
