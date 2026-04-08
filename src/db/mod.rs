@@ -58,9 +58,8 @@ struct InnerDatabase {
 
     /// 数据库路径（用于 checkpoint）。
     path: String,
-
-    /// Catalog 条目（用于读取）。
-    catalog_entries: Vec<crate::storage::checkpoint::catalog_deserializer::CatalogEntry>,
+    // catalog_entries 已移除：仅在 open() 时用于构建 TableHandle，
+    // 构建完成后不再需要，以前驻留在此字段属于无效内存占用。
 }
 
 impl InnerDatabase {
@@ -88,12 +87,12 @@ impl InnerDatabase {
             read_catalog_from_db(&path)?
         };
 
-        // 构建表映射
+        // 构建表映射：key = (schema, table)，均小写
         let mut tables = HashMap::new();
         for (idx, entry) in catalog_entries.iter().enumerate() {
             let handle = build_table_handle(entry, idx as u64 + 1, runtime.clone());
             tables.insert(
-                normalize_name(&entry.name),
+                (normalize_name(&entry.schema), normalize_name(&entry.name)),
                 TableHandle {
                     catalog_entry: handle.catalog_entry,
                     storage: handle.storage,
@@ -119,11 +118,10 @@ impl InnerDatabase {
 
         recover_database(&instance)?;
 
-        Ok(Self {
-            instance,
-            path,
-            catalog_entries,
-        })
+        // catalog_entries 用完即丢，不再存储在结构体中
+        let _ = catalog_entries;
+
+        Ok(Self { instance, path })
     }
 
     /// 创建新连接（C++: `DuckDB::Connect()`）。
@@ -194,11 +192,8 @@ impl InnerDatabase {
         let catalog_entry = TableCatalogEntry::new(catalog_name, schema, table_id, create_info);
         let storage = DataTable::new(1, table_id, schema, table, storage_columns, None);
         self.instance.tables.lock().insert(
-            normalize_name(table),
-            TableHandle {
-                catalog_entry,
-                storage,
-            },
+            (normalize_name(schema), normalize_name(table)),
+            TableHandle { catalog_entry, storage },
         );
     }
 
@@ -212,14 +207,7 @@ impl InnerDatabase {
             .collect()
     }
 
-    /// 获取 catalog 条目。
-    pub fn catalog_entries(
-        &self,
-    ) -> &[crate::storage::checkpoint::catalog_deserializer::CatalogEntry] {
-        &self.catalog_entries
-    }
-
-    /// 插入数据块（便捷方法，使用自动提交模式）。
+/// 插入数据块（便捷方法，使用自动提交模式）。
     ///
     /// 如果需要手动事务控制，请使用 `connect()` 获取连接后操作。
     pub fn insert_chunk(&self, table_name: &str, chunk: &mut DataChunk) -> StorageResult<()> {
@@ -253,9 +241,10 @@ impl InnerDatabase {
         table_name: &str,
         column_ids: Option<Vec<u64>>,
     ) -> StorageResult<Vec<DataChunk>> {
+        let key = crate::db::conn::parse_table_name(table_name);
         let tables = self.instance.tables.lock();
         let table = tables
-            .get(&normalize_name(table_name))
+            .get(&key)
             .ok_or_else(|| StorageError::Corrupt {
                 msg: format!("Table '{}' not found", table_name),
             })?
@@ -524,9 +513,10 @@ impl InnerDatabase {
         table_name: &str,
         column_ids: Option<Vec<u64>>,
     ) -> StorageResult<Vec<DataChunk>> {
+        let key = crate::db::conn::parse_table_name(table_name);
         let tables = self.instance.tables.lock();
         let table = tables
-            .get(&normalize_name(table_name))
+            .get(&key)
             .ok_or_else(|| StorageError::Corrupt {
                 msg: format!("Table '{}' not found", table_name),
             })?
@@ -615,20 +605,18 @@ impl RecoveryCatalog {
     }
 
     fn table_handle(&self, schema: &str, table: &str) -> WalResult<TableHandle> {
-        let tables = self.db.tables.lock();
-        let handle = tables.get(&normalize_name(table)).cloned().ok_or_else(|| {
-            WalError::Corrupt(format!(
-                "table {}.{} not found during WAL replay",
-                schema, table
-            ))
-        })?;
-        if handle.catalog_entry.base.schema_name != schema {
-            return Err(WalError::Corrupt(format!(
-                "table {} resolved to schema {}, expected {}",
-                table, handle.catalog_entry.base.schema_name, schema
-            )));
-        }
-        Ok(handle)
+        let key = (normalize_name(schema), normalize_name(table));
+        self.db
+            .tables
+            .lock()
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| {
+                WalError::Corrupt(format!(
+                    "table {}.{} not found during WAL replay",
+                    schema, table
+                ))
+            })
     }
 }
 
@@ -1542,7 +1530,7 @@ mod tests {
         match find_test_db() {
             None => eprintln!("skip: no test DuckDB file found at known paths"),
             Some(path) => match DB::open(&path) {
-                Ok(db) => assert!(!db.catalog_entries().is_empty()),
+                Ok(db) => assert!(!db.tables().is_empty()),
                 Err(crate::storage::storage_info::StorageError::Io(err))
                     if err.kind() == std::io::ErrorKind::PermissionDenied =>
                 {

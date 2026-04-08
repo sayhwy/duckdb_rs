@@ -29,7 +29,7 @@ pub mod append_info;
 pub mod delete_info;
 pub mod duck_transaction;
 pub mod duck_transaction_manager;
-pub mod meta_transaction;
+pub mod meta_transaction; // 保留模块以防外部路径引用，内容已清空（单数据库场景不再需要）
 pub mod transaction;
 pub mod transaction_context;
 pub mod transaction_manager;

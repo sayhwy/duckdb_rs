@@ -8,4 +8,3 @@ pub mod storage;
 pub mod transaction;
 
 pub use db::{DuckConnection, DuckEngine, DuckdbEngine, EngineError, SchemaInfo, SchemaTableInfo};
-pub use transaction::meta_transaction::MetaTransaction;

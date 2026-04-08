@@ -1,6 +1,27 @@
 //! Connection 实现。
 //!
 //! 对应 DuckDB C++: `duckdb/main/connection.hpp` / `connection.cpp`
+//!
+//! # 层次结构
+//!
+//! ```text
+//! Connection
+//!   └── Arc<Mutex<ClientContext>>
+//!         ├── db: Arc<DatabaseInstance>     — 共享数据库状态
+//!         └── transaction: TransactionContext
+//!               ├── Arc<DuckTransactionManager>
+//!               ├── Arc<DatabaseInstance>   — commit/rollback 时使用
+//!               └── Mutex<Option<Arc<DuckTxnHandle>>>   — 当前活跃事务
+//! ```
+//!
+//! # 设计说明
+//!
+//! - `Connection` 不再持有独立的 `Arc<DatabaseInstance>`；
+//!   所有数据库访问均通过 `context.lock().db` 进行。
+//!   这消除了原有的双重引用（`Connection.db` 与 `ClientContext.db` 指向同一对象）。
+//!
+//! - DML 操作（insert/update/delete/scan）不持有 `ClientContext` 锁跨越 I/O；
+//!   获取事务句柄后立即释放锁，避免与 auto_commit 路径的死锁。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,156 +39,50 @@ use crate::transaction::transaction_context::TransactionContext;
 
 // ─── ConnectionId ──────────────────────────────────────────────────────────────
 
-/// 连接 ID 类型（C++: `typedef uint64_t connection_t`）。
+/// 连接 ID 类型。
 pub type ConnectionId = u64;
 
-/// 全局连接 ID 计数器。
 static CONNECTION_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn next_connection_id() -> ConnectionId {
     CONNECTION_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
-// ─── ClientContext ─────────────────────────────────────────────────────────────
-
-/// 客户端上下文：每个连接的状态（C++: `class ClientContext`）。
-///
-/// # C++ 源码
-/// ```cpp
-/// class ClientContext : public enable_shared_from_this<ClientContext> {
-/// public:
-///     shared_ptr<DatabaseInstance> db;
-///     atomic<bool> interrupted;
-///     unique_ptr<RegisteredStateManager> registered_state;
-///     shared_ptr<Logger> logger;
-///     ClientConfig config;
-///     unique_ptr<ClientData> client_data;
-///     TransactionContext transaction;
-///
-///     MetaTransaction &ActiveTransaction() {
-///         return transaction.ActiveTransaction();
-///     }
-/// };
-/// ```
-pub struct ClientContext {
-    /// 数据库实例引用（C++: `shared_ptr<DatabaseInstance> db`）。
-    pub db: Arc<DatabaseInstance>,
-
-    /// 事务上下文（C++: `TransactionContext transaction`）。
-    pub transaction: TransactionContext,
-
-    /// 连接 ID（C++: `connection_t connection_id`）。
-    pub connection_id: ConnectionId,
-
-    /// 是否中断（C++: `atomic<bool> interrupted`）。
-    interrupted: std::sync::atomic::AtomicBool,
-}
-
-impl ClientContext {
-    /// 创建新的客户端上下文（C++: `ClientContext(shared_ptr<DatabaseInstance> db)`）。
-    pub fn new(db: Arc<DatabaseInstance>) -> Self {
-        let db_id = db.db_id;
-        let transaction_manager = db.transaction_manager.clone();
-        let db_weak = Arc::downgrade(&db);
-        Self {
-            transaction: TransactionContext::new(db_id, transaction_manager, db_weak),
-            db,
-            connection_id: next_connection_id(),
-            interrupted: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-
-    /// 获取活跃事务句柄（如果存在）。
-    pub fn active_transaction(&self) -> Option<Arc<DuckTxnHandle>> {
-        self.transaction.try_get_transaction()
-    }
-
-    /// 中断执行（C++: `Interrupt()`）。
-    pub fn interrupt(&self) {
-        self.interrupted.store(true, Ordering::Relaxed);
-    }
-
-    /// 是否被中断（C++: `IsInterrupted()`）。
-    pub fn is_interrupted(&self) -> bool {
-        self.interrupted.load(Ordering::Relaxed)
-    }
-
-    /// 重置中断状态。
-    pub fn reset_interrupt(&self) {
-        self.interrupted.store(false, Ordering::Relaxed);
-    }
-
-    /// 开始事务（C++: 通过 `Query("BEGIN TRANSACTION")` 实现）。
-    pub fn begin_transaction(
-        &self,
-    ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
-        self.transaction.begin_transaction()
-    }
-
-    /// 提交事务。
-    pub fn commit(&self) -> Result<(), crate::transaction::transaction_context::TransactionError> {
-        self.transaction.commit()
-    }
-
-    /// 回滚事务。
-    pub fn rollback(
-        &self,
-    ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
-        self.transaction.rollback()
-    }
-
-    /// 设置自动提交模式。
-    pub fn set_auto_commit(&self, value: bool) {
-        self.transaction.set_auto_commit(value);
-    }
-
-    /// 是否自动提交模式。
-    pub fn is_auto_commit(&self) -> bool {
-        self.transaction.is_auto_commit()
-    }
-
-    /// 是否有活跃事务。
-    pub fn has_active_transaction(&self) -> bool {
-        self.transaction.has_active_transaction()
-    }
-}
-
 // ─── DatabaseInstance ──────────────────────────────────────────────────────────
 
-/// 数据库实例（C++: `class DatabaseInstance`）。
+/// 数据库实例（共享状态，多连接共享同一实例）。
 ///
-/// 共享的数据库状态，多个连接可以共享同一个实例。
+/// 对应 C++: `class DatabaseInstance`
 pub struct DatabaseInstance {
-    /// 数据库 ID（用于 MetaTransaction 中区分多个附加数据库）。
+    /// 数据库唯一 ID。
     pub db_id: u64,
 
-    /// 数据库路径。
+    /// 数据库文件路径。
     pub path: String,
 
     /// 存储管理器。
     pub storage_manager: Arc<crate::storage::storage_manager::SingleFileStorageManager>,
 
-    /// 事务管理器（全局共享）。
+    /// 事务管理器（全局单例，所有连接共享）。
     pub transaction_manager: Arc<DuckTransactionManager>,
 
-    /// 表集合。
-    pub tables: Mutex<HashMap<String, TableHandle>>,
+    /// 表集合（(schema, table) → 句柄，均小写）。
+    ///
+    /// key 为 `(schema_name, table_name)` 的小写元组，确保：
+    /// - 不同 schema 下同名表不会相互覆盖；
+    /// - WAL 回放可以精确路由到正确表。
+    pub tables: Mutex<HashMap<(String, String), TableHandle>>,
 
-    /// 全局事务计数器（C++: `atomic<transaction_t> transaction_id`）。
+    /// 全局事务 ID 计数器。
     transaction_counter: AtomicU64,
-
-    /// 全局提交时间戳计数器。
-    commit_counter: AtomicU64,
 
     /// Block 分配大小。
     pub block_alloc_size: u64,
 }
 
-/// 全局数据库 ID 计数器。
 static DB_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 impl DatabaseInstance {
-    /// 创建新的数据库实例。
     pub fn new(
         path: String,
         storage_manager: Arc<crate::storage::storage_manager::SingleFileStorageManager>,
@@ -180,193 +95,211 @@ impl DatabaseInstance {
             storage_manager,
             transaction_manager,
             tables: Mutex::new(HashMap::new()),
-            transaction_counter: AtomicU64::new(0),
-            commit_counter: AtomicU64::new(1),
+            transaction_counter: std::sync::atomic::AtomicU64::new(0),
             block_alloc_size,
         }
     }
 
-    /// 获取新的事务 ID（C++: `GetNewTransactionNumber()`）。
+    /// 获取新的事务 ID（单调递增）。
     pub fn get_new_transaction_number(&self) -> u64 {
         self.transaction_counter.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// 获取新的提交时间戳（C++: `GetNewCommitTimestamp()`）。
-    pub fn get_new_commit_timestamp(&self) -> u64 {
-        // 提交时间戳从 TRANSACTION_ID_START 开始，确保比所有事务 ID 大
-        let ts = self.commit_counter.fetch_add(1, Ordering::Relaxed);
-        crate::transaction::types::TRANSACTION_ID_START + ts
     }
 }
 
 // ─── TableHandle ───────────────────────────────────────────────────────────────
 
-/// 表句柄：包含目录条目和存储引用。
+/// 表句柄：目录条目 + 存储引用。
 #[derive(Clone)]
 pub struct TableHandle {
-    /// 目录条目（C++: `TableCatalogEntry`）。
     pub catalog_entry: TableCatalogEntry,
-
-    /// 数据表存储（C++: `DataTable`）。
     pub storage: Arc<DataTable>,
+}
+
+// ─── ClientContext ─────────────────────────────────────────────────────────────
+
+/// 每个连接的运行时上下文。
+///
+/// 对应 C++: `class ClientContext`
+pub struct ClientContext {
+    /// 数据库实例引用。
+    pub db: Arc<DatabaseInstance>,
+
+    /// 事务上下文（begin / commit / rollback 入口）。
+    pub transaction: TransactionContext,
+
+    /// 连接 ID。
+    pub connection_id: ConnectionId,
+
+    /// 是否被中断。
+    interrupted: std::sync::atomic::AtomicBool,
+}
+
+impl ClientContext {
+    pub fn new(db: Arc<DatabaseInstance>) -> Self {
+        let transaction_manager = db.transaction_manager.clone();
+        Self {
+            transaction: TransactionContext::new(transaction_manager, db.clone()),
+            db,
+            connection_id: next_connection_id(),
+            interrupted: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    pub fn interrupt(&self) {
+        self.interrupted.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_interrupted(&self) -> bool {
+        self.interrupted.load(Ordering::Relaxed)
+    }
+
+    pub fn reset_interrupt(&self) {
+        self.interrupted.store(false, Ordering::Relaxed);
+    }
+
+    pub fn begin_transaction(
+        &self,
+    ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
+        self.transaction.begin_transaction()
+    }
+
+    pub fn commit(
+        &self,
+    ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
+        self.transaction.commit()
+    }
+
+    pub fn rollback(
+        &self,
+    ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
+        self.transaction.rollback()
+    }
+
+    pub fn set_auto_commit(&self, value: bool) {
+        self.transaction.set_auto_commit(value);
+    }
+
+    pub fn is_auto_commit(&self) -> bool {
+        self.transaction.is_auto_commit()
+    }
+
+    pub fn has_active_transaction(&self) -> bool {
+        self.transaction.has_active_transaction()
+    }
+
+    /// 获取当前事务句柄（不创建新事务）。
+    pub fn active_transaction(&self) -> Option<Arc<DuckTxnHandle>> {
+        self.transaction.try_get_transaction()
+    }
 }
 
 // ─── Connection ────────────────────────────────────────────────────────────────
 
-/// 数据库连接（C++: `class Connection`）。
+/// 数据库连接（高层 API）。
 ///
-/// # C++ 源码
-/// ```cpp
-/// class Connection {
-/// public:
-///     explicit Connection(DuckDB &database);
-///     explicit Connection(DatabaseInstance &database);
+/// 对应 C++: `class Connection`
 ///
-///     shared_ptr<ClientContext> context;
+/// # 设计
 ///
-///     void BeginTransaction();
-///     void Commit();
-///     void Rollback();
-///     void SetAutoCommit(bool auto_commit);
-///     bool IsAutoCommit();
-///     bool HasActiveTransaction();
-///
-///     unique_ptr<QueryResult> Query(const string &query);
-///     void Append(TableDescription &description, DataChunk &chunk);
-/// };
-/// ```
-///
-/// # 使用示例
-///
-/// ```rust
-/// // 创建数据库和连接
-/// let db = DB::open(":memory:")?;
-/// let conn = db.connect();
-///
-/// // 方式 1: 自动提交模式（默认）
-/// conn.insert_chunk("my_table", &mut chunk)?;  // 自动开始并提交事务
-///
-/// // 方式 2: 手动事务控制
-/// conn.begin_transaction()?;
-/// conn.insert_chunk("my_table", &mut chunk)?;
-/// conn.insert_chunk("my_table", &mut chunk2)?;
-/// conn.commit()?;  // 或者 conn.rollback()?
-/// ```
+/// `Connection` 不再持有独立的 `Arc<DatabaseInstance>`。
+/// 所有数据库访问通过 `context.lock().db` 进行。
+/// DML 操作先短暂锁 context 取得所需句柄，再释放锁执行 I/O，
+/// 避免在 I/O 路径上持有粗粒度锁。
 pub struct Connection {
-    /// 客户端上下文（C++: `shared_ptr<ClientContext> context`）。
+    /// 客户端上下文（含 db 引用和事务状态）。
     pub(crate) context: Arc<Mutex<ClientContext>>,
 
-    /// 连接 ID（C++: `connection_t connection_id`）。
+    /// 连接 ID（缓存，避免每次锁 context）。
     connection_id: ConnectionId,
-
-    /// 数据库实例引用。
-    db: Arc<DatabaseInstance>,
 }
 
 impl Connection {
-    /// 创建新连接（C++: `Connection(DatabaseInstance &database)`）。
     pub fn new(db: Arc<DatabaseInstance>) -> Self {
-        let context = Arc::new(Mutex::new(ClientContext::new(db.clone())));
+        let context = Arc::new(Mutex::new(ClientContext::new(db)));
         let connection_id = context.lock().connection_id;
-
-        Self {
-            context,
-            connection_id,
-            db,
-        }
+        Self { context, connection_id }
     }
 
-    /// 获取连接 ID。
     pub fn connection_id(&self) -> ConnectionId {
         self.connection_id
     }
 
-    /// 开始事务（C++: `Connection::BeginTransaction()`）。
-    ///
-    /// # C++ 源码
-    /// ```cpp
-    /// void Connection::BeginTransaction() {
-    ///     auto result = Query("BEGIN TRANSACTION");
-    ///     if (result->HasError()) {
-    ///         result->ThrowError();
-    ///     }
-    /// }
-    /// ```
+    // ── 事务控制 ──────────────────────────────────────────────────────────────
+
     pub fn begin_transaction(
         &self,
     ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
-        let context = self.context.lock();
-        context.begin_transaction()
+        self.context.lock().begin_transaction()
     }
 
-    /// 提交事务（C++: `Connection::Commit()`）。
-    ///
-    /// # C++ 源码
-    /// ```cpp
-    /// void Connection::Commit() {
-    ///     auto result = Query("COMMIT");
-    ///     if (result->HasError()) {
-    ///         result->ThrowError();
-    ///     }
-    /// }
-    /// ```
-    pub fn commit(&self) -> Result<(), crate::transaction::transaction_context::TransactionError> {
-        let context = self.context.lock();
-        context.commit()
+    pub fn commit(
+        &self,
+    ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
+        self.context.lock().commit()
     }
 
-    /// 回滚事务（C++: `Connection::Rollback()`）。
-    ///
-    /// # C++ 源码
-    /// ```cpp
-    /// void Connection::Rollback() {
-    ///     auto result = Query("ROLLBACK");
-    ///     if (result->HasError()) {
-    ///         result->ThrowError();
-    ///     }
-    /// }
-    /// ```
     pub fn rollback(
         &self,
     ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
-        let context = self.context.lock();
-        context.rollback()
+        self.context.lock().rollback()
     }
 
-    /// 设置自动提交模式（C++: `SetAutoCommit()`）。
     pub fn set_auto_commit(&self, value: bool) {
         self.context.lock().set_auto_commit(value);
     }
 
-    /// 是否自动提交模式（C++: `IsAutoCommit()`）。
     pub fn is_auto_commit(&self) -> bool {
         self.context.lock().is_auto_commit()
     }
 
-    /// 是否有活跃事务（C++: `HasActiveTransaction()`）。
     pub fn has_active_transaction(&self) -> bool {
         self.context.lock().has_active_transaction()
     }
 
-    /// 获取当前事务句柄（如果存在）。
     pub fn get_transaction(&self) -> Option<Arc<DuckTxnHandle>> {
         self.context.lock().transaction.try_get_transaction()
     }
 
-    /// 中断当前查询（C++: `Interrupt()`）。
     pub fn interrupt(&self) {
         self.context.lock().interrupt();
     }
 
+    // ── 数据库访问辅助 ────────────────────────────────────────────────────────
+
+    /// 获取数据库实例引用（克隆 Arc，短暂锁 context）。
+    pub fn database(&self) -> Arc<DatabaseInstance> {
+        self.context.lock().db.clone()
+    }
+
+    /// 获取存储管理器引用。
+    pub fn storage_manager(
+        &self,
+    ) -> Arc<crate::storage::storage_manager::SingleFileStorageManager> {
+        self.context.lock().db.storage_manager.clone()
+    }
+
+    /// 查找表句柄（短暂锁 context + tables）。
+    ///
+    /// `table_name` 支持两种格式：
+    /// - 非限定：`"users"`  → 在默认 schema `"main"` 下查找
+    /// - 限定：  `"main.users"` → 在指定 schema 下查找
     fn get_table(&self, table_name: &str) -> Result<TableHandle, String> {
-        let tables = self.db.tables.lock();
-        tables
-            .get(&table_name.to_ascii_lowercase())
+        let key = parse_table_name(table_name);
+        let ctx = self.context.lock();
+        ctx.db
+            .tables
+            .lock()
+            .get(&key)
             .cloned()
             .ok_or_else(|| format!("Table '{}' not found", table_name))
     }
 
-    fn ensure_write_transaction_for_query(&self) -> Result<bool, String> {
+    // ── 事务获取辅助（短暂锁，立即释放）────────────────────────────────────
+
+    /// 在 auto_commit 模式下开始事务，返回"是否需要 auto-commit"标志。
+    ///
+    /// 调用方在操作完成后应调用 `commit_if_auto_commit`。
+    fn ensure_write_transaction(&self) -> Result<bool, String> {
         let auto_commit = self.is_auto_commit();
         if auto_commit && !self.has_active_transaction() {
             self.begin_transaction().map_err(|e| e.to_string())?;
@@ -374,20 +307,13 @@ impl Connection {
         Ok(auto_commit)
     }
 
-    fn get_write_transaction_context(
-        &self,
-    ) -> (
-        parking_lot::MutexGuard<'_, ClientContext>,
-        Arc<DuckTxnHandle>,
-        crate::storage::data_table::ClientContext,
-    ) {
-        let context_guard = self.context.lock();
-        let txn = context_guard.transaction.get_or_create_write_transaction();
-        let storage_context = Self::build_storage_context(&txn);
-        (context_guard, txn, storage_context)
+    /// 获取写事务句柄（短暂锁 context 后释放）。
+    fn acquire_write_transaction(&self) -> Arc<DuckTxnHandle> {
+        self.context.lock().transaction.get_or_create_write_transaction()
     }
 
-    fn get_read_transaction(&self) -> Arc<DuckTxnHandle> {
+    /// 获取读事务句柄（短暂锁 context 后释放）。
+    fn acquire_read_transaction(&self) -> Arc<DuckTxnHandle> {
         if let Some(txn) = self.get_transaction() {
             txn
         } else {
@@ -395,6 +321,7 @@ impl Connection {
         }
     }
 
+    /// 若 `auto_commit` 为 true 则提交。
     fn commit_if_auto_commit(&self, auto_commit: bool) -> Result<(), String> {
         if auto_commit {
             self.context.lock().commit().map_err(|e| e.to_string())?;
@@ -402,15 +329,15 @@ impl Connection {
         Ok(())
     }
 
-    fn flush_pending_appends(&self) {
-        // local_append finalizes each append immediately; nothing to flush.
-    }
+    // ── storage::data_table::ClientContext 构建 ───────────────────────────────
 
     fn build_storage_context(
         txn: &Arc<DuckTxnHandle>,
     ) -> crate::storage::data_table::ClientContext {
         let txn_guard = txn.lock_inner();
         crate::storage::data_table::ClientContext {
+            // LocalStorage 内部通过 Arc<Mutex<HashMap<...>>> 共享数据；
+            // 此处的 clone 是浅拷贝（Arc 引用计数 +1），不深拷贝实际存储内容。
             local_storage: *txn_guard.storage.clone(),
             transaction: Some(Arc::clone(txn)),
             transaction_data: crate::storage::table::types::TransactionData {
@@ -421,15 +348,15 @@ impl Connection {
     }
 
     fn build_row_id_vector(row_ids: &[i64]) -> crate::common::types::Vector {
-        let mut row_id_vector = crate::common::types::Vector::with_capacity(
+        let mut v = crate::common::types::Vector::with_capacity(
             crate::common::types::LogicalType::bigint(),
             row_ids.len(),
         );
-        for (idx, row_id) in row_ids.iter().copied().enumerate() {
+        for (idx, &row_id) in row_ids.iter().enumerate() {
             let base = idx * 8;
-            row_id_vector.raw_data_mut()[base..base + 8].copy_from_slice(&row_id.to_le_bytes());
+            v.raw_data_mut()[base..base + 8].copy_from_slice(&row_id.to_le_bytes());
         }
-        row_id_vector
+        v
     }
 
     fn build_physical_column_ids(column_ids: &[u64]) -> Vec<PhysicalIndex> {
@@ -440,22 +367,20 @@ impl Connection {
             .collect()
     }
 
-    /// 插入数据到指定表（C++: `Append()`）。
+    // ── DML ───────────────────────────────────────────────────────────────────
+
+    /// 向表插入数据块。
     ///
-    /// 在自动提交模式下，会自动开始并提交事务。
-    /// 在手动模式下，会使用当前活跃事务。
-    ///
-    /// # 参数
-    /// - `table_name`: 表名
-    /// - `chunk`: 要插入的数据块
-    ///
-    /// # 返回
-    /// 成功返回 `Ok(())`，失败返回错误信息。
+    /// 在 auto_commit 模式下自动包裹事务。
+    /// `context` 锁在获取事务句柄后立即释放，不跨越 I/O 操作持有。
     pub fn insert_chunk(&self, table_name: &str, chunk: &mut DataChunk) -> Result<(), String> {
         let table = self.get_table(table_name)?;
-        let auto_commit = self.ensure_write_transaction_for_query()?;
+        let auto_commit = self.ensure_write_transaction()?;
 
-        let (_context_guard, _txn, storage_context) = self.get_write_transaction_context();
+        // 获取事务句柄后立即释放 context 锁，避免后续 commit 时死锁
+        let txn = self.acquire_write_transaction();
+        let storage_context = Self::build_storage_context(&txn);
+
         table
             .storage
             .local_append(&table.catalog_entry, &storage_context, chunk, &[])
@@ -464,13 +389,12 @@ impl Connection {
         self.commit_if_auto_commit(auto_commit)
     }
 
-    /// 扫描表数据。
+    /// 扫描表数据（可见当前事务内的未提交写入）。
     pub fn scan_chunks(
         &self,
         table_name: &str,
         column_ids: Option<Vec<u64>>,
     ) -> Result<Vec<DataChunk>, String> {
-        self.flush_pending_appends();
         let table = self.get_table(table_name)?;
 
         let column_ids = column_ids.unwrap_or_else(|| {
@@ -488,11 +412,11 @@ impl Connection {
             })
             .collect();
 
-        let txn = self.get_read_transaction();
+        // 获取事务句柄（不持有 context 锁）
+        let txn = self.acquire_read_transaction();
+
         let mut state = crate::storage::table::scan_state::TableScanState::new();
-        table
-            .storage
-            .initialize_scan(&mut state, column_ids.clone(), None);
+        table.storage.initialize_scan(&mut state, column_ids.clone(), None);
         {
             let txn_guard = txn.lock_inner();
             txn_guard.storage.initialize_scan_state(
@@ -519,25 +443,7 @@ impl Connection {
         Ok(chunks)
     }
 
-    /// 获取数据库实例引用。
-    pub fn database(&self) -> &Arc<DatabaseInstance> {
-        &self.db
-    }
-
-    /// 获取存储管理器引用。
-    pub fn storage_manager(
-        &self,
-    ) -> &Arc<crate::storage::storage_manager::SingleFileStorageManager> {
-        &self.db.storage_manager
-    }
-
-    /// 更新表中指定行（简化版 UPDATE）。
-    ///
-    /// - `row_ids`: 0-based 物理行号数组（长度必须等于 `updates.size()`）
-    /// - `column_ids`: 需要更新的列 id（物理列序号，长度必须等于 `updates.column_count()`）
-    /// - `updates`: 每一行对应 row_ids 的新值（只包含 column_ids 对应的列）
-    ///
-    /// 当前仅支持更新 **内存/未落盘**（transient）段；对持久化段需要 MVCC/Undo 支持后再补齐。
+    /// 按 Row ID 更新指定列。
     pub fn update_chunk(
         &self,
         table_name: &str,
@@ -545,11 +451,12 @@ impl Connection {
         column_ids: &[u64],
         updates: &mut DataChunk,
     ) -> Result<(), String> {
-        self.flush_pending_appends();
         let table = self.get_table(table_name)?;
-        let auto_commit = self.ensure_write_transaction_for_query()?;
+        let auto_commit = self.ensure_write_transaction()?;
 
-        let (context_guard, _txn, storage_context) = self.get_write_transaction_context();
+        let txn = self.acquire_write_transaction();
+        let storage_context = Self::build_storage_context(&txn);
+
         let mut row_id_vector = Self::build_row_id_vector(row_ids);
         let physical_column_ids = Self::build_physical_column_ids(column_ids);
 
@@ -568,16 +475,17 @@ impl Connection {
             )
             .map_err(|e| format!("Update failed: {:?}", e))?;
 
-        drop(context_guard);
         self.commit_if_auto_commit(auto_commit)
     }
 
+    /// 按 Row ID 删除行，返回实际删除行数。
     pub fn delete_chunk(&self, table_name: &str, row_ids: &[i64]) -> Result<usize, String> {
-        self.flush_pending_appends();
         let table = self.get_table(table_name)?;
-        let auto_commit = self.ensure_write_transaction_for_query()?;
+        let auto_commit = self.ensure_write_transaction()?;
 
-        let (context_guard, _txn, storage_context) = self.get_write_transaction_context();
+        let txn = self.acquire_write_transaction();
+        let storage_context = Self::build_storage_context(&txn);
+
         let mut row_id_vector = Self::build_row_id_vector(row_ids);
 
         let mut state = table.storage.initialize_delete();
@@ -591,7 +499,6 @@ impl Connection {
             )
             .map_err(|e| format!("Delete failed: {:?}", e))?;
 
-        drop(context_guard);
         self.commit_if_auto_commit(auto_commit)?;
         Ok(deleted as usize)
     }
@@ -600,9 +507,22 @@ impl Connection {
 impl Drop for Connection {
     fn drop(&mut self) {
         // 析构时回滚未完成的事务
-        // C++: ~Connection() 清理工作在 ConnectionManager 中处理
         if self.has_active_transaction() {
             let _ = self.rollback();
         }
+    }
+}
+
+// ─── 辅助函数 ──────────────────────────────────────────────────────────────────
+
+/// 将表名解析为 `(schema, table)` 小写 key。
+///
+/// - `"users"`        → `("main", "users")`   — 非限定，默认 schema "main"
+/// - `"main.users"`   → `("main", "users")`   — 限定格式
+/// - `"hr.employees"` → `("hr", "employees")` — 非默认 schema
+pub fn parse_table_name(table_name: &str) -> (String, String) {
+    match table_name.split_once('.') {
+        Some((schema, table)) => (schema.to_ascii_lowercase(), table.to_ascii_lowercase()),
+        None => ("main".to_string(), table_name.to_ascii_lowercase()),
     }
 }
