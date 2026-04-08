@@ -11,7 +11,7 @@ use std::path::Path;
 use std::process::Command;
 
 use duckdb_rs::common::errors::{Result, anyhow};
-use duckdb_rs::common::types::{DataChunk, LogicalType};
+use duckdb_rs::common::types::{DataChunk, DataChunkBuilder, LogicalType};
 use duckdb_rs::db::DuckEngine;
 
 // ─── 配置 ─────────────────────────────────────────────────────────────────────
@@ -226,8 +226,7 @@ fn test_rust_create_student_table() -> Result<()> {
 
     let students = expected_students();
 
-    let mut chunk = DataChunk::new();
-    chunk.initialize(
+    let mut builder = DataChunkBuilder::new(
         &[
             LogicalType::integer(),
             LogicalType::integer(),
@@ -238,22 +237,20 @@ fn test_rust_create_student_table() -> Result<()> {
     );
 
     for (i, &(id, age, score, class_id)) in students.iter().enumerate() {
-        let id_offset = i * 4;
-        chunk.data[0].raw_data_mut()[id_offset..id_offset + 4].copy_from_slice(&id.to_le_bytes());
-
-        let age_offset = i * 4;
-        chunk.data[1].raw_data_mut()[age_offset..age_offset + 4]
-            .copy_from_slice(&age.to_le_bytes());
-
-        let score_offset = i * 8;
-        chunk.data[2].raw_data_mut()[score_offset..score_offset + 8]
-            .copy_from_slice(&score.to_le_bytes());
-
-        let class_offset = i * 8;
-        chunk.data[3].raw_data_mut()[class_offset..class_offset + 8]
-            .copy_from_slice(&class_id.to_le_bytes());
+        builder
+            .set_i32(0, i, id)
+            .map_err(|e| anyhow!("写入 id 失败: {e}"))?;
+        builder
+            .set_i32(1, i, age)
+            .map_err(|e| anyhow!("写入 age 失败: {e}"))?;
+        builder
+            .set_f64(2, i, score)
+            .map_err(|e| anyhow!("写入 score 失败: {e}"))?;
+        builder
+            .set_i64(3, i, class_id)
+            .map_err(|e| anyhow!("写入 class_id 失败: {e}"))?;
     }
-    chunk.set_cardinality(students.len());
+    let mut chunk = builder.finish();
 
     let txn = conn
         .begin_transaction()

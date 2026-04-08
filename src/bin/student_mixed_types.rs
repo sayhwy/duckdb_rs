@@ -17,7 +17,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use duckdb_rs::common::types::{DataChunk, LogicalType};
+use duckdb_rs::common::types::{DataChunkBuilder, LogicalType};
 use duckdb_rs::db::DuckEngine;
 
 const DUCKDB_EXE: &str = "/Users/liang/Documents/code/duckdb/bin/duckdb";
@@ -56,8 +56,7 @@ fn main() {
     let students = generate_students(ROW_COUNT);
 
     // 构建 DataChunk
-    let mut chunk = DataChunk::new();
-    chunk.initialize(
+    let mut builder = DataChunkBuilder::new(
         &[
             LogicalType::integer(),
             LogicalType::varchar(),
@@ -71,33 +70,20 @@ fn main() {
 
     for (i, s) in students.iter().enumerate() {
         let (id, name, age, gpa, is_active, enrollment_day) = *s;
-
-        // col 0: id (INTEGER, 4 bytes)
-        let off = i * 4;
-        chunk.data[0].raw_data_mut()[off..off + 4].copy_from_slice(&id.to_le_bytes());
-
-        // col 1: name (VARCHAR, string_t, 16 bytes)
-        let off = i * 16;
-        let dst = &mut chunk.data[1].raw_data_mut()[off..off + 16];
-        write_varchar_inline_string_t(dst, name);
-
-        // col 2: gpa (FLOAT, 4 bytes)
-        let off = i * 4;
-        chunk.data[2].raw_data_mut()[off..off + 4].copy_from_slice(&gpa.to_le_bytes());
-
-        // col 3: age (INTEGER, 4 bytes)
-        let off = i * 4;
-        chunk.data[3].raw_data_mut()[off..off + 4].copy_from_slice(&age.to_le_bytes());
-
-        // col 4: is_active (BOOLEAN, 1 byte)
-        chunk.data[4].raw_data_mut()[i] = if is_active { 1 } else { 0 };
-
-        // col 5: enrollment_day (DATE, 4 bytes — i32 days since 1970-01-01)
-        let off = i * 4;
-        chunk.data[5].raw_data_mut()[off..off + 4].copy_from_slice(&enrollment_day.to_le_bytes());
+        builder.set_i32(0, i, id).expect("写入 id 失败");
+        builder
+            .set_varchar_inline(1, i, name)
+            .expect("写入 name 失败");
+        builder.set_f32(2, i, gpa).expect("写入 gpa 失败");
+        builder.set_i32(3, i, age).expect("写入 age 失败");
+        builder
+            .set_bool(4, i, is_active)
+            .expect("写入 is_active 失败");
+        builder
+            .set_i32(5, i, enrollment_day)
+            .expect("写入 enrollment_day 失败");
     }
-
-    chunk.set_cardinality(ROW_COUNT);
+    let mut chunk = builder.finish();
 
     // 插入数据（显式事务）
     conn.begin_transaction().expect("begin_transaction 失败");
@@ -135,20 +121,6 @@ fn generate_students(n: usize) -> Vec<(i32, &'static str, i32, f32, bool, i32)> 
         students.push((id, name, age, gpa, is_active, enrollment_day));
     }
     students
-}
-
-fn write_varchar_inline_string_t(dst: &mut [u8], s: &str) {
-    assert_eq!(dst.len(), 16, "string_t buffer must be 16 bytes");
-    let bytes = s.as_bytes();
-    assert!(
-        bytes.len() <= 12,
-        "inline varchar encoding only supports <= 12 bytes, got {}",
-        bytes.len()
-    );
-    let len_u32 = bytes.len() as u32;
-    dst[..4].copy_from_slice(&len_u32.to_le_bytes());
-    dst[4..4 + bytes.len()].copy_from_slice(bytes);
-    dst[4 + bytes.len()..].fill(0);
 }
 
 fn verify_with_duckdb() {

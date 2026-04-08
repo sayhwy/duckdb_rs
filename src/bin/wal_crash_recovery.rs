@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use duckdb_rs::common::errors::{Result, anyhow};
-use duckdb_rs::common::types::{DataChunk, LogicalType, STANDARD_VECTOR_SIZE};
+use duckdb_rs::common::types::{DataChunk, DataChunkBuilder, LogicalType, STANDARD_VECTOR_SIZE};
 use duckdb_rs::db::DuckEngine;
 
 const SMALL_DB_PATH: &str = "wal_recovery_students_10k.db";
@@ -239,22 +239,18 @@ fn build_student_chunk(start_id: usize, count: usize) -> DataChunk {
         LogicalType::integer(),
         LogicalType::integer(),
     ];
-    let mut chunk = DataChunk::new();
-    chunk.initialize(&types, count);
+    let mut builder = DataChunkBuilder::new(&types, count);
 
     for i in 0..count {
         let id = (start_id + i) as i32;
         let age = 18 + (id % 10);
         let score = 60 + (id % 40);
-        let offset = i * 4;
-
-        chunk.data[0].raw_data_mut()[offset..offset + 4].copy_from_slice(&id.to_le_bytes());
-        chunk.data[1].raw_data_mut()[offset..offset + 4].copy_from_slice(&age.to_le_bytes());
-        chunk.data[2].raw_data_mut()[offset..offset + 4].copy_from_slice(&score.to_le_bytes());
+        builder.set_i32(0, i, id).expect("写入 id 失败");
+        builder.set_i32(1, i, age).expect("写入 age 失败");
+        builder.set_i32(2, i, score).expect("写入 score 失败");
     }
 
-    chunk.set_cardinality(count);
-    chunk
+    builder.finish()
 }
 
 fn count_rows(engine: &DuckEngine) -> usize {

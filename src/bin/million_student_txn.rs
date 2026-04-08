@@ -26,7 +26,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use duckdb_rs::common::types::{DataChunk, LogicalType};
+use duckdb_rs::common::types::{DataChunk, DataChunkBuilder, LogicalType};
 use duckdb_rs::db::DuckEngine;
 
 // ─── 常量 ──────────────────────────────────────────────────────────────────────
@@ -43,21 +43,17 @@ fn build_student_chunk(start_id: usize, count: usize) -> DataChunk {
         LogicalType::integer(),
         LogicalType::integer(),
     ];
-    let mut chunk = DataChunk::new();
-    chunk.initialize(&types, count);
+    let mut builder = DataChunkBuilder::new(&types, count);
 
     for i in 0..count {
         let id = (start_id + i) as i32;
         let age = 18 + (id % 10);
         let score = 50 + (id % 50);
-
-        let base = i * 4;
-        chunk.data[0].raw_data_mut()[base..base + 4].copy_from_slice(&id.to_le_bytes());
-        chunk.data[1].raw_data_mut()[base..base + 4].copy_from_slice(&age.to_le_bytes());
-        chunk.data[2].raw_data_mut()[base..base + 4].copy_from_slice(&score.to_le_bytes());
+        builder.set_i32(0, i, id).expect("写入 id 失败");
+        builder.set_i32(1, i, age).expect("写入 age 失败");
+        builder.set_i32(2, i, score).expect("写入 score 失败");
     }
-    chunk.set_cardinality(count);
-    chunk
+    builder.finish()
 }
 
 fn read_i32_column(chunk: &DataChunk, col: usize) -> Vec<i32> {

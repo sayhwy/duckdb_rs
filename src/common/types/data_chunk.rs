@@ -36,6 +36,8 @@
 //! - `unsafe` 限于将 `Vec<u8>` 重新解释为类型化 slice（必要时）；
 //!   当前实现通过公开 `raw_data()` 接口将此决策推迟给调用方。
 
+use crate::common::errors::{Result, anyhow, bail};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // LogicalType（独立定义，作为 common/types 层的基础类型）
 // ─────────────────────────────────────────────────────────────────────────────
@@ -880,6 +882,11 @@ impl DataChunk {
         self.initialize_with_mask(types, &vec![true; types.len()], capacity);
     }
 
+    /// 创建一个用于填充当前 chunk 的 builder。
+    pub fn builder(types: &[LogicalType], capacity: usize) -> DataChunkBuilder {
+        DataChunkBuilder::new(types, capacity)
+    }
+
     /// 按 `initialize` 掩码选择性分配列缓冲区
     /// （C++: `Initialize(allocator, types, initialize, capacity)`）。
     pub fn initialize_with_mask(
@@ -1208,6 +1215,175 @@ impl Default for DataChunk {
     }
 }
 
+/// `DataChunk` 的便捷构造器。
+///
+/// 对外暴露按单元格写值的接口，隐藏底层字节布局细节。
+pub struct DataChunkBuilder {
+    chunk: DataChunk,
+    row_count: usize,
+}
+
+impl DataChunkBuilder {
+    pub fn new(types: &[LogicalType], capacity: usize) -> Self {
+        let mut chunk = DataChunk::new();
+        chunk.initialize(types, capacity);
+        Self { chunk, row_count: 0 }
+    }
+
+    pub fn finish(mut self) -> DataChunk {
+        self.chunk.set_cardinality(self.row_count);
+        self.chunk
+    }
+
+    fn touch_row(&mut self, row: usize) {
+        self.row_count = self.row_count.max(row + 1);
+    }
+
+    fn vector_mut(
+        &mut self,
+        col: usize,
+        row: usize,
+        expected: &[LogicalTypeId],
+    ) -> Result<&mut Vector> {
+        if col >= self.chunk.column_count() {
+            bail!(
+                "DataChunkBuilder: 列索引越界，col={}，column_count={}",
+                col,
+                self.chunk.column_count()
+            );
+        }
+        if row >= self.chunk.capacity() {
+            bail!(
+                "DataChunkBuilder: 行索引越界，row={}，capacity={}",
+                row,
+                self.chunk.capacity()
+            );
+        }
+        let actual_id = self.chunk.data[col].logical_type.id;
+        let actual_name = self.chunk.data[col].logical_type.name();
+        if !expected.contains(&actual_id) {
+            let expected_names = expected
+                .iter()
+                .map(|id| LogicalType::new(*id).name())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "DataChunkBuilder: 第 {} 列类型不匹配，expected [{}]，actual {}",
+                col,
+                expected_names,
+                actual_name
+            );
+        }
+        self.touch_row(row);
+        Ok(&mut self.chunk.data[col])
+    }
+
+    fn write_bytes(
+        &mut self,
+        col: usize,
+        row: usize,
+        expected: &[LogicalTypeId],
+        bytes: &[u8],
+    ) -> Result<&mut Self> {
+        let vector = self.vector_mut(col, row, expected)?;
+        let elem_size = vector.logical_type.physical_size();
+        if bytes.len() != elem_size {
+            bail!(
+                "DataChunkBuilder: 写入字节长度不匹配，expected {}，actual {}",
+                elem_size,
+                bytes.len()
+            );
+        }
+        let offset = row * elem_size;
+        vector.raw_data_mut()[offset..offset + elem_size].copy_from_slice(bytes);
+        vector.validity.set_valid(row);
+        Ok(self)
+    }
+
+    pub fn set_null(&mut self, col: usize, row: usize) -> Result<&mut Self> {
+        let vector = self.vector_mut(col, row, &[
+            LogicalTypeId::Boolean,
+            LogicalTypeId::TinyInt,
+            LogicalTypeId::SmallInt,
+            LogicalTypeId::Integer,
+            LogicalTypeId::BigInt,
+            LogicalTypeId::HugeInt,
+            LogicalTypeId::Float,
+            LogicalTypeId::Double,
+            LogicalTypeId::Varchar,
+            LogicalTypeId::Timestamp,
+            LogicalTypeId::Date,
+            LogicalTypeId::Time,
+            LogicalTypeId::Interval,
+            LogicalTypeId::UInteger,
+            LogicalTypeId::UTinyInt,
+            LogicalTypeId::USmallInt,
+            LogicalTypeId::UBigInt,
+            LogicalTypeId::Blob,
+        ])?;
+        let elem_size = vector.logical_type.physical_size();
+        let offset = row * elem_size;
+        vector.raw_data_mut()[offset..offset + elem_size].fill(0);
+        vector.validity.set_invalid(row);
+        Ok(self)
+    }
+
+    pub fn set_i32(&mut self, col: usize, row: usize, value: i32) -> Result<&mut Self> {
+        self.write_bytes(
+            col,
+            row,
+            &[LogicalTypeId::Integer, LogicalTypeId::Date],
+            &value.to_le_bytes(),
+        )
+    }
+
+    pub fn set_i64(&mut self, col: usize, row: usize, value: i64) -> Result<&mut Self> {
+        self.write_bytes(col, row, &[LogicalTypeId::BigInt], &value.to_le_bytes())
+    }
+
+    pub fn set_f32(&mut self, col: usize, row: usize, value: f32) -> Result<&mut Self> {
+        self.write_bytes(col, row, &[LogicalTypeId::Float], &value.to_le_bytes())
+    }
+
+    pub fn set_f64(&mut self, col: usize, row: usize, value: f64) -> Result<&mut Self> {
+        self.write_bytes(col, row, &[LogicalTypeId::Double], &value.to_le_bytes())
+    }
+
+    pub fn set_bool(&mut self, col: usize, row: usize, value: bool) -> Result<&mut Self> {
+        self.write_bytes(
+            col,
+            row,
+            &[LogicalTypeId::Boolean],
+            &[if value { 1 } else { 0 }],
+        )
+    }
+
+    pub fn set_varchar_inline(
+        &mut self,
+        col: usize,
+        row: usize,
+        value: &str,
+    ) -> Result<&mut Self> {
+        let vector = self.vector_mut(col, row, &[LogicalTypeId::Varchar])?;
+        let bytes = value.as_bytes();
+        if bytes.len() > 12 {
+            bail!(
+                "DataChunkBuilder: inline varchar 仅支持 <= 12 字节，actual {}",
+                bytes.len()
+            );
+        }
+
+        let offset = row * 16;
+        let dst = &mut vector.raw_data_mut()[offset..offset + 16];
+        dst.fill(0);
+        let len = u32::try_from(bytes.len()).map_err(|_| anyhow!("varchar 长度超过 u32"))?;
+        dst[..4].copy_from_slice(&len.to_le_bytes());
+        dst[4..4 + bytes.len()].copy_from_slice(bytes);
+        vector.validity.set_valid(row);
+        Ok(self)
+    }
+}
+
 // DataChunk 不可 Clone（C++: `DataChunk(const DataChunk&) = delete`）
 // 在 Rust 中不实现 Clone trait 即可。
 
@@ -1470,5 +1646,30 @@ mod tests {
         chunk.initialize(&types2(), 64);
         chunk.set_cardinality(10);
         chunk.verify(); // should not panic
+    }
+
+    #[test]
+    fn data_chunk_builder_writes_mixed_values() {
+        let types = vec![
+            LogicalType::integer(),
+            LogicalType::varchar(),
+            LogicalType::boolean(),
+            LogicalType::double(),
+        ];
+        let mut builder = DataChunkBuilder::new(&types, 2);
+        builder.set_i32(0, 0, 42).unwrap();
+        builder.set_varchar_inline(1, 0, "Alice").unwrap();
+        builder.set_bool(2, 0, true).unwrap();
+        builder.set_f64(3, 0, 88.5).unwrap();
+        builder.set_null(1, 1).unwrap();
+        let chunk = builder.finish();
+
+        assert_eq!(chunk.size(), 2);
+        assert_eq!(
+            i32::from_le_bytes(chunk.data[0].raw_data()[..4].try_into().unwrap()),
+            42
+        );
+        assert!(!chunk.data[1].validity.row_is_valid(1));
+        assert_eq!(chunk.data[2].raw_data()[0], 1);
     }
 }
