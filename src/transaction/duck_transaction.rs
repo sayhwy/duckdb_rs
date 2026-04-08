@@ -353,8 +353,15 @@ impl DuckTransaction {
         let entry_ref = self
             .undo_buffer
             .create_entry(UndoFlags::DeleteTuple, alloc_size);
-        // TODO: 将 info 序列化写入 entry_ref.payload_mut()
-        let _ = (entry_ref, info);
+        let mut payload = vec![0u8; alloc_size];
+        info.serialize(&mut payload);
+        self.undo_buffer.write_payload(
+            entry_ref
+                .slab_index
+                .expect("push_delete requires direct slab-backed undo entry"),
+            entry_ref.position,
+            &payload,
+        );
     }
 
     /// 记录一次 Append 操作到 Undo 日志（C++: `DuckTransaction::PushAppend()`）。

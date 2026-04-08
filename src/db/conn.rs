@@ -434,6 +434,7 @@ impl Connection {
             if chunk.size() == 0 {
                 break;
             }
+            chunk.flatten();
             chunks.push(chunk);
         }
 

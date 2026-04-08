@@ -18,4 +18,4 @@ path = "src/bin/test_duckdb_interop.rs"
 
 [[bin]]
 name = "read_million_students"
-path = "src/bin/read_million_students.rs"
+path = "src/bin/test_read_million_students.rs"

@@ -654,7 +654,48 @@ impl Vector {
                 self.validity.reset(count);
             }
             VectorType::Dictionary => {
-                todo!("将 Dictionary 向量展平：按 sel 重排 child 的数据")
+                let elem_size = self.logical_type.physical_size();
+                let selected_indices = self
+                    .sel
+                    .as_ref()
+                    .map(|sel| sel.indices[..count].to_vec());
+                let child_count = selected_indices
+                    .as_ref()
+                    .and_then(|indices| indices.iter().copied().max())
+                    .map(|max_idx| max_idx as usize + 1)
+                    .unwrap_or(count);
+
+                if let Some(child) = self.child.as_mut() {
+                    child.flatten(child_count);
+
+                    let mut flat = vec![0u8; count * elem_size];
+                    let mut validity = ValidityMask::new(count);
+                    validity.reset(count);
+
+                    for row_idx in 0..count {
+                        let src_row = selected_indices
+                            .as_ref()
+                            .map(|indices| indices[row_idx] as usize)
+                            .unwrap_or(row_idx);
+                        if src_row * elem_size + elem_size <= child.data.len() {
+                            let src = &child.data[src_row * elem_size..(src_row + 1) * elem_size];
+                            flat[row_idx * elem_size..(row_idx + 1) * elem_size]
+                                .copy_from_slice(src);
+                        }
+                        if !child.validity.row_is_valid(src_row) {
+                            validity.set_invalid(row_idx);
+                        }
+                    }
+
+                    self.data = flat;
+                    self.validity = validity;
+                } else {
+                    self.data = vec![0u8; count * elem_size];
+                    self.validity.reset(count);
+                }
+                self.child = None;
+                self.sel = None;
+                self.vector_type = VectorType::Flat;
             }
         }
     }

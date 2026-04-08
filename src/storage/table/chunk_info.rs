@@ -104,12 +104,12 @@ pub struct ChunkConstantInfo {
     /// The transaction that inserted all rows.
     /// `0` means committed-before-any-running-txn (always visible).
     pub insert_id: TransactionId,
-    /// The transaction that deleted all rows, or `TransactionId::MAX` if not deleted.
+    /// The transaction that deleted all rows, or `NOT_DELETED_ID` if not deleted.
     pub delete_id: TransactionId,
 }
 
 impl ChunkConstantInfo {
-    pub const NOT_DELETED: TransactionId = TransactionId::MAX;
+    pub const NOT_DELETED: TransactionId = NOT_DELETED_ID;
 
     pub fn new(start: Idx) -> Self {
         ChunkConstantInfo {
@@ -181,11 +181,10 @@ impl ChunkConstantInfo {
     /// Returns `true` when both the insert and delete (if any) are old enough that
     /// no active transaction can observe a different answer (C++: `ChunkConstantInfo::Cleanup`).
     pub fn can_cleanup(&self, lowest_transaction: TransactionId) -> bool {
-        // insert is committed and old enough
-        let insert_old = self.insert_id < lowest_transaction;
-        // delete is either not present, or committed and old enough
-        let delete_old = self.delete_id == NOT_DELETED_ID || self.delete_id < lowest_transaction;
-        insert_old && delete_old
+        if self.delete_id != NOT_DELETED_ID {
+            return false;
+        }
+        self.insert_id <= lowest_transaction
     }
 }
 
@@ -214,7 +213,7 @@ pub struct ChunkVectorInfo {
     constant_insert_id: TransactionId,
 
     /// Per-row delete transaction ids.
-    /// `TransactionId::MAX` = not deleted.
+    /// `NOT_DELETED_ID` = not deleted.
     deleted: Vec<TransactionId>,
 }
 
@@ -224,12 +223,12 @@ impl ChunkVectorInfo {
             start,
             inserted: None,
             constant_insert_id: insert_id,
-            deleted: vec![TransactionId::MAX; capacity],
+            deleted: vec![NOT_DELETED_ID; capacity],
         }
     }
 
     pub fn has_deletes(&self) -> bool {
-        self.deleted.iter().any(|&d| d != TransactionId::MAX)
+        self.deleted.iter().any(|&d| d != NOT_DELETED_ID)
     }
 
     pub fn set_all_deleted(&mut self, delete_id: TransactionId) {
@@ -325,7 +324,12 @@ impl ChunkVectorInfo {
     }
 
     /// Marks rows in `rows[..count]` as deleted by `transaction_id`.
-    /// Returns the number of rows actually deleted (skips already-deleted rows).
+    /// Returns the number of rows actually deleted.
+    ///
+    /// Mirrors DuckDB `ChunkVectorInfo::Delete`:
+    /// - duplicate deletes within the same transaction are ignored
+    /// - deletes that conflict with another transaction raise an error
+    /// - `rows[..deleted_count]` is compacted to the rows actually deleted
     pub fn delete_rows(
         &mut self,
         transaction_id: TransactionId,
@@ -342,11 +346,26 @@ impl ChunkVectorInfo {
             if idx >= self.deleted.len() {
                 continue;
             }
-            if self.deleted[idx] == NOT_DELETED_ID {
-                self.deleted[idx] = transaction_id;
-                rows[deleted as usize] = row;
-                deleted += 1;
+            if self.deleted[idx] == transaction_id {
+                continue;
             }
+            if self.deleted[idx] != NOT_DELETED_ID {
+                for rollback_idx in 0..idx_in_rows {
+                    let rollback_row = rows[rollback_idx];
+                    if rollback_row < 0 {
+                        continue;
+                    }
+                    let rollback_pos = rollback_row as usize;
+                    if rollback_pos < self.deleted.len() && self.deleted[rollback_pos] == transaction_id
+                    {
+                        self.deleted[rollback_pos] = NOT_DELETED_ID;
+                    }
+                }
+                panic!("Conflict on tuple deletion!");
+            }
+            self.deleted[idx] = transaction_id;
+            rows[deleted as usize] = row;
+            deleted += 1;
         }
         deleted
     }
@@ -380,15 +399,13 @@ impl ChunkVectorInfo {
     }
 
     pub fn can_cleanup(&self, lowest_transaction: TransactionId) -> bool {
-        let inserts_old = match &self.inserted {
-            Some(inserted) => inserted.iter().all(|&id| id < lowest_transaction),
-            None => self.constant_insert_id < lowest_transaction,
-        };
-        let deletes_old = self
-            .deleted
-            .iter()
-            .all(|&id| id == NOT_DELETED_ID || id < lowest_transaction);
-        inserts_old && deletes_old
+        if self.any_deleted() {
+            return false;
+        }
+        match &self.inserted {
+            Some(inserted) => inserted.iter().all(|&id| id <= lowest_transaction),
+            None => self.constant_insert_id <= lowest_transaction,
+        }
     }
 
     pub fn get_committed_sel_vector(
