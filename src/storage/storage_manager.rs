@@ -1012,7 +1012,7 @@ impl StorageManager for SingleFileStorageManager {
     }
 
     fn checkpoint_wal_path(&self) -> String {
-        Self::compute_wal_path(&self.path, ".checkpoint.wal")
+        Self::compute_wal_path(&self.path, ".wal.checkpoint")
     }
 
     // ── Checkpoint ────────────────────────────────────────────────────────────
@@ -1029,7 +1029,7 @@ impl StorageManager for SingleFileStorageManager {
         //   4. if (GetWALSize() == 0) return false
         //   5. wal->WriteCheckpoint(meta_block); wal->Flush()
         //   6. wal.reset()
-        //   7. 创建 checkpoint WAL（.checkpoint.wal），next_checkpoint_iteration
+        //   7. 创建 checkpoint WAL（.wal.checkpoint），next_checkpoint_iteration
 
         let mut wal_state = self.wal_state.lock();
 
@@ -1068,9 +1068,9 @@ impl StorageManager for SingleFileStorageManager {
         // 关闭主 WAL
         wal_state.wal = None;
 
-        // 创建 checkpoint WAL（.checkpoint.wal）
+        // 创建 checkpoint WAL（.wal.checkpoint）
         // C++: fs.TryRemoveFile(checkpoint_wal_path) — 删除残留的旧 checkpoint WAL
-        let checkpoint_wal_path = Self::compute_wal_path(&self.path, ".checkpoint.wal");
+        let checkpoint_wal_path = Self::compute_wal_path(&self.path, ".wal.checkpoint");
         let _ = std::fs::remove_file(&checkpoint_wal_path); // 忽略不存在的情况
 
         // C++: SingleFileBlockManager::GetCheckpointIteration() + 1
@@ -1124,7 +1124,7 @@ impl StorageManager for SingleFileStorageManager {
             let checkpoint_path = wal.wal_path.clone();
             drop(wal);
 
-            // C++: fs.MoveFile(.checkpoint.wal → .wal) — 原子替换主 WAL
+            // C++: fs.MoveFile(.wal.checkpoint → .wal) — 原子替换主 WAL
             // 这样主 WAL 包含 Checkpoint 之后的并发写入，可安全重放
             if let Err(e) = std::fs::rename(&checkpoint_path, &wal_state.wal_path) {
                 // 若 rename 失败（跨设备等情况），尝试 copy + remove

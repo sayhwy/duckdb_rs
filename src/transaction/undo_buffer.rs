@@ -186,6 +186,7 @@ impl UndoBuffer {
     /// ```
     pub fn write_to_wal(
         &self,
+        transaction: crate::storage::table::types::TransactionData,
         commit_state: &mut dyn crate::storage::storage_manager::StorageCommitState,
         tables: &std::collections::HashMap<
             u64,
@@ -217,13 +218,15 @@ impl UndoBuffer {
         impl<'a> crate::transaction::wal_write_state::AppendWriter for TableAppendWriter<'a> {
             fn write_append(
                 &mut self,
+                transaction: crate::storage::table::types::TransactionData,
                 log: &crate::storage::write_ahead_log::WriteAheadLog,
+                commit_state: Option<&mut dyn crate::storage::storage_manager::StorageCommitState>,
                 table_id: u64,
                 start_row: u64,
                 count: u64,
             ) {
                 if let Some(table) = self.tables.get(&table_id) {
-                    let _ = table.write_to_log(log, start_row, count, None);
+                    let _ = table.write_to_log(transaction, log, start_row, count, commit_state);
                 }
             }
         }
@@ -231,6 +234,7 @@ impl UndoBuffer {
         let append_writer =
             include_appends.then(|| Box::new(TableAppendWriter { tables }) as Box<_>);
         let mut wal_state = crate::transaction::wal_write_state::WALWriteState::new(
+            transaction,
             wal.as_ref(),
             Some(commit_state),
             table_names,

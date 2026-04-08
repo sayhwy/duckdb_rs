@@ -1,91 +1,42 @@
-//! `DuckdbEngine` 和 `DuckConnection`：数据库引擎与连接的具体实现。
-//!
-//! # 架构
-//!
-//! ```text
-//! DuckdbEngine
-//!   └── db: Arc<Mutex<InnerDatabase>>   — 单一数据库实例
-//!         └── connect() → DuckConnection
-//!                           ├── conn: Connection        — 底层连接（ClientContext + TransactionContext）
-//!                           ├── db: Arc<Mutex<InnerDatabase>>  — DDL 操作句柄（与 engine.db 同一实例）
-//!                           └── schemas: HashSet<String>       — 已注册的 schema 名称
-//! ```
-//!
-//! # 设计说明
-//!
-//! `DuckdbEngine` 管理**单个**数据库文件（或内存库）。
-//! 原先用 `HashMap<String, Arc<Mutex<InnerDatabase>>>` 表示多库，但：
-//! - `connect()` 只能连默认库，附加库永远无法操作；
-//! - 已移除 `MetaTransaction` 后不再支持跨库事务。
-//!
-//! 简化为持有单个 `Arc<Mutex<InnerDatabase>>`，所有歧义消除。
-//!
-//! # 多连接并发示例
-//!
-//! ```rust
-//! let engine = DuckdbEngine::open("mydb.db")?;
-//!
-//! let mut conn1 = engine.connect();
-//! conn1.create_schema("main")?;
-//! conn1.create_table("main", "items", columns)?;
-//! conn1.begin_transaction()?;
-//! conn1.insert("items", &mut chunk)?;
-//!
-//! // conn2 与 conn1 共享同一个 DatabaseInstance（事务独立）
-//! let conn2 = engine.connect();
-//! conn2.begin_transaction()?;
-//! let data = conn2.scan("items", None)?;
-//! conn2.commit()?;
-//!
-//! conn1.commit()?;
-//! ```
-
 use std::collections::HashSet;
 use std::sync::Arc;
-
-use parking_lot::Mutex;
-
-use super::InnerDatabase;
 use super::engine::{EngineError, SchemaInfo, SchemaTableInfo};
 use crate::common::types::{DataChunk, LogicalType};
-use crate::db::conn::Connection;
+use crate::db::conn::{Connection, DatabaseInstance};
 
 // ─── DuckdbEngine ──────────────────────────────────────────────────────────────
 
 /// DuckDB 引擎：管理单个数据库实例，提供连接工厂。
-pub struct DuckdbEngine {
+pub struct DuckEngine {
     /// 底层数据库实例（Arc 允许多个 DuckConnection 共享）。
-    db: Arc<Mutex<InnerDatabase>>,
+    db: Arc<DatabaseInstance>,
 }
 
-impl DuckdbEngine {
+impl DuckEngine {
     /// 打开（或创建）数据库文件，返回引擎实例。
     ///
     /// - `path = ":memory:"` → 纯内存数据库，进程退出后数据丢失。
     /// - `path = "mydb.db"` → 持久化文件，自动加载已有数据并回放 WAL。
     pub fn open(path: impl Into<String>) -> Result<Self, EngineError> {
-        let db = InnerDatabase::open(path).map_err(|e| format!("open db failed: {:?}", e))?;
-        Ok(Self {
-            db: Arc::new(Mutex::new(db)),
-        })
+        let db = DatabaseInstance::open(path).map_err(|e| format!("open db failed: {:?}", e))?;
+        Ok(Self { db })
     }
 
     /// 返回数据库文件路径。
     pub fn path(&self) -> String {
-        self.db.lock().path().to_string()
+        self.db.path.clone()
     }
 
     /// 将内存/WAL 数据持久化到磁盘（显式 checkpoint）。
     pub fn checkpoint(&self) -> Result<(), EngineError> {
         self.db
-            .lock()
             .checkpoint()
             .map_err(|e| format!("checkpoint failed: {:?}", e))
     }
 
     /// 返回默认 schema（`"main"`）下的所有表名。
     pub fn tables(&self) -> Vec<String> {
-        self.db.lock().tables()
+        self.db.tables()
     }
 
     /// 创建一个新的独立连接。
@@ -93,7 +44,7 @@ impl DuckdbEngine {
     /// 每个 `DuckConnection` 拥有独立的 `ClientContext` 和 `TransactionContext`，
     /// 但与同一引擎上的其他连接共享同一个 `DatabaseInstance`（存储 + 事务管理器）。
     pub fn connect(&self) -> DuckConnection {
-        let conn = self.db.lock().connect();
+        let conn = self.db.connect();
         let mut schemas = HashSet::new();
         schemas.insert("main".to_string());
         DuckConnection {
@@ -104,14 +55,11 @@ impl DuckdbEngine {
     }
 }
 
-/// 向后兼容的旧类型名。
-pub type DuckEngine = DuckdbEngine;
-
 // ─── DuckConnection ────────────────────────────────────────────────────────────
 
 /// 数据库连接（操作层）。
 ///
-/// 通过 [`DuckdbEngine::connect`] 创建，持有：
+/// 通过 [`DuckEngine::connect`] 创建，持有：
 /// - `conn`：独立的底层连接（事务状态隔离）。
 /// - `db`：与引擎共享的数据库实例引用（DDL 修改元数据用）。
 /// - `schemas`：本连接可见的 schema 名称集合。
@@ -122,7 +70,7 @@ pub struct DuckConnection {
     /// 数据库实例引用（用于 DDL：`create_table` 需修改全局 tables 映射）。
     ///
     /// 与创建本连接的 `DuckdbEngine.db` 指向同一个对象。
-    db: Arc<Mutex<InnerDatabase>>,
+    db: Arc<DatabaseInstance>,
 
     /// 本连接已注册的 schema 名称（默认包含 `"main"`）。
     schemas: HashSet<String>,
@@ -201,8 +149,7 @@ impl DuckConnection {
         if !self.schemas.contains(schema_name) {
             return Err(format!("Schema '{}' not found", schema_name));
         }
-        let db = self.db.lock();
-        let tables_guard = db.instance().tables.lock();
+        let tables_guard = self.db.tables.lock();
         let schema_tables: Vec<SchemaTableInfo> = tables_guard
             .values()
             .filter(|t| t.catalog_entry.base.schema_name == schema_name)
@@ -238,11 +185,7 @@ impl DuckConnection {
                 schema, schema
             ));
         }
-        self.db.lock().create_table(schema, table, columns);
+        self.db.create_table(schema, table, columns);
         Ok(())
     }
 }
-
-// ─── 内部工具函数 ─────────────────────────────────────────────────────────────
-
-// derive_db_name 已移除：引擎不再需要为数据库注册名称（单库无需 HashMap key）。

@@ -32,6 +32,7 @@ use super::append_info::AppendInfo;
 use super::delete_info::DeleteInfo;
 use super::types::UndoFlags;
 use super::update_info::UpdateInfo;
+use crate::storage::table::types::TransactionData;
 use crate::storage::storage_manager::StorageCommitState;
 use crate::storage::write_ahead_log::WriteAheadLog;
 
@@ -245,13 +246,23 @@ impl SequenceValueUndoData {
 /// - `start_row`：追加起始行号（C++: `idx_t start_row`）。
 /// - `count`：追加行数（C++: `idx_t count`）。
 pub trait AppendWriter {
-    fn write_append(&mut self, log: &WriteAheadLog, table_id: u64, start_row: u64, count: u64);
+    fn write_append(
+        &mut self,
+        transaction: TransactionData,
+        log: &WriteAheadLog,
+        commit_state: Option<&mut dyn StorageCommitState>,
+        table_id: u64,
+        start_row: u64,
+        count: u64,
+    );
 }
 
 // ─── WALWriteState ────────────────────────────────────────────────────────────
 
 /// WAL 写入阶段 Undo 遍历状态机（C++: `class WALWriteState`）。
 pub struct WALWriteState<'wal> {
+    /// 提交事务的可见性上下文（C++: `DuckTransaction &transaction`）。
+    transaction: TransactionData,
     /// WAL 写入器（C++: `WriteAheadLog &log`）。
     log: &'wal WriteAheadLog,
 
@@ -277,12 +288,14 @@ impl<'wal> WALWriteState<'wal> {
     /// `table_names`：将表 ID 映射到 `(schema, table)` 名称，用于 [`SwitchTable`] 写 USE_TABLE 记录。
     /// `append_writer`：处理 INSERT_TUPLE 的委托，对应 C++ `DataTable::WriteToLog`。
     pub fn new(
+        transaction: TransactionData,
         log: &'wal WriteAheadLog,
         commit_state: Option<&'wal mut dyn StorageCommitState>,
         table_names: HashMap<u64, (String, String)>,
         append_writer: Option<Box<dyn AppendWriter + 'wal>>,
     ) -> Self {
         Self {
+            transaction,
             log,
             commit_state,
             current_table: None,
@@ -480,7 +493,18 @@ impl<'wal> WALWriteState<'wal> {
         }
 
         if let Some(writer) = self.append_writer.as_mut() {
-            writer.write_append(self.log, info.table_id, info.start_row, info.count);
+            let commit_state = self
+                .commit_state
+                .as_deref_mut()
+                .map(|state| state as *mut dyn StorageCommitState);
+            writer.write_append(
+                self.transaction,
+                self.log,
+                commit_state.map(|ptr| unsafe { &mut *ptr }),
+                info.table_id,
+                info.start_row,
+                info.count,
+            );
         }
     }
 

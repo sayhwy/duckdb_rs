@@ -153,6 +153,10 @@ impl<'a> BinaryMetadataDeserializer<'a> {
         Ok(self.read_u16())
     }
 
+    pub fn buffer_field(&mut self, field: u16) {
+        self.buffered_field = Some(field);
+    }
+
     pub fn expect_field(&mut self, expected: u16) -> io::Result<()> {
         let field = self.next_field()?;
         if field != expected {

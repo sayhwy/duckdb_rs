@@ -621,8 +621,7 @@ impl RowGroupCollection {
 
         state.row_group_index = Some(node_index);
         let vector_offset = (start_row - row_group_start) / super::types::STANDARD_VECTOR_SIZE;
-        state.max_row = (row_group_start + row_group_count).min(state.max_row);
-        let _ = row_group.initialize_scan_with_offset(state, node_index, vector_offset);
+        let _ = row_group.initialize_scan_with_offset(state, row_group_start, vector_offset);
     }
 
     pub fn revert_append_internal(&self, start_row: Idx) {

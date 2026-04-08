@@ -12,15 +12,15 @@
 //! - 管理自动提交（`auto_commit`）模式。
 //! - 提供 `begin_transaction / commit / rollback` 统一入口。
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 
 use super::duck_transaction_manager::{DuckTransactionManager, DuckTxnHandle};
 use super::transaction::Transaction;
 use super::transaction_manager::ErrorData;
-use super::types::{TransactionId, MAXIMUM_QUERY_ID};
+use super::types::{MAXIMUM_QUERY_ID, TransactionId};
 
 // ─── TransactionError ──────────────────────────────────────────────────────────
 
@@ -48,7 +48,9 @@ impl std::error::Error for TransactionError {}
 
 impl From<ErrorData> for TransactionError {
     fn from(err: ErrorData) -> Self {
-        Self { message: err.message }
+        Self {
+            message: err.message,
+        }
     }
 }
 
@@ -158,7 +160,10 @@ impl TransactionContext {
         self.auto_commit.store(true, Ordering::Relaxed);
 
         let txn_ref = Arc::clone(&txn) as Arc<dyn Transaction>;
-        match self.transaction_manager.commit_transaction(&self.db, &txn_ref) {
+        match self
+            .transaction_manager
+            .commit_transaction(&self.db, &txn_ref)
+        {
             None => Ok(()),
             Some(err) => Err(err.into()),
         }

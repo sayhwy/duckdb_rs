@@ -15,7 +15,7 @@ use duckdb_rs::db::DuckEngine;
 
 // ─── 配置 ─────────────────────────────────────────────────────────────────────
 
-const DUCKDB_EXE: &str = "D:/duckdb";
+const DUCKDB_EXE: &str = "/Users/liang/Documents/code/duckdb/bin/duckdb";
 const TEST_DB_RUST: &str = "student_rust.db";
 const TEST_DB_DUCKDB: &str = "student_duckdb.db";
 
@@ -42,7 +42,7 @@ fn main() {
     let create_sql = r#"
 SET force_compression='uncompressed';
 CREATE TABLE students (
-    id INTEGER PRIMARY KEY,
+    id INTEGER,
     age INTEGER,
     score DOUBLE,
     class_id BIGINT
@@ -158,7 +158,15 @@ INSERT INTO students VALUES
 
 fn test_rust_read_duckdb_file() -> Result<Vec<String>, String> {
     let engine = std::panic::catch_unwind(|| DuckEngine::open(TEST_DB_DUCKDB))
-        .map_err(|_| "打开 DuckDB 文件时发生 panic".to_string())?
+        .map_err(|panic| {
+            if let Some(msg) = panic.downcast_ref::<&str>() {
+                format!("打开 DuckDB 文件时发生 panic: {msg}")
+            } else if let Some(msg) = panic.downcast_ref::<String>() {
+                format!("打开 DuckDB 文件时发生 panic: {msg}")
+            } else {
+                "打开 DuckDB 文件时发生 panic".to_string()
+            }
+        })?
         .map_err(|e| format!("无法打开数据库: {:?}", e))?;
 
     let tables = engine.tables();

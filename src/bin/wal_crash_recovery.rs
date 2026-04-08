@@ -68,7 +68,7 @@ fn run_scenario(
     cleanup(db_path);
 
     let wal_path = format!("{}.wal", db_path);
-    let checkpoint_wal_path = format!("{}.checkpoint.wal", db_path);
+    let checkpoint_wal_path = format!("{}.wal.checkpoint", db_path);
 
     println!("=== {} ===", name);
     println!("数据库文件: {}", db_path);
@@ -266,7 +266,7 @@ fn count_rows(engine: &DuckEngine) -> usize {
 }
 
 fn cleanup(db_path: &str) {
-    for suffix in ["", ".wal", ".checkpoint.wal", ".wal.recovery"] {
+    for suffix in ["", ".wal", ".wal.checkpoint", ".wal.recovery"] {
         let path = format!("{}{}", db_path, suffix);
         if Path::new(&path).exists() {
             fs::remove_file(&path).unwrap_or_else(|e| panic!("删除 {} 失败: {}", path, e));

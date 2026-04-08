@@ -955,18 +955,12 @@ impl DuckTransactionManager {
             };
             // 完整提交：LocalStorage 合并到主存储 + UndoBuffer 版本号更新
             // C++: transaction.Commit(db, info, commit_state) 内部先 storage->Commit() 再 undo_buffer.Commit()
-            if let Err(e) = handle.inner.lock().commit(commit_info, None, &tables) {
+            if let Err(e) = handle
+                .inner
+                .lock()
+                .commit(commit_info, commit_state.as_mut(), &tables)
+            {
                 commit_error = Some(ErrorData::new(e));
-            }
-
-            // C++: if (commit_state) { commit_state->FlushCommit(); }
-            // 提交成功后，flush WAL 到磁盘
-            if commit_error.is_none() {
-                if let Some(ref mut state) = commit_state {
-                    if let Err(e) = state.flush_commit() {
-                        commit_error = Some(ErrorData::new(format!("FlushCommit failed: {:?}", e)));
-                    }
-                }
             }
         }
 
@@ -1049,8 +1043,6 @@ impl DuckTransactionManager {
                     transaction_id: Some(txn_id),
                 };
 
-                // 执行 checkpoint（忽略错误，checkpoint 失败不影响事务提交）
-                // C++: storage_manager.CreateCheckpoint(context, options);
                 let _ = storage_mgr.create_checkpoint(checkpoint_options);
             }
 

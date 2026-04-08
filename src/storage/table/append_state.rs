@@ -12,10 +12,10 @@
 
 use std::sync::Arc;
 
-use parking_lot::{Mutex, MutexGuard};
-
 use super::table_statistics::TableStatistics;
 use super::types::{Idx, RowId, TransactionData};
+use crate::storage::local_storage::LocalTableStorage;
+use parking_lot::{Mutex, MutexGuard};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ColumnAppendState
@@ -199,7 +199,7 @@ pub struct LocalAppendState {
     ///
     /// Set by `LocalStorage::initialize_append_state`; stays `None` until
     /// `initialize_local_append` has been called.
-    pub storage: Option<Arc<Mutex<crate::storage::local_storage::LocalTableStorage>>>,
+    pub storage: Option<Arc<Mutex<LocalTableStorage>>>,
 
     /// Constraint verification state for this insert batch.
     ///

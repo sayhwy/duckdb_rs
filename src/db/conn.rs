@@ -163,9 +163,7 @@ impl ClientContext {
         self.transaction.begin_transaction()
     }
 
-    pub fn commit(
-        &self,
-    ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
+    pub fn commit(&self) -> Result<(), crate::transaction::transaction_context::TransactionError> {
         self.transaction.commit()
     }
 
@@ -217,7 +215,10 @@ impl Connection {
     pub fn new(db: Arc<DatabaseInstance>) -> Self {
         let context = Arc::new(Mutex::new(ClientContext::new(db)));
         let connection_id = context.lock().connection_id;
-        Self { context, connection_id }
+        Self {
+            context,
+            connection_id,
+        }
     }
 
     pub fn connection_id(&self) -> ConnectionId {
@@ -232,9 +233,7 @@ impl Connection {
         self.context.lock().begin_transaction()
     }
 
-    pub fn commit(
-        &self,
-    ) -> Result<(), crate::transaction::transaction_context::TransactionError> {
+    pub fn commit(&self) -> Result<(), crate::transaction::transaction_context::TransactionError> {
         self.context.lock().commit()
     }
 
@@ -309,7 +308,10 @@ impl Connection {
 
     /// 获取写事务句柄（短暂锁 context 后释放）。
     fn acquire_write_transaction(&self) -> Arc<DuckTxnHandle> {
-        self.context.lock().transaction.get_or_create_write_transaction()
+        self.context
+            .lock()
+            .transaction
+            .get_or_create_write_transaction()
     }
 
     /// 获取读事务句柄（短暂锁 context 后释放）。
@@ -416,7 +418,9 @@ impl Connection {
         let txn = self.acquire_read_transaction();
 
         let mut state = crate::storage::table::scan_state::TableScanState::new();
-        table.storage.initialize_scan(&mut state, column_ids.clone(), None);
+        table
+            .storage
+            .initialize_scan(&mut state, column_ids.clone(), None);
         {
             let txn_guard = txn.lock_inner();
             txn_guard.storage.initialize_scan_state(

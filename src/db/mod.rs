@@ -2,7 +2,7 @@ pub mod conn;
 pub mod duck_engine;
 pub mod engine;
 
-pub use duck_engine::{DuckConnection, DuckEngine, DuckdbEngine};
+pub use duck_engine::{DuckConnection, DuckEngine};
 pub use engine::{EngineError, SchemaInfo, SchemaTableInfo};
 
 use std::collections::HashMap;
@@ -34,35 +34,7 @@ use crate::storage::write_ahead_log::WalInitState;
 use crate::storage::{SingleFileBlockManager, StandardBufferManager};
 use crate::transaction::duck_transaction_manager::DuckTransactionManager;
 
-/// 数据库实例（C++: `class DuckDB` / `DatabaseInstance`）。
-///
-/// 支持多个连接，每个连接有独立的事务。
-///
-/// # 使用示例
-///
-/// ```rust
-/// let db = DB::open(":memory:")?;
-///
-/// // 方式 1: 使用 DB 的便捷方法（自动提交模式）
-/// db.insert_chunk("my_table", &mut chunk)?;
-///
-/// // 方式 2: 使用 Connection 进行手动事务控制
-/// let conn = db.connect();
-/// conn.begin_transaction()?;
-/// conn.insert_chunk("my_table", &mut chunk)?;
-/// conn.commit()?;
-/// ```
-struct InnerDatabase {
-    /// 数据库实例（支持多连接）。
-    instance: Arc<DatabaseInstance>,
-
-    /// 数据库路径（用于 checkpoint）。
-    path: String,
-    // catalog_entries 已移除：仅在 open() 时用于构建 TableHandle，
-    // 构建完成后不再需要，以前驻留在此字段属于无效内存占用。
-}
-
-impl InnerDatabase {
+impl DatabaseInstance {
     /// 打开数据库（C++: `DuckDB::OpenOrCreate`）。
     ///
     /// # 参数
@@ -70,7 +42,7 @@ impl InnerDatabase {
     ///
     /// # 返回
     /// 成功返回 `DB` 实例，失败返回错误。
-    pub fn open(path: impl Into<String>) -> StorageResult<Self> {
+    pub fn open(path: impl Into<String>) -> StorageResult<Arc<Self>> {
         let path = path.into();
         let storage_manager = Arc::new(SingleFileStorageManager::new(
             path.clone(),
@@ -121,7 +93,7 @@ impl InnerDatabase {
         // catalog_entries 用完即丢，不再存储在结构体中
         let _ = catalog_entries;
 
-        Ok(Self { instance, path })
+        Ok(instance)
     }
 
     /// 创建新连接（C++: `DuckDB::Connect()`）。
@@ -142,22 +114,12 @@ impl InnerDatabase {
     /// conn.insert_chunk("my_table", &mut chunk)?;
     /// conn.commit()?;
     /// ```
-    pub fn connect(&self) -> Connection {
-        Connection::new(self.instance.clone())
-    }
-
-    /// 获取数据库实例引用。
-    pub fn instance(&self) -> &Arc<DatabaseInstance> {
-        &self.instance
-    }
-
-    /// 获取存储管理器引用。
-    pub fn storage_manager(&self) -> &Arc<SingleFileStorageManager> {
-        &self.instance.storage_manager
+    pub fn connect(self: &Arc<Self>) -> Connection {
+        Connection::new(self.clone())
     }
 
     /// 创建表（C++: `CreateTable`）。
-    pub fn create_table(&mut self, schema: &str, table: &str, columns: Vec<(String, LogicalType)>) {
+    pub fn create_table(&self, schema: &str, table: &str, columns: Vec<(String, LogicalType)>) {
         let catalog_columns: Vec<CatalogColumnDefinition> = columns
             .iter()
             .map(|(name, ty)| CatalogColumnDefinition::new(name.clone(), to_catalog_type(ty)))
@@ -185,21 +147,24 @@ impl InnerDatabase {
                 .unwrap_or("duckdb")
         };
 
-        let tables = self.instance.tables.lock();
+        let tables = self.tables.lock();
         let table_id = tables.len() as u64 + 1;
         drop(tables);
 
         let catalog_entry = TableCatalogEntry::new(catalog_name, schema, table_id, create_info);
         let storage = DataTable::new(1, table_id, schema, table, storage_columns, None);
-        self.instance.tables.lock().insert(
+        self.tables.lock().insert(
             (normalize_name(schema), normalize_name(table)),
-            TableHandle { catalog_entry, storage },
+            TableHandle {
+                catalog_entry,
+                storage,
+            },
         );
     }
 
     /// 获取所有表名。
     pub fn tables(&self) -> Vec<String> {
-        self.instance
+        self
             .tables
             .lock()
             .values()
@@ -207,10 +172,14 @@ impl InnerDatabase {
             .collect()
     }
 
-/// 插入数据块（便捷方法，使用自动提交模式）。
+    /// 插入数据块（便捷方法，使用自动提交模式）。
     ///
     /// 如果需要手动事务控制，请使用 `connect()` 获取连接后操作。
-    pub fn insert_chunk(&self, table_name: &str, chunk: &mut DataChunk) -> StorageResult<()> {
+    pub fn insert_chunk(
+        self: &Arc<Self>,
+        table_name: &str,
+        chunk: &mut DataChunk,
+    ) -> StorageResult<()> {
         let conn = self.connect();
         conn.insert_chunk(table_name, chunk)
             .map_err(|e| StorageError::Corrupt { msg: e })
@@ -218,7 +187,7 @@ impl InnerDatabase {
 
     /// 更新表中指定行（便捷方法，使用自动提交模式）。
     pub fn update_chunk(
-        &self,
+        self: &Arc<Self>,
         table_name: &str,
         row_ids: &[i64],
         column_ids: &[u64],
@@ -229,7 +198,11 @@ impl InnerDatabase {
             .map_err(|e| StorageError::Corrupt { msg: e })
     }
 
-    pub fn delete_chunk(&self, table_name: &str, row_ids: &[i64]) -> StorageResult<usize> {
+    pub fn delete_chunk(
+        self: &Arc<Self>,
+        table_name: &str,
+        row_ids: &[i64],
+    ) -> StorageResult<usize> {
         let conn = self.connect();
         conn.delete_chunk(table_name, row_ids)
             .map_err(|e| StorageError::Corrupt { msg: e })
@@ -237,12 +210,12 @@ impl InnerDatabase {
 
     /// 扫描表数据（便捷方法，打印输出）。
     pub fn scan_chunks(
-        &self,
+        self: &Arc<Self>,
         table_name: &str,
         column_ids: Option<Vec<u64>>,
     ) -> StorageResult<Vec<DataChunk>> {
         let key = crate::db::conn::parse_table_name(table_name);
-        let tables = self.instance.tables.lock();
+        let tables = self.tables.lock();
         let table = tables
             .get(&key)
             .ok_or_else(|| StorageError::Corrupt {
@@ -503,18 +476,14 @@ impl InnerDatabase {
         println!();
     }
 
-    pub fn path(&self) -> &str {
-        &self.path
-    }
-
     /// 扫描表数据，不打印输出（适合大数据量批量读取）。
     pub fn scan_chunks_silent(
-        &self,
+        self: &Arc<Self>,
         table_name: &str,
         column_ids: Option<Vec<u64>>,
     ) -> StorageResult<Vec<DataChunk>> {
         let key = crate::db::conn::parse_table_name(table_name);
-        let tables = self.instance.tables.lock();
+        let tables = self.tables.lock();
         let table = tables
             .get(&key)
             .ok_or_else(|| StorageError::Corrupt {
@@ -577,7 +546,7 @@ impl InnerDatabase {
     /// 2. 表数据（RowGroups）
     /// 3. 更新 DatabaseHeader
     pub fn checkpoint(&self) -> StorageResult<()> {
-        self.instance.storage_manager.create_checkpoint(
+        self.storage_manager.create_checkpoint(
             crate::storage::storage_manager::CheckpointOptions {
                 action: crate::storage::storage_manager::CheckpointAction::AlwaysCheckpoint,
                 transaction_id: None,
@@ -587,7 +556,7 @@ impl InnerDatabase {
 }
 
 #[cfg(test)]
-type DB = InnerDatabase;
+type DB = DatabaseInstance;
 
 fn normalize_name(name: &str) -> String {
     name.to_ascii_lowercase()
@@ -606,17 +575,12 @@ impl RecoveryCatalog {
 
     fn table_handle(&self, schema: &str, table: &str) -> WalResult<TableHandle> {
         let key = (normalize_name(schema), normalize_name(table));
-        self.db
-            .tables
-            .lock()
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| {
-                WalError::Corrupt(format!(
-                    "table {}.{} not found during WAL replay",
-                    schema, table
-                ))
-            })
+        self.db.tables.lock().get(&key).cloned().ok_or_else(|| {
+            WalError::Corrupt(format!(
+                "table {}.{} not found during WAL replay",
+                schema, table
+            ))
+        })
     }
 }
 
@@ -1727,9 +1691,16 @@ mod tests {
 
     /// Helper: cleanup a database file.
     fn cleanup_db(path: &str) {
-        let _ = std::fs::remove_file(path);
-        let wal_path = format!("{}.wal", path);
-        let _ = std::fs::remove_file(&wal_path);
+        for suffix in [
+            "",
+            ".wal",
+            ".wal.checkpoint",
+            ".wal.recovery",
+            ".checkpoint.wal",
+        ] {
+            let candidate = format!("{}{}", path, suffix);
+            let _ = std::fs::remove_file(candidate);
+        }
     }
 
     /// Test: create a persistent database, insert data, checkpoint, and verify persistence.

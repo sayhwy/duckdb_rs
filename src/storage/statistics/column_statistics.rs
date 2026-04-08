@@ -169,11 +169,6 @@ impl ColumnStatistics {
                                 format!("after DistinctStatistics expected terminator, got {next}"),
                             ));
                         }
-                    } else {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "ColumnStatistics distinct field present but nullable flag is false",
-                        ));
                     }
                 }
                 MESSAGE_TERMINATOR_FIELD_ID => {

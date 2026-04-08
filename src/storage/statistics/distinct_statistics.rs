@@ -32,7 +32,8 @@ struct HyperLogLog {
 
 impl HyperLogLog {
     fn new() -> Self {
-        let precision = 14; // 2^14 = 16384 registers
+        // DuckDB 的持久化格式使用 64 个寄存器（HLL_V2）。
+        let precision = 6;
         let m = 1 << precision;
         Self {
             registers: vec![0; m],
@@ -97,7 +98,7 @@ impl HyperLogLog {
     }
 
     fn serialize_checkpoint(&self, serializer: &mut BinarySerializer<'_>) {
-        serializer.write_varint(100, self.precision as u64);
+        serializer.write_varint(100, HLL_STORAGE_V2);
         serializer.write_bytes(101, &self.registers);
     }
 
@@ -304,9 +305,10 @@ impl DistinctStatistics {
     pub fn serialize_checkpoint(&self, serializer: &mut BinarySerializer<'_>) {
         serializer.write_varint(100, self.sample_count.load(Ordering::Relaxed));
         serializer.write_varint(101, self.total_count.load(Ordering::Relaxed));
-        serializer.begin_object(102);
+        serializer.begin_nullable_object(102);
         self.log.serialize_checkpoint(serializer);
         serializer.end_object();
+        serializer.end_nullable_object();
     }
 
     pub fn deserialize_checkpoint(de: &mut BinaryMetadataDeserializer<'_>) -> io::Result<Self> {
@@ -324,8 +326,14 @@ impl DistinctStatistics {
                         .store(de.read_varint()?, Ordering::Relaxed);
                 }
                 102 => {
-                    let present = de.read_u8();
-                    if present != 0 {
+                    let marker = de.read_u8();
+                    if marker == 0 {
+                        result.log = HyperLogLog::new();
+                    } else if marker == 1 {
+                        result.log = HyperLogLog::deserialize_checkpoint(de)?;
+                    } else {
+                        let next = de.read_u8();
+                        de.buffer_field(u16::from_le_bytes([marker, next]));
                         result.log = HyperLogLog::deserialize_checkpoint(de)?;
                     }
                 }

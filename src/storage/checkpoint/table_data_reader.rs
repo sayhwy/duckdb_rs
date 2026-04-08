@@ -308,9 +308,7 @@ fn skip_distinct_statistics(de: &mut BinaryMetadataDeserializer<'_>) -> std::io:
                 let _ = de.read_varint()?;
             }
             102 => {
-                if de.read_u8() != 0 {
-                    skip_hyperloglog(de)?;
-                }
+                skip_hyperloglog(de)?;
             }
             MESSAGE_TERMINATOR_FIELD_ID => return Ok(()),
             other => {

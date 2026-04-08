@@ -101,8 +101,10 @@ mod tests {
 
     #[test]
     fn test_checksum_different() {
-        let data1 = [1u8; 256];
-        let data2 = [2u8; 256];
+        // DuckDB 的 checksum 对完整 u64 块采用 XOR 聚合，偶数个完全相同的块会抵消。
+        // 这里使用奇数个块来验证不同输入通常会产生不同 checksum。
+        let data1 = [1u8; 248];
+        let data2 = [2u8; 248];
         assert_ne!(checksum(&data1), checksum(&data2));
     }
 }

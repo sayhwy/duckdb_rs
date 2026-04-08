@@ -378,14 +378,16 @@ impl RowGroup {
     pub fn initialize_scan_with_offset(
         &self,
         state: &mut CollectionScanState,
-        _node_index: usize,
+        node_row_start: Idx,
         vector_offset: Idx,
     ) -> bool {
         if !self.check_zonemap(&state.filters) {
             return false;
         }
 
-        let row_start = self.row_start;
+        // Use the segment-tree node row_start here as well: row groups merged
+        // from LocalStorage can carry a stale internal row_start.
+        let row_start = node_row_start;
         state.vector_index = vector_offset;
         state.max_row_group_row = if row_start > state.max_row {
             0

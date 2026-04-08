@@ -71,7 +71,7 @@ use std::sync::{
 pub struct ClientContext {
     /// 当前事务的本地写入缓冲区（C++: 通过 `LocalStorage::Get(context, db)` 访问）。
     pub local_storage: LocalStorage,
-    pub transaction: Option<Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle>>,
+    pub transaction: Option<Arc<DuckTxnHandle>>,
     pub transaction_data: TransactionData,
 }
 
@@ -139,7 +139,7 @@ pub struct LegacyTableAppendState {
 }
 
 pub use crate::storage::table::update_state::TableUpdateState;
-
+use crate::transaction::duck_transaction_manager::DuckTxnHandle;
 // ConstraintState 现在从 storage::table::append_state 导入，此处不再重复定义。
 
 /// 表数据写入器（C++: `TableDataWriter`）。
@@ -667,7 +667,13 @@ impl DataTable {
     ///   while (state.table_state.ScanCommitted(chunk, TABLE_SCAN_COMMITTED_ROWS))
     ///       f(chunk);
     /// ```
-    pub fn scan_table_segment(&self, row_start: Idx, count: Idx, mut f: impl FnMut(&DataChunk)) {
+    pub fn scan_table_segment(
+        &self,
+        transaction: TransactionData,
+        row_start: Idx,
+        count: Idx,
+        mut f: impl FnMut(&DataChunk),
+    ) {
         if count == 0 {
             return;
         }
@@ -678,22 +684,27 @@ impl DataTable {
         let types = self.get_types();
 
         let mut state = TableScanState::new();
-        self.initialize_scan(&mut state, column_ids, None);
+        self.initialize_scan_with_offset(&mut state, column_ids, row_start, end);
 
         let mut chunk = DataChunk::new();
         chunk.initialize(&types, crate::common::types::STANDARD_VECTOR_SIZE);
 
-        let tx_data = TransactionData {
-            start_time: u64::MAX,
-            transaction_id: 0,
+        let Some(row_group_index) = state.table_state.row_group_index else {
+            return;
         };
-        let mut current_row = 0;
+        let current_row_group_start = {
+            let tree = self.row_groups.get_row_groups();
+            let lock = tree.lock();
+            match tree.get_segment_by_index(&lock, row_group_index as i64) {
+                Some(node) => node.row_start(),
+                None => return,
+            }
+        };
+        let mut current_row = current_row_group_start
+            + state.table_state.vector_index * crate::storage::table::types::STANDARD_VECTOR_SIZE;
         while current_row < end {
             chunk.reset();
-            if !self
-                .row_groups
-                .scan(tx_data, &mut state.table_state, &mut chunk)
-            {
+            if !self.row_groups.scan(transaction, &mut state.table_state, &mut chunk) {
                 break;
             }
             if chunk.size() == 0 {
@@ -820,7 +831,11 @@ impl DataTable {
     }
 
     /// 将 LocalStorage 合并进主存储（C++: `MergeStorage()`）。
-    pub fn merge_storage(&self, local_collection: Arc<RowGroupCollection>) -> StorageResult<()> {
+    pub fn merge_storage(
+        &self,
+        local_collection: Arc<RowGroupCollection>,
+        _commit_state: Option<&mut dyn StorageCommitState>,
+    ) -> StorageResult<()> {
         self.row_groups.merge_storage(local_collection)
     }
 
@@ -840,6 +855,7 @@ impl DataTable {
     /// 写入 WAL（C++: `WriteToLog()`）。
     pub fn write_to_log(
         &self,
+        transaction: TransactionData,
         log: &WriteAheadLog,
         row_start: Idx,
         mut count: Idx,
@@ -875,7 +891,7 @@ impl DataTable {
         }
 
         let mut write_result = Ok(());
-        self.scan_table_segment(row_start, count, |chunk| {
+        self.scan_table_segment(transaction, row_start, count, |chunk| {
             if write_result.is_err() {
                 return;
             }
