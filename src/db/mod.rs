@@ -1521,6 +1521,33 @@ mod tests {
             .collect()
     }
 
+    fn build_three_integer_chunk(ids: &[i32], ages: &[i32], scores: &[i32]) -> DataChunk {
+        assert_eq!(ids.len(), ages.len());
+        assert_eq!(ids.len(), scores.len());
+
+        let mut chunk = DataChunk::new();
+        chunk.initialize(
+            &[
+                LogicalType::integer(),
+                LogicalType::integer(),
+                LogicalType::integer(),
+            ],
+            ids.len(),
+        );
+
+        for row in 0..ids.len() {
+            let id_base = row * 4;
+            chunk.data[0].raw_data_mut()[id_base..id_base + 4]
+                .copy_from_slice(&ids[row].to_le_bytes());
+            chunk.data[1].raw_data_mut()[id_base..id_base + 4]
+                .copy_from_slice(&ages[row].to_le_bytes());
+            chunk.data[2].raw_data_mut()[id_base..id_base + 4]
+                .copy_from_slice(&scores[row].to_le_bytes());
+        }
+        chunk.set_cardinality(ids.len());
+        chunk
+    }
+
     // ─── Transient (in-memory) path ──────────────────────────────────────────
 
     /// Baseline: insert then scan from in-memory transient segments.
@@ -2178,6 +2205,239 @@ mod tests {
             assert_eq!(values.len(), checkpoint_rows + wal_rows);
             for (idx, value) in values.iter().enumerate() {
                 assert_eq!(*value, idx as i32, "row {} should remain in order", idx);
+            }
+        }
+
+        cleanup_db(&db_path);
+    }
+
+    #[test]
+    fn persistent_reopen_from_wal_after_small_multicolumn_commits_preserves_values() {
+        let db_path = temp_db_path("wal_small_multicolumn_commits");
+        let batch_size = crate::common::types::STANDARD_VECTOR_SIZE;
+        let total_rows = batch_size * 12;
+
+        cleanup_db(&db_path);
+
+        {
+            let mut db = DB::open(&db_path).expect("Failed to create database");
+            db.create_table(
+                "main",
+                "students",
+                vec![
+                    ("id".to_string(), LogicalType::integer()),
+                    ("age".to_string(), LogicalType::integer()),
+                    ("score".to_string(), LogicalType::integer()),
+                ],
+            );
+            db.checkpoint()
+                .expect("Checkpoint after CREATE TABLE failed");
+
+            let conn = db.connect();
+            for chunk_start in (0..total_rows).step_by(batch_size) {
+                conn.begin_transaction()
+                    .expect("Failed to begin transaction");
+                let ids: Vec<i32> = (chunk_start..chunk_start + batch_size)
+                    .map(|value| value as i32 + 1)
+                    .collect();
+                let ages: Vec<i32> = ids.iter().map(|id| 18 + (id % 10)).collect();
+                let scores: Vec<i32> = ids.iter().map(|id| 50 + (id % 50)).collect();
+                let mut chunk = build_three_integer_chunk(&ids, &ages, &scores);
+                conn.insert_chunk("students", &mut chunk)
+                    .expect("Insert through WAL transaction failed");
+                conn.commit().expect("Commit failed");
+            }
+        }
+
+        {
+            let db = DB::open(&db_path).expect("Failed to reopen database");
+            let chunks = db
+                .scan_chunks_silent("students", None)
+                .expect("Scan after WAL replay failed");
+
+            let ids: Vec<i32> = chunks
+                .iter()
+                .flat_map(|chunk| read_i32_column(chunk, 0))
+                .collect();
+            let ages: Vec<i32> = chunks
+                .iter()
+                .flat_map(|chunk| read_i32_column(chunk, 1))
+                .collect();
+            let scores: Vec<i32> = chunks
+                .iter()
+                .flat_map(|chunk| read_i32_column(chunk, 2))
+                .collect();
+
+            assert_eq!(ids.len(), total_rows);
+            assert_eq!(ages.len(), total_rows);
+            assert_eq!(scores.len(), total_rows);
+
+            for row in 0..total_rows {
+                let expected_id = row as i32 + 1;
+                assert_eq!(ids[row], expected_id, "row {} id mismatch", row);
+                assert_eq!(ages[row], 18 + (expected_id % 10), "row {} age mismatch", row);
+                assert_eq!(
+                    scores[row],
+                    50 + (expected_id % 50),
+                    "row {} score mismatch",
+                    row
+                );
+            }
+        }
+
+        cleanup_db(&db_path);
+    }
+
+    #[test]
+    fn persistent_reopen_from_wal_after_multicolumn_commits_across_row_groups_preserves_values() {
+        let db_path = temp_db_path("wal_multicolumn_across_row_groups");
+        let batch_size = crate::common::types::STANDARD_VECTOR_SIZE;
+        let row_group_size = crate::storage::table::types::ROW_GROUP_SIZE as usize;
+        let total_rows = row_group_size * 2;
+
+        cleanup_db(&db_path);
+
+        {
+            let mut db = DB::open(&db_path).expect("Failed to create database");
+            db.create_table(
+                "main",
+                "students",
+                vec![
+                    ("id".to_string(), LogicalType::integer()),
+                    ("age".to_string(), LogicalType::integer()),
+                    ("score".to_string(), LogicalType::integer()),
+                ],
+            );
+            db.checkpoint()
+                .expect("Checkpoint after CREATE TABLE failed");
+
+            let conn = db.connect();
+            for chunk_start in (0..total_rows).step_by(batch_size) {
+                conn.begin_transaction()
+                    .expect("Failed to begin transaction");
+                let chunk_end = (chunk_start + batch_size).min(total_rows);
+                let ids: Vec<i32> = (chunk_start..chunk_end).map(|value| value as i32 + 1).collect();
+                let ages: Vec<i32> = ids.iter().map(|id| 18 + (id % 10)).collect();
+                let scores: Vec<i32> = ids.iter().map(|id| 50 + (id % 50)).collect();
+                let mut chunk = build_three_integer_chunk(&ids, &ages, &scores);
+                conn.insert_chunk("students", &mut chunk)
+                    .expect("Insert through WAL transaction failed");
+                conn.commit().expect("Commit failed");
+            }
+        }
+
+        {
+            let db = DB::open(&db_path).expect("Failed to reopen database");
+            let chunks = db
+                .scan_chunks_silent("students", None)
+                .expect("Scan after WAL replay failed");
+
+            let ids: Vec<i32> = chunks
+                .iter()
+                .flat_map(|chunk| read_i32_column(chunk, 0))
+                .collect();
+            let ages: Vec<i32> = chunks
+                .iter()
+                .flat_map(|chunk| read_i32_column(chunk, 1))
+                .collect();
+            let scores: Vec<i32> = chunks
+                .iter()
+                .flat_map(|chunk| read_i32_column(chunk, 2))
+                .collect();
+
+            assert_eq!(ids.len(), total_rows);
+            assert_eq!(ages.len(), total_rows);
+            assert_eq!(scores.len(), total_rows);
+
+            for row in 0..total_rows {
+                let expected_id = row as i32 + 1;
+                assert_eq!(ids[row], expected_id, "row {} id mismatch", row);
+                assert_eq!(ages[row], 18 + (expected_id % 10), "row {} age mismatch", row);
+                assert_eq!(
+                    scores[row],
+                    50 + (expected_id % 50),
+                    "row {} score mismatch",
+                    row
+                );
+            }
+        }
+
+        cleanup_db(&db_path);
+    }
+
+    #[test]
+    fn persistent_checkpoint_after_multicolumn_commits_preserves_values() {
+        let db_path = temp_db_path("checkpoint_multicolumn_commits");
+        let batch_size = crate::common::types::STANDARD_VECTOR_SIZE;
+        let row_group_size = crate::storage::table::types::ROW_GROUP_SIZE as usize;
+        let total_rows = row_group_size * 2;
+
+        cleanup_db(&db_path);
+
+        {
+            let mut db = DB::open(&db_path).expect("Failed to create database");
+            db.create_table(
+                "main",
+                "students",
+                vec![
+                    ("id".to_string(), LogicalType::integer()),
+                    ("age".to_string(), LogicalType::integer()),
+                    ("score".to_string(), LogicalType::integer()),
+                ],
+            );
+            db.checkpoint()
+                .expect("Checkpoint after CREATE TABLE failed");
+
+            let conn = db.connect();
+            for chunk_start in (0..total_rows).step_by(batch_size) {
+                conn.begin_transaction()
+                    .expect("Failed to begin transaction");
+                let chunk_end = (chunk_start + batch_size).min(total_rows);
+                let ids: Vec<i32> = (chunk_start..chunk_end).map(|value| value as i32 + 1).collect();
+                let ages: Vec<i32> = ids.iter().map(|id| 18 + (id % 10)).collect();
+                let scores: Vec<i32> = ids.iter().map(|id| 50 + (id % 50)).collect();
+                let mut chunk = build_three_integer_chunk(&ids, &ages, &scores);
+                conn.insert_chunk("students", &mut chunk)
+                    .expect("Insert through transaction failed");
+                conn.commit().expect("Commit failed");
+            }
+
+            db.checkpoint().expect("Checkpoint failed");
+        }
+
+        {
+            let db = DB::open(&db_path).expect("Failed to reopen database");
+            let chunks = db
+                .scan_chunks_silent("students", None)
+                .expect("Scan after reopen failed");
+
+            let ids: Vec<i32> = chunks
+                .iter()
+                .flat_map(|chunk| read_i32_column(chunk, 0))
+                .collect();
+            let ages: Vec<i32> = chunks
+                .iter()
+                .flat_map(|chunk| read_i32_column(chunk, 1))
+                .collect();
+            let scores: Vec<i32> = chunks
+                .iter()
+                .flat_map(|chunk| read_i32_column(chunk, 2))
+                .collect();
+
+            assert_eq!(ids.len(), total_rows);
+            assert_eq!(ages.len(), total_rows);
+            assert_eq!(scores.len(), total_rows);
+
+            for row in 0..total_rows {
+                let expected_id = row as i32 + 1;
+                assert_eq!(ids[row], expected_id, "row {} id mismatch", row);
+                assert_eq!(ages[row], 18 + (expected_id % 10), "row {} age mismatch", row);
+                assert_eq!(
+                    scores[row],
+                    50 + (expected_id % 50),
+                    "row {} score mismatch",
+                    row
+                );
             }
         }
 

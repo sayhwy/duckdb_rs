@@ -899,7 +899,10 @@ impl DataTable {
             let types = self.get_types();
             let mut flat_chunk = DataChunk::new();
             flat_chunk.initialize(&types, chunk.size().max(1));
-            chunk.copy_to(&mut flat_chunk, 0);
+            // Keep the scan output's vector semantics first, then flatten.
+            // `copy_to` only preserves raw flat bytes and can corrupt WAL payloads
+            // for dictionary/constant vectors produced by the scan path.
+            flat_chunk.reference(chunk);
             flat_chunk.flatten();
             let payload = serialize_insert_chunk_payload(&flat_chunk);
             write_result = log.write_insert(&payload).map_err(StorageError::Io);

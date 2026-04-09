@@ -701,17 +701,21 @@ impl<T: BitpackingValue + std::fmt::Debug + Default + Send + Sync + 'static> Bit
                 ptr += segment.type_size as usize;
             }
             BitpackingMode::For | BitpackingMode::DeltaFor => {
-                inner.current_width = block_data[ptr];
+                inner.current_width =
+                    T::read_le(&block_data[ptr..ptr + segment.type_size as usize]).to_i128() as u8;
+                ptr += segment.type_size as usize;
             }
             BitpackingMode::Constant => {}
             _ => panic!("invalid bitpacking mode"),
         }
 
         if metadata.mode == BitpackingMode::DeltaFor {
-            ptr += segment.type_size.max(1) as usize;
             inner.current_delta_offset =
                 T::read_le(&block_data[ptr..ptr + segment.type_size as usize]);
+            ptr += segment.type_size as usize;
         }
+
+        inner.current_group_ptr_offset = ptr;
     }
 }
 

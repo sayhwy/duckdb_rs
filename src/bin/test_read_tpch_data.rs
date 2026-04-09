@@ -1,7 +1,7 @@
 use duckdb_rs::db::DuckEngine;
 
 /// 数据库文件路径
-const DB_PATH: &str = "tpch-sf1.db";
+const DB_PATH: &str = "./data/tpch-sf1.db";
 
 fn main() {
     println!();
