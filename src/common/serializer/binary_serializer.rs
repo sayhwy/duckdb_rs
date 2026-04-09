@@ -75,6 +75,20 @@ impl<'a> BinarySerializer<'a> {
         }
     }
 
+    pub fn write_signed_varint_i128_raw(&mut self, value: i128) {
+        let mut value = value;
+        loop {
+            let byte = (value as u8) & 0x7F;
+            let sign_bit_set = (byte & 0x40) != 0;
+            value >>= 7;
+            let done = (value == 0 && !sign_bit_set) || (value == -1 && sign_bit_set);
+            self.stream.write_u8(if done { byte } else { byte | 0x80 });
+            if done {
+                break;
+            }
+        }
+    }
+
     // ─── WriteProperty 方法 ───────────────────────────────────
 
     /// 写入 bool 属性

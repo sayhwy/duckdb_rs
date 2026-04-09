@@ -15,7 +15,6 @@ use std::sync::Arc;
 use crate::catalog::{ColumnDefinition, LogicalType, TableCatalogEntry};
 use crate::common::errors::StorageResult;
 use crate::common::serializer::BinarySerializer;
-use crate::common::types::LogicalTypeId;
 use crate::storage::buffer::BlockManager;
 use crate::storage::data_table::DataTable;
 use crate::storage::metadata::WriteStream;
@@ -584,6 +583,14 @@ fn write_column_definition(serializer: &mut BinarySerializer<'_>, column: &Colum
 fn write_logical_type(serializer: &mut BinarySerializer<'_>, logical_type: &LogicalType) {
     serializer.begin_root_object();
     serializer.write_u8(100, logical_type_id_from(logical_type));
+    if logical_type.id == crate::catalog::LogicalTypeId::Decimal {
+        serializer.begin_nullable_object(101);
+        serializer.write_u8(100, 2);
+        serializer.write_u8(200, logical_type.width);
+        serializer.write_u8(201, logical_type.scale);
+        serializer.end_object();
+        serializer.end_nullable_object();
+    }
     serializer.end_object();
 }
 

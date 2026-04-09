@@ -39,6 +39,7 @@ fn write_minimal_base_statistics(
         | LogicalTypeId::SmallInt
         | LogicalTypeId::Integer
         | LogicalTypeId::BigInt
+        | LogicalTypeId::Decimal
         | LogicalTypeId::Float
         | LogicalTypeId::Double
         | LogicalTypeId::Date => {

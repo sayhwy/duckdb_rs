@@ -99,6 +99,22 @@ pub struct BaseStatistics {
 }
 
 impl BaseStatistics {
+    fn decimal_uses_smallint(logical_type: &LogicalType) -> bool {
+        logical_type.id == LogicalTypeId::Decimal && logical_type.width <= 4
+    }
+
+    fn decimal_uses_integer(logical_type: &LogicalType) -> bool {
+        logical_type.id == LogicalTypeId::Decimal && logical_type.width > 4 && logical_type.width <= 9
+    }
+
+    fn decimal_uses_bigint(logical_type: &LogicalType) -> bool {
+        logical_type.id == LogicalTypeId::Decimal && logical_type.width > 9 && logical_type.width <= 18
+    }
+
+    fn decimal_uses_hugeint(logical_type: &LogicalType) -> bool {
+        logical_type.id == LogicalTypeId::Decimal && logical_type.width > 18 && logical_type.width <= 38
+    }
+
     /// Create a new BaseStatistics with the given logical type
     pub fn new(logical_type: LogicalType) -> Self {
         let stats_type = Self::get_stats_type_from_logical(&logical_type);
@@ -128,10 +144,14 @@ impl BaseStatistics {
             | LogicalTypeId::TinyInt
             | LogicalTypeId::SmallInt
             | LogicalTypeId::Integer
+            | LogicalTypeId::Date
             | LogicalTypeId::BigInt
+            | LogicalTypeId::Time
+            | LogicalTypeId::Timestamp
             | LogicalTypeId::HugeInt
             | LogicalTypeId::Float
-            | LogicalTypeId::Double => StatisticsType::NumericStats,
+            | LogicalTypeId::Double
+            | LogicalTypeId::Decimal => StatisticsType::NumericStats,
 
             LogicalTypeId::Varchar => StatisticsType::StringStats,
 
@@ -412,17 +432,33 @@ impl BaseStatistics {
                 LogicalTypeId::TinyInt => {
                     serializer.write_signed_varint_raw(unsafe { value.tinyint as i64 })
                 }
-                LogicalTypeId::SmallInt => {
+                LogicalTypeId::SmallInt if !Self::decimal_uses_smallint(logical_type) => {
                     serializer.write_signed_varint_raw(unsafe { value.smallint as i64 })
                 }
-                LogicalTypeId::Integer | LogicalTypeId::Date => {
+                LogicalTypeId::Integer | LogicalTypeId::Date
+                    if !Self::decimal_uses_integer(logical_type) =>
+                {
                     serializer.write_signed_varint_raw(unsafe { value.integer as i64 })
                 }
-                LogicalTypeId::BigInt | LogicalTypeId::Time | LogicalTypeId::Timestamp => {
+                LogicalTypeId::BigInt | LogicalTypeId::Time | LogicalTypeId::Timestamp
+                    if !Self::decimal_uses_bigint(logical_type) =>
+                {
                     serializer.write_signed_varint_raw(unsafe { value.bigint })
                 }
-                LogicalTypeId::HugeInt => {
-                    serializer.write_signed_varint_raw(unsafe { value.hugeint as i64 })
+                LogicalTypeId::HugeInt if !Self::decimal_uses_hugeint(logical_type) => {
+                    serializer.write_signed_varint_i128_raw(unsafe { value.hugeint })
+                }
+                LogicalTypeId::Decimal if Self::decimal_uses_smallint(logical_type) => {
+                    serializer.write_signed_varint_raw(unsafe { value.smallint as i64 })
+                }
+                LogicalTypeId::Decimal if Self::decimal_uses_integer(logical_type) => {
+                    serializer.write_signed_varint_raw(unsafe { value.integer as i64 })
+                }
+                LogicalTypeId::Decimal if Self::decimal_uses_bigint(logical_type) => {
+                    serializer.write_signed_varint_raw(unsafe { value.bigint })
+                }
+                LogicalTypeId::Decimal if Self::decimal_uses_hugeint(logical_type) => {
+                    serializer.write_signed_varint_i128_raw(unsafe { value.hugeint })
                 }
                 LogicalTypeId::Float => {
                     serializer.write_f32_raw(unsafe { value.float });
@@ -537,7 +573,7 @@ impl BaseStatistics {
                                     super::NumericStats::set_max(data, value, logical_type);
                                 }
                             }
-                            LogicalTypeId::SmallInt => {
+                            LogicalTypeId::SmallInt if !Self::decimal_uses_smallint(logical_type) => {
                                 let value = de.read_i64_varint()? as i16;
                                 if is_min {
                                     super::NumericStats::set_min(data, value, logical_type);
@@ -545,7 +581,9 @@ impl BaseStatistics {
                                     super::NumericStats::set_max(data, value, logical_type);
                                 }
                             }
-                            LogicalTypeId::Integer | LogicalTypeId::Date => {
+                            LogicalTypeId::Integer | LogicalTypeId::Date
+                                if !Self::decimal_uses_integer(logical_type) =>
+                            {
                                 let value = de.read_i64_varint()? as i32;
                                 if is_min {
                                     super::NumericStats::set_min(data, value, logical_type);
@@ -555,7 +593,9 @@ impl BaseStatistics {
                             }
                             LogicalTypeId::BigInt
                             | LogicalTypeId::Time
-                            | LogicalTypeId::Timestamp => {
+                            | LogicalTypeId::Timestamp
+                                if !Self::decimal_uses_bigint(logical_type) =>
+                            {
                                 let value = de.read_i64_varint()?;
                                 if is_min {
                                     super::NumericStats::set_min(data, value, logical_type);
@@ -563,8 +603,40 @@ impl BaseStatistics {
                                     super::NumericStats::set_max(data, value, logical_type);
                                 }
                             }
-                            LogicalTypeId::HugeInt => {
-                                let value = de.read_i64_varint()? as i128;
+                            LogicalTypeId::HugeInt if !Self::decimal_uses_hugeint(logical_type) => {
+                                let value = de.read_i128_varint()?;
+                                if is_min {
+                                    super::NumericStats::set_min(data, value, logical_type);
+                                } else {
+                                    super::NumericStats::set_max(data, value, logical_type);
+                                }
+                            }
+                            LogicalTypeId::Decimal if Self::decimal_uses_smallint(logical_type) => {
+                                let value = de.read_i64_varint()? as i16;
+                                if is_min {
+                                    super::NumericStats::set_min(data, value, logical_type);
+                                } else {
+                                    super::NumericStats::set_max(data, value, logical_type);
+                                }
+                            }
+                            LogicalTypeId::Decimal if Self::decimal_uses_integer(logical_type) => {
+                                let value = de.read_i64_varint()? as i32;
+                                if is_min {
+                                    super::NumericStats::set_min(data, value, logical_type);
+                                } else {
+                                    super::NumericStats::set_max(data, value, logical_type);
+                                }
+                            }
+                            LogicalTypeId::Decimal if Self::decimal_uses_bigint(logical_type) => {
+                                let value = de.read_i64_varint()?;
+                                if is_min {
+                                    super::NumericStats::set_min(data, value, logical_type);
+                                } else {
+                                    super::NumericStats::set_max(data, value, logical_type);
+                                }
+                            }
+                            LogicalTypeId::Decimal if Self::decimal_uses_hugeint(logical_type) => {
+                                let value = de.read_i128_varint()?;
                                 if is_min {
                                     super::NumericStats::set_min(data, value, logical_type);
                                 } else {

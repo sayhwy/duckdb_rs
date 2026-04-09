@@ -418,6 +418,9 @@ impl DatabaseInstance {
                     "NULL".to_string()
                 }
             }
+            crate::common::types::LogicalTypeId::Decimal => {
+                Self::extract_decimal_string(raw, row_idx, col_type)
+            }
             crate::common::types::LogicalTypeId::Float => {
                 let offset = row_idx * 4;
                 if offset + 3 < raw.len() {
@@ -458,6 +461,72 @@ impl DatabaseInstance {
                 format!("<{:?}>", col_type.id)
             }
         }
+    }
+
+    fn extract_decimal_string(raw: &[u8], row_idx: usize, col_type: &LogicalType) -> String {
+        let scaled = match col_type.physical_size() {
+            2 => {
+                let offset = row_idx * 2;
+                if offset + 1 >= raw.len() {
+                    return "NULL".to_string();
+                }
+                i16::from_le_bytes([raw[offset], raw[offset + 1]]) as i128
+            }
+            4 => {
+                let offset = row_idx * 4;
+                if offset + 3 >= raw.len() {
+                    return "NULL".to_string();
+                }
+                i32::from_le_bytes([
+                    raw[offset],
+                    raw[offset + 1],
+                    raw[offset + 2],
+                    raw[offset + 3],
+                ]) as i128
+            }
+            8 => {
+                let offset = row_idx * 8;
+                if offset + 7 >= raw.len() {
+                    return "NULL".to_string();
+                }
+                i64::from_le_bytes([
+                    raw[offset],
+                    raw[offset + 1],
+                    raw[offset + 2],
+                    raw[offset + 3],
+                    raw[offset + 4],
+                    raw[offset + 5],
+                    raw[offset + 6],
+                    raw[offset + 7],
+                ]) as i128
+            }
+            16 => {
+                let offset = row_idx * 16;
+                if offset + 15 >= raw.len() {
+                    return "NULL".to_string();
+                }
+                i128::from_le_bytes([
+                    raw[offset],
+                    raw[offset + 1],
+                    raw[offset + 2],
+                    raw[offset + 3],
+                    raw[offset + 4],
+                    raw[offset + 5],
+                    raw[offset + 6],
+                    raw[offset + 7],
+                    raw[offset + 8],
+                    raw[offset + 9],
+                    raw[offset + 10],
+                    raw[offset + 11],
+                    raw[offset + 12],
+                    raw[offset + 13],
+                    raw[offset + 14],
+                    raw[offset + 15],
+                ])
+            }
+            _ => return format!("<DECIMAL({}, {})>", col_type.width, col_type.scale),
+        };
+        format_decimal_scaled(scaled, col_type.scale)
     }
 
     fn print_separator(col_widths: &[usize]) {
@@ -553,6 +622,25 @@ impl DatabaseInstance {
                 transaction_id: None,
             },
         )
+    }
+}
+
+fn format_decimal_scaled(value: i128, scale: u8) -> String {
+    let negative = value < 0;
+    let digits = value.abs().to_string();
+    let scale = scale as usize;
+    let body = if scale == 0 {
+        digits
+    } else if digits.len() <= scale {
+        format!("0.{}{}", "0".repeat(scale - digits.len()), digits)
+    } else {
+        let split = digits.len() - scale;
+        format!("{}.{}", &digits[..split], &digits[split..])
+    };
+    if negative {
+        format!("-{}", body)
+    } else {
+        body
     }
 }
 
@@ -1180,8 +1268,8 @@ fn build_table_handle(
     let mut catalog_columns = ColumnList::new();
     let mut storage_columns = Vec::new();
     for column in &entry.columns {
-        let catalog_ty = from_type_id_catalog(column.type_id);
-        let storage_ty = from_type_id_storage(column.type_id);
+        let catalog_ty = from_type_id_catalog(column);
+        let storage_ty = from_type_id_storage(column);
         catalog_columns.add_column(CatalogColumnDefinition::new(
             column.name.clone(),
             catalog_ty,
@@ -1222,27 +1310,33 @@ fn build_table_handle(
     }
 }
 
-fn from_type_id_storage(type_id: u32) -> LogicalType {
-    match type_id {
+fn from_type_id_storage(
+    column: &crate::storage::checkpoint::catalog_deserializer::ColumnInfo,
+) -> LogicalType {
+    match column.type_id {
         10 => LogicalType::boolean(),
         11 => LogicalType::tinyint(),
         12 => LogicalType::smallint(),
         13 | 30 => LogicalType::integer(),
         14 | 31 => LogicalType::bigint(),
         15 => LogicalType::date(),
+        21 => LogicalType::decimal(column.decimal_width, column.decimal_scale),
         22 => LogicalType::float(),
         23 => LogicalType::double(),
         _ => LogicalType::varchar(),
     }
 }
 
-fn from_type_id_catalog(type_id: u32) -> CatalogLogicalType {
-    match type_id {
+fn from_type_id_catalog(
+    column: &crate::storage::checkpoint::catalog_deserializer::ColumnInfo,
+) -> CatalogLogicalType {
+    match column.type_id {
         10 => CatalogLogicalType::boolean(),
         11 | 12 => CatalogLogicalType::integer(),
         13 | 30 => CatalogLogicalType::integer(),
         14 | 31 => CatalogLogicalType::bigint(),
         15 => CatalogLogicalType::date(),
+        21 => CatalogLogicalType::decimal(column.decimal_width, column.decimal_scale),
         22 | 23 => CatalogLogicalType::double(),
         _ => CatalogLogicalType::varchar(),
     }
@@ -1255,6 +1349,9 @@ fn to_catalog_type(ty: &LogicalType) -> CatalogLogicalType {
         crate::common::types::LogicalTypeId::SmallInt => CatalogLogicalType::integer(),
         crate::common::types::LogicalTypeId::Integer => CatalogLogicalType::integer(),
         crate::common::types::LogicalTypeId::BigInt => CatalogLogicalType::bigint(),
+        crate::common::types::LogicalTypeId::Decimal => {
+            CatalogLogicalType::decimal(ty.width, ty.scale)
+        }
         crate::common::types::LogicalTypeId::Float => CatalogLogicalType::double(),
         crate::common::types::LogicalTypeId::Double => CatalogLogicalType::double(),
         crate::common::types::LogicalTypeId::Date => CatalogLogicalType::date(),
@@ -1339,7 +1436,7 @@ fn read_table_data(
     for column in &entry.columns {
         cols.add_column(CatalogColumnDefinition::new(
             column.name.clone(),
-            from_type_id_catalog(column.type_id),
+            from_type_id_catalog(column),
         ));
     }
     create_info.columns = cols;

@@ -1044,9 +1044,9 @@ fn push_delete_undo(
 /// Map a `LogicalTypeId` to its physical storage representation.
 ///
 /// Mirrors the `LogicalType::GetInternalType()` mapping in C++.
-fn logical_type_id_to_physical(id: crate::common::types::LogicalTypeId) -> PhysicalType {
+fn logical_type_id_to_physical(logical_type: &crate::common::types::LogicalType) -> PhysicalType {
     use crate::common::types::LogicalTypeId::*;
-    match id {
+    match logical_type.id {
         Boolean => PhysicalType::Bool,
         TinyInt => PhysicalType::Int8,
         SmallInt => PhysicalType::Int16,
@@ -1055,6 +1055,17 @@ fn logical_type_id_to_physical(id: crate::common::types::LogicalTypeId) -> Physi
         BigInt | Time | Timestamp => PhysicalType::Int64,
         // Date is stored as int32 days since epoch (DuckDB date_t / PhysicalType::INT32).
         Date => PhysicalType::Int32,
+        Decimal => {
+            if logical_type.width <= 4 {
+                PhysicalType::Int16
+            } else if logical_type.width <= 9 {
+                PhysicalType::Int32
+            } else if logical_type.width <= 18 {
+                PhysicalType::Int64
+            } else {
+                PhysicalType::Int128
+            }
+        }
         HugeInt => PhysicalType::Int128,
         Float => PhysicalType::Float,
         Double => PhysicalType::Double,
@@ -1076,7 +1087,7 @@ fn serialize_column_to_persistent(
     col: &ColumnData,
     logical_type: &LogicalType,
 ) -> PersistentColumnData {
-    let physical_type = logical_type_id_to_physical(logical_type.id);
+    let physical_type = logical_type_id_to_physical(logical_type);
     let logical_type_id = logical_type.id;
     let has_updates = col.has_updates();
     let pointers = col.ctx.get_data_pointers();

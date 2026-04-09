@@ -60,6 +60,43 @@ impl Default for NumericStatsData {
 pub struct NumericStats;
 
 impl NumericStats {
+    fn decimal_storage_kind(logical_type: &LogicalType) -> Option<LogicalTypeId> {
+        if logical_type.id != LogicalTypeId::Decimal {
+            return None;
+        }
+        let physical = if logical_type.width <= 4 {
+            LogicalTypeId::SmallInt
+        } else if logical_type.width <= 9 {
+            LogicalTypeId::Integer
+        } else if logical_type.width <= 18 {
+            LogicalTypeId::BigInt
+        } else if logical_type.width <= 38 {
+            LogicalTypeId::HugeInt
+        } else {
+            panic!("unsupported DECIMAL width {}", logical_type.width);
+        };
+        Some(physical)
+    }
+
+    fn format_decimal_value(value: i128, scale: u8) -> String {
+        let negative = value < 0;
+        let digits = value.abs().to_string();
+        let scale = scale as usize;
+        let body = if scale == 0 {
+            digits
+        } else if digits.len() <= scale {
+            format!("0.{}{}", "0".repeat(scale - digits.len()), digits)
+        } else {
+            let split = digits.len() - scale;
+            format!("{}.{}", &digits[..split], &digits[split..])
+        };
+        if negative {
+            format!("-{}", body)
+        } else {
+            body
+        }
+    }
+
     /// Check if the statistics has both min and max values
     pub fn has_min_max(data: &NumericStatsData) -> bool {
         data.has_min && data.has_max
@@ -119,14 +156,18 @@ impl NumericStats {
     pub fn set_min<T: Copy>(data: &mut NumericStatsData, value: T, logical_type: &LogicalType) {
         data.has_min = true;
         unsafe {
-            match logical_type.id {
+            match Self::decimal_storage_kind(logical_type).unwrap_or(logical_type.id) {
                 LogicalTypeId::Boolean => data.min.boolean = *((&value as *const T) as *const bool),
                 LogicalTypeId::TinyInt => data.min.tinyint = *((&value as *const T) as *const i8),
                 LogicalTypeId::SmallInt => {
                     data.min.smallint = *((&value as *const T) as *const i16)
                 }
-                LogicalTypeId::Integer => data.min.integer = *((&value as *const T) as *const i32),
-                LogicalTypeId::BigInt => data.min.bigint = *((&value as *const T) as *const i64),
+                LogicalTypeId::Integer | LogicalTypeId::Date => {
+                    data.min.integer = *((&value as *const T) as *const i32)
+                }
+                LogicalTypeId::BigInt | LogicalTypeId::Time | LogicalTypeId::Timestamp => {
+                    data.min.bigint = *((&value as *const T) as *const i64)
+                }
                 LogicalTypeId::HugeInt => data.min.hugeint = *((&value as *const T) as *const i128),
                 LogicalTypeId::Float => data.min.float = *((&value as *const T) as *const f32),
                 LogicalTypeId::Double => data.min.double = *((&value as *const T) as *const f64),
@@ -139,14 +180,18 @@ impl NumericStats {
     pub fn set_max<T: Copy>(data: &mut NumericStatsData, value: T, logical_type: &LogicalType) {
         data.has_max = true;
         unsafe {
-            match logical_type.id {
+            match Self::decimal_storage_kind(logical_type).unwrap_or(logical_type.id) {
                 LogicalTypeId::Boolean => data.max.boolean = *((&value as *const T) as *const bool),
                 LogicalTypeId::TinyInt => data.max.tinyint = *((&value as *const T) as *const i8),
                 LogicalTypeId::SmallInt => {
                     data.max.smallint = *((&value as *const T) as *const i16)
                 }
-                LogicalTypeId::Integer => data.max.integer = *((&value as *const T) as *const i32),
-                LogicalTypeId::BigInt => data.max.bigint = *((&value as *const T) as *const i64),
+                LogicalTypeId::Integer | LogicalTypeId::Date => {
+                    data.max.integer = *((&value as *const T) as *const i32)
+                }
+                LogicalTypeId::BigInt | LogicalTypeId::Time | LogicalTypeId::Timestamp => {
+                    data.max.bigint = *((&value as *const T) as *const i64)
+                }
                 LogicalTypeId::HugeInt => data.max.hugeint = *((&value as *const T) as *const i128),
                 LogicalTypeId::Float => data.max.float = *((&value as *const T) as *const f32),
                 LogicalTypeId::Double => data.max.double = *((&value as *const T) as *const f64),
@@ -188,7 +233,7 @@ impl NumericStats {
         logical_type: &LogicalType,
     ) -> i32 {
         unsafe {
-            match logical_type.id {
+            match Self::decimal_storage_kind(logical_type).unwrap_or(logical_type.id) {
                 LogicalTypeId::TinyInt => {
                     if a.tinyint < b.tinyint {
                         -1
@@ -207,7 +252,7 @@ impl NumericStats {
                         0
                     }
                 }
-                LogicalTypeId::Integer => {
+                LogicalTypeId::Integer | LogicalTypeId::Date => {
                     if a.integer < b.integer {
                         -1
                     } else if a.integer > b.integer {
@@ -216,7 +261,7 @@ impl NumericStats {
                         0
                     }
                 }
-                LogicalTypeId::BigInt => {
+                LogicalTypeId::BigInt | LogicalTypeId::Time | LogicalTypeId::Timestamp => {
                     if a.bigint < b.bigint {
                         -1
                     } else if a.bigint > b.bigint {
@@ -300,9 +345,21 @@ impl NumericStats {
                 LogicalTypeId::Boolean => value.boolean.to_string(),
                 LogicalTypeId::TinyInt => value.tinyint.to_string(),
                 LogicalTypeId::SmallInt => value.smallint.to_string(),
-                LogicalTypeId::Integer => value.integer.to_string(),
-                LogicalTypeId::BigInt => value.bigint.to_string(),
+                LogicalTypeId::Integer | LogicalTypeId::Date => value.integer.to_string(),
+                LogicalTypeId::BigInt | LogicalTypeId::Time | LogicalTypeId::Timestamp => {
+                    value.bigint.to_string()
+                }
                 LogicalTypeId::HugeInt => value.hugeint.to_string(),
+                LogicalTypeId::Decimal => {
+                    let scaled = match Self::decimal_storage_kind(logical_type) {
+                        Some(LogicalTypeId::SmallInt) => value.smallint as i128,
+                        Some(LogicalTypeId::Integer) => value.integer as i128,
+                        Some(LogicalTypeId::BigInt) => value.bigint as i128,
+                        Some(LogicalTypeId::HugeInt) => value.hugeint,
+                        _ => 0,
+                    };
+                    Self::format_decimal_value(scaled, logical_type.scale)
+                }
                 LogicalTypeId::Float => value.float.to_string(),
                 LogicalTypeId::Double => value.double.to_string(),
                 _ => "?".to_string(),

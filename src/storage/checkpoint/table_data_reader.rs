@@ -131,6 +131,7 @@ fn catalog_type_to_storage_type(
         LogicalTypeId::BigInt => StorageLogicalType::bigint(),
         LogicalTypeId::Float => StorageLogicalType::float(),
         LogicalTypeId::Double => StorageLogicalType::double(),
+        LogicalTypeId::Decimal => StorageLogicalType::decimal(logical_type.width, logical_type.scale),
         LogicalTypeId::Varchar => StorageLogicalType::varchar(),
         LogicalTypeId::Date => StorageLogicalType::date(),
         LogicalTypeId::Timestamp => StorageLogicalType::new(StorageTypeId::Timestamp),

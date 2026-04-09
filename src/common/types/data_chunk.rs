@@ -49,6 +49,10 @@ use crate::common::errors::{Result, anyhow, bail};
 pub struct LogicalType {
     /// 类型标识（C++: `LogicalTypeId`）。
     pub id: LogicalTypeId,
+    /// DECIMAL 的精度（仅 Decimal 类型有效）。
+    pub width: u8,
+    /// DECIMAL 的 scale（仅 Decimal 类型有效）。
+    pub scale: u8,
     /// 子类型（用于 List、Array 等嵌套类型，C++: `child_type`）。
     pub child_type: Option<Box<LogicalType>>,
     /// Array 固定元素数量（仅 Array 类型有效，C++: `ArrayType::GetSize`）。
@@ -64,6 +68,8 @@ impl LogicalType {
     pub fn new(id: LogicalTypeId) -> Self {
         Self {
             id,
+            width: 0,
+            scale: 0,
             child_type: None,
             array_size: 0,
             struct_fields: Vec::new(),
@@ -95,6 +101,17 @@ impl LogicalType {
     }
     pub fn double() -> Self {
         Self::new(LogicalTypeId::Double)
+    }
+    pub fn decimal(width: u8, scale: u8) -> Self {
+        assert!(width >= scale, "DECIMAL width must be >= scale");
+        Self {
+            id: LogicalTypeId::Decimal,
+            width,
+            scale,
+            child_type: None,
+            array_size: 0,
+            struct_fields: Vec::new(),
+        }
     }
     pub fn varchar() -> Self {
         Self::new(LogicalTypeId::Varchar)
@@ -131,6 +148,8 @@ impl LogicalType {
     pub fn list(child_type: LogicalType) -> Self {
         Self {
             id: LogicalTypeId::List,
+            width: 0,
+            scale: 0,
             child_type: Some(Box::new(child_type)),
             array_size: 0,
             struct_fields: Vec::new(),
@@ -141,6 +160,8 @@ impl LogicalType {
     pub fn array(child_type: LogicalType, size: usize) -> Self {
         Self {
             id: LogicalTypeId::Array,
+            width: 0,
+            scale: 0,
             child_type: Some(Box::new(child_type)),
             array_size: size,
             struct_fields: Vec::new(),
@@ -151,6 +172,8 @@ impl LogicalType {
     pub fn struct_type(fields: Vec<(String, LogicalType)>) -> Self {
         Self {
             id: LogicalTypeId::Struct,
+            width: 0,
+            scale: 0,
             child_type: None,
             array_size: 0,
             struct_fields: fields,
@@ -179,6 +202,8 @@ impl LogicalType {
         ];
         Self {
             id: LogicalTypeId::Variant,
+            width: 0,
+            scale: 0,
             child_type: None,
             array_size: 0,
             struct_fields: children,
@@ -224,6 +249,19 @@ impl LogicalType {
             | LogicalTypeId::Time
             | LogicalTypeId::Interval => 8,
             LogicalTypeId::HugeInt => 16,
+            LogicalTypeId::Decimal => {
+                if self.width <= 4 {
+                    2
+                } else if self.width <= 9 {
+                    4
+                } else if self.width <= 18 {
+                    8
+                } else if self.width <= 38 {
+                    16
+                } else {
+                    panic!("unsupported DECIMAL width {}", self.width);
+                }
+            }
             // VARCHAR 在 flat vector 中存为 string_t (4 + 4 + 8 bytes = 16)
             LogicalTypeId::Varchar => 16,
             // 其余类型（List / Struct / Map）使用 8 字节指针占位
@@ -242,6 +280,7 @@ impl LogicalType {
             LogicalTypeId::HugeInt => "HUGEINT",
             LogicalTypeId::Float => "FLOAT",
             LogicalTypeId::Double => "DOUBLE",
+            LogicalTypeId::Decimal => "DECIMAL",
             LogicalTypeId::Varchar => "VARCHAR",
             LogicalTypeId::Timestamp => "TIMESTAMP",
             LogicalTypeId::Date => "DATE",
@@ -274,6 +313,7 @@ pub enum LogicalTypeId {
     HugeInt,
     Float,
     Double,
+    Decimal,
     Varchar,
     Timestamp,
     Date,
@@ -1351,6 +1391,7 @@ impl DataChunkBuilder {
             LogicalTypeId::HugeInt,
             LogicalTypeId::Float,
             LogicalTypeId::Double,
+            LogicalTypeId::Decimal,
             LogicalTypeId::Varchar,
             LogicalTypeId::Timestamp,
             LogicalTypeId::Date,

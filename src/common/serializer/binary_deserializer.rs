@@ -133,6 +133,30 @@ impl<'a> BinaryMetadataDeserializer<'a> {
         Ok(result)
     }
 
+    pub fn read_i128_varint(&mut self) -> io::Result<i128> {
+        let mut result = 0i128;
+        let mut shift = 0u32;
+        let mut byte: u8;
+        loop {
+            byte = self.read_u8();
+            result |= ((byte & 0x7F) as i128) << shift;
+            shift += 7;
+            if (byte & 0x80) == 0 {
+                break;
+            }
+            if shift >= 128 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "signed varint too large",
+                ));
+            }
+        }
+        if shift < 128 && (byte & 0x40) != 0 {
+            result |= (!0i128) << shift;
+        }
+        Ok(result)
+    }
+
     pub fn read_u32_varint(&mut self) -> io::Result<u32> {
         Ok(self.read_varint()? as u32)
     }
@@ -210,12 +234,14 @@ impl<'a> BinaryMetadataDeserializer<'a> {
     }
 
     pub fn read_data_pointer(&mut self, logical_type: &LogicalType) -> io::Result<DataPointer> {
+        let mut row_start = 0;
         let mut tuple_count = 0;
         let mut block_id = INVALID_BLOCK;
         let mut offset = 0u32;
         let mut compression = CompressionType::Uncompressed;
         loop {
             match self.next_field()? {
+                100 => row_start = self.read_varint()?,
                 101 => tuple_count = self.read_varint()?,
                 102 => {
                     let (bid, off) = self.read_block_pointer()?;
@@ -229,7 +255,7 @@ impl<'a> BinaryMetadataDeserializer<'a> {
                     return Ok(DataPointer {
                         block_id,
                         offset,
-                        row_start: 0,
+                        row_start,
                         tuple_count,
                     });
                 }
@@ -411,6 +437,12 @@ fn skip_numeric_value(
     match logical_type.id {
         crate::common::types::LogicalTypeId::Float => de.skip_bytes(4),
         crate::common::types::LogicalTypeId::Double => de.skip_bytes(8),
+        crate::common::types::LogicalTypeId::HugeInt => {
+            let _ = de.read_i128_varint()?;
+        }
+        crate::common::types::LogicalTypeId::Decimal if logical_type.width > 18 => {
+            let _ = de.read_i128_varint()?;
+        }
         _ => {
             let _ = de.read_varint()?;
         }

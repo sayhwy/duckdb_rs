@@ -9,6 +9,8 @@ pub struct ColumnInfo {
     pub name: String,
     pub type_id: u32,
     pub type_name: String,
+    pub decimal_width: u8,
+    pub decimal_scale: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -144,8 +146,45 @@ fn type_id_to_name(id: u32) -> &'static str {
     }
 }
 
-fn read_logical_type(r: &mut BinaryDeserializer<'_>) -> io::Result<u32> {
+fn read_extra_type_info_decimal(
+    r: &mut BinaryDeserializer<'_>,
+) -> io::Result<(u8, u8)> {
+    let mut info_type = 0u32;
+    let mut width = 0u8;
+    let mut scale = 0u8;
+    loop {
+        let fid = r.read_field_id();
+        if fid == 0xFFFF {
+            break;
+        }
+        match fid {
+            100 => info_type = r.read_varint()? as u32,
+            101 => {
+                let _ = r.read_string()?;
+            }
+            103 => {
+                if r.read_u8() == 1 {
+                    r.skip_object_varint_only()?;
+                }
+            }
+            200 => width = r.read_varint()? as u8,
+            201 => scale = r.read_varint()? as u8,
+            _ => {
+                let _ = r.read_varint()?;
+            }
+        }
+    }
+    if info_type == 2 {
+        Ok((width, scale))
+    } else {
+        Ok((0, 0))
+    }
+}
+
+fn read_logical_type(r: &mut BinaryDeserializer<'_>) -> io::Result<(u32, u8, u8)> {
     let mut type_id = 0u32;
+    let mut decimal_width = 0u8;
+    let mut decimal_scale = 0u8;
     loop {
         let fid = r.read_field_id();
         if fid == 0xFFFF {
@@ -157,7 +196,9 @@ fn read_logical_type(r: &mut BinaryDeserializer<'_>) -> io::Result<u32> {
             }
             101 => {
                 if r.read_u8() == 1 {
-                    r.skip_object_varint_only()?;
+                    let (width, scale) = read_extra_type_info_decimal(r)?;
+                    decimal_width = width;
+                    decimal_scale = scale;
                 }
             }
             102 => {
@@ -176,12 +217,14 @@ fn read_logical_type(r: &mut BinaryDeserializer<'_>) -> io::Result<u32> {
             }
         }
     }
-    Ok(type_id)
+    Ok((type_id, decimal_width, decimal_scale))
 }
 
 fn read_column_definition(r: &mut BinaryDeserializer<'_>) -> io::Result<ColumnInfo> {
     let mut name = String::new();
     let mut type_id = 0u32;
+    let mut decimal_width = 0u8;
+    let mut decimal_scale = 0u8;
 
     loop {
         let fid = r.read_field_id();
@@ -190,7 +233,12 @@ fn read_column_definition(r: &mut BinaryDeserializer<'_>) -> io::Result<ColumnIn
         }
         match fid {
             100 => name = r.read_string()?,
-            101 => type_id = read_logical_type(r)?,
+            101 => {
+                let (parsed_type_id, width, scale) = read_logical_type(r)?;
+                type_id = parsed_type_id;
+                decimal_width = width;
+                decimal_scale = scale;
+            }
             _ => {
                 let _ = r.read_varint()?;
             }
@@ -201,6 +249,8 @@ fn read_column_definition(r: &mut BinaryDeserializer<'_>) -> io::Result<ColumnIn
         name,
         type_id,
         type_name: type_id_to_name(type_id).to_string(),
+        decimal_width,
+        decimal_scale,
     })
 }
 
