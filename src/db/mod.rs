@@ -2,8 +2,13 @@ pub mod conn;
 pub mod duck_engine;
 pub mod engine;
 
-pub use duck_engine::{DuckConnection, DuckEngine};
-pub use engine::{EngineError, SchemaInfo, SchemaTableInfo};
+pub use duck_engine::{
+    DuckConnection, DuckEngine, DuckParallelScanHandle, DuckTableScanHandle, DuckTableScanTask,
+};
+pub use engine::{
+    EngineError, EngineParallelScanState, EngineScanGlobalState, EngineScanLocalState,
+    SchemaInfo, SchemaTableInfo, TableScanRequest,
+};
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -261,7 +266,7 @@ impl DatabaseInstance {
         {
             let txn_guard = txn.lock_inner();
             txn_guard.storage.initialize_scan_state(
-                table.storage.info.table_id(),
+                &table.storage,
                 &mut state.local_state,
                 &column_ids,
             );
@@ -598,7 +603,7 @@ impl DatabaseInstance {
         {
             let txn_guard = txn.lock_inner();
             txn_guard.storage.initialize_scan_state(
-                table.storage.info.table_id(),
+                &table.storage,
                 &mut state.local_state,
                 &column_ids,
             );

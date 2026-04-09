@@ -18,7 +18,7 @@
 //! | raw `ColumnSegmentTree *` pointer | `Option<Arc<Mutex<...>>>` |
 //! | `unsafe_vector<ColumnScanState>` | `Vec<ColumnScanState>` |
 //! | `unique_ptr<SegmentScanState>` | `Option<Box<dyn SegmentScanState>>` |
-//! | `optional_ptr<SegmentNode<RowGroup>>` | `usize` (index) + reference to tree |
+//! | `optional_ptr<SegmentNode<RowGroup>>` | `RowGroupSegmentRef` |
 
 use std::sync::Arc;
 use std::any::Any;
@@ -26,6 +26,9 @@ use std::any::Any;
 use parking_lot::Mutex;
 
 use super::chunk_info::SelectionVector;
+use super::row_group::RowGroup;
+use super::row_group_collection::RowGroupSegmentTree;
+use super::segment_base::SegmentBase;
 use super::types::{Idx, LogicalType, TransactionData};
 use crate::storage::buffer::BufferHandle;
 
@@ -158,7 +161,7 @@ pub struct ColumnFetchState {
 /// One pushed-down predicate for a scan.
 ///
 /// Mirrors `struct ScanFilter`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ScanFilter {
     /// Column index in the *scan projection*.
     pub scan_column_index: Idx,
@@ -176,7 +179,7 @@ pub struct ScanFilter {
 /// Collection of active scan filters for a query.
 ///
 /// Mirrors `class ScanFilterInfo`.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ScanFilterInfo {
     pub filter_list: Vec<ScanFilter>,
     /// Per-column: is any filter currently active?
@@ -243,12 +246,29 @@ pub struct ScanSamplingInfo {
 /// # C++ → Rust differences
 ///
 /// In C++, `CollectionScanState` holds a back-pointer to the parent `TableScanState`
-/// (for `column_ids`, `filters`, `options`, `sampling_info`). In Rust we inline those
-/// fields here to avoid the circular reference.
-#[derive(Debug)]
+/// (for `column_ids`, `filters`, `options`, `sampling_info`). In Rust we share these
+/// fields through `TableScanSharedState` to avoid self-referential structs.
+#[derive(Debug, Default)]
+struct TableScanSharedState {
+    column_ids: Vec<u64>,
+    options: TableScanOptions,
+    filters: ScanFilterInfo,
+    sampling_info: ScanSamplingInfo,
+}
+
+#[derive(Clone)]
+pub struct RowGroupSegmentRef {
+    pub row_start: Idx,
+    pub index: usize,
+    pub row_group: Arc<RowGroup>,
+}
+
 pub struct CollectionScanState {
-    /// Index of the current row group node in the segment tree.
-    pub row_group_index: Option<usize>,
+    /// Current row group node being scanned.
+    pub current_row_group: Option<RowGroupSegmentRef>,
+
+    /// Row-group segment tree being scanned.
+    pub row_groups: Option<Arc<RowGroupSegmentTree>>,
 
     /// Current vector index within the row group (C++: `vector_index`).
     pub vector_index: Idx,
@@ -266,40 +286,29 @@ pub struct CollectionScanState {
     /// Current output batch index for parallel scans.
     pub batch_index: Idx,
 
-    /// Projected column ids — indices into the table's physical column list.
-    ///
-    /// Mirrors C++ `TableScanState::column_ids` (accessible via
-    /// `CollectionScanState::GetColumnIds()` in C++).
-    pub column_ids: Vec<u64>,
-
     /// Scratch selection-vector for MVCC visibility filtering (C++: `valid_sel`).
     pub valid_sel: SelectionVector,
 
-    /// Pushed-down filter predicates (C++: `ScanFilterInfo`, via `GetFilterInfo()`).
-    pub filters: ScanFilterInfo,
-
-    /// Scan-level option flags (C++: `TableScanOptions`, via `GetOptions()`).
-    pub options: TableScanOptions,
-
-    /// Sampling configuration (C++: `ScanSamplingInfo`, via `GetSamplingInfo()`).
-    pub sampling_info: ScanSamplingInfo,
+    shared: Arc<Mutex<TableScanSharedState>>,
 }
 
 impl CollectionScanState {
-    pub fn new() -> Self {
+    fn with_shared(shared: Arc<Mutex<TableScanSharedState>>) -> Self {
         CollectionScanState {
-            row_group_index: None,
+            current_row_group: None,
+            row_groups: None,
             vector_index: 0,
             max_row_group_row: 0,
             column_scans: Vec::new(),
             max_row: u64::MAX,
             batch_index: 0,
-            column_ids: Vec::new(),
             valid_sel: SelectionVector::default(),
-            filters: ScanFilterInfo::default(),
-            options: TableScanOptions::default(),
-            sampling_info: ScanSamplingInfo::default(),
+            shared,
         }
+    }
+
+    pub fn new() -> Self {
+        Self::with_shared(Arc::new(Mutex::new(TableScanSharedState::default())))
     }
 
     /// Initialise `column_scans` to the correct length for `types`.
@@ -310,12 +319,94 @@ impl CollectionScanState {
     /// Set column ids and resize `column_scans` accordingly.
     pub fn set_column_ids(&mut self, ids: Vec<u64>) {
         let n = ids.len();
-        self.column_ids = ids;
+        self.shared.lock().column_ids = ids;
         self.column_scans.resize_with(n, ColumnScanState::new);
     }
 
-    pub fn get_column_ids(&self) -> &[u64] {
-        &self.column_ids
+    pub fn get_column_ids(&self) -> Vec<u64> {
+        self.shared.lock().column_ids.clone()
+    }
+
+    pub fn get_filter_info(&self) -> ScanFilterInfo {
+        self.shared.lock().filters.clone()
+    }
+
+    pub fn get_options(&self) -> TableScanOptions {
+        self.shared.lock().options.clone()
+    }
+
+    pub fn get_sampling_info(&self) -> ScanSamplingInfo {
+        self.shared.lock().sampling_info.clone()
+    }
+
+    pub fn scan(&mut self, transaction: TransactionData, result: &mut crate::common::types::DataChunk) -> bool {
+        let Some(tree) = self.row_groups.clone() else {
+            return false;
+        };
+
+        loop {
+            let current = match self.current_row_group.clone() {
+                None => return false,
+                Some(current) => current,
+            };
+
+            let (rg_row_start, rg_count): (Idx, Idx) = {
+                let lock = tree.lock();
+                match lock.0.get(current.index) {
+                    None => return false,
+                    Some(node) => (node.row_start(), node.node().count()),
+                }
+            };
+
+            current.row_group.scan(transaction, self, result);
+            if result.size() > 0 {
+                return true;
+            }
+
+            if self.max_row <= rg_row_start + rg_count {
+                self.current_row_group = None;
+                return false;
+            }
+
+            let mut curr_idx = current.index;
+            loop {
+                let next = {
+                    let lock = tree.lock();
+                    let next_idx = curr_idx + 1;
+                    if next_idx < lock.0.len() {
+                        Some((
+                            lock.0[next_idx].index(),
+                            lock.0[next_idx].row_start(),
+                            lock.0[next_idx].arc(),
+                        ))
+                    } else {
+                        None
+                    }
+                };
+
+                match next {
+                    None => {
+                        self.current_row_group = None;
+                        return false;
+                    }
+                    Some((next_idx, next_row_start, next_arc)) => {
+                        if next_row_start >= self.max_row {
+                            self.current_row_group = None;
+                            return false;
+                        }
+                        self.current_row_group = Some(RowGroupSegmentRef {
+                            row_start: next_row_start,
+                            index: next_idx,
+                            row_group: Arc::clone(&next_arc),
+                        });
+                        curr_idx = next_idx;
+                        if next_arc.initialize_scan(self, next_row_start) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -326,40 +417,30 @@ impl CollectionScanState {
 /// Top-level scan state for a full table scan.
 ///
 /// Mirrors `class TableScanState`.
-#[derive(Debug)]
 pub struct TableScanState {
     /// Scan cursor over the persisted row-group collection.
     pub table_state: CollectionScanState,
     /// Scan cursor over the transaction-local row-group collection.
     pub local_state: CollectionScanState,
-    /// Scan options.
-    pub options: TableScanOptions,
-    /// Filter predicates.
-    pub filters: ScanFilterInfo,
-    /// Sampling configuration.
-    pub sampling_info: ScanSamplingInfo,
-    /// Which columns to project.
-    column_ids: Vec<u64>,
+    shared: Arc<Mutex<TableScanSharedState>>,
 }
 
 impl TableScanState {
     pub fn new() -> Self {
+        let shared = Arc::new(Mutex::new(TableScanSharedState::default()));
         TableScanState {
-            table_state: CollectionScanState::new(),
-            local_state: CollectionScanState::new(),
-            options: TableScanOptions::default(),
-            filters: ScanFilterInfo::default(),
-            sampling_info: ScanSamplingInfo::default(),
-            column_ids: Vec::new(),
+            table_state: CollectionScanState::with_shared(Arc::clone(&shared)),
+            local_state: CollectionScanState::with_shared(Arc::clone(&shared)),
+            shared,
         }
     }
 
     pub fn initialize(&mut self, column_ids: Vec<u64>) {
-        self.column_ids = column_ids;
+        self.shared.lock().column_ids = column_ids;
     }
 
-    pub fn column_ids(&self) -> &[u64] {
-        &self.column_ids
+    pub fn column_ids(&self) -> Vec<u64> {
+        self.shared.lock().column_ids.clone()
     }
 }
 
@@ -372,12 +453,16 @@ impl TableScanState {
 /// Mirrors `struct ParallelCollectionScanState`.
 /// Protected by its own `Mutex`.
 pub struct ParallelCollectionScanState {
-    /// Index of the current row group (atomically advanced by workers).
-    pub current_row_group_index: Arc<std::sync::atomic::AtomicU64>,
+    /// Collection row-group tree.
+    pub row_groups: Option<Arc<RowGroupSegmentTree>>,
+    /// Last row group claimed from the shared scan state.
+    pub current_row_group: Option<RowGroupSegmentRef>,
+    /// Next row group index to hand out.
+    pub next_row_group_index: Idx,
     pub vector_index: Idx,
     pub max_row: Idx,
     pub batch_index: Idx,
-    pub processed_rows: std::sync::atomic::AtomicU64,
+    pub processed_rows: Idx,
     pub lock: Mutex<()>,
 }
 

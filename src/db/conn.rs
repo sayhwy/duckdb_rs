@@ -33,7 +33,7 @@ use crate::catalog::PhysicalIndex;
 use crate::catalog::TableCatalogEntry;
 use crate::common::errors::{Result, anyhow};
 use crate::common::types::{DataChunk, LogicalType, STANDARD_VECTOR_SIZE};
-use crate::storage::data_table::DataTable;
+use crate::storage::data_table::{DataTable, StorageIndex};
 use crate::storage::storage_manager::StorageManager;
 use crate::transaction::duck_transaction_manager::{DuckTransactionManager, DuckTxnHandle};
 use crate::transaction::transaction_context::TransactionContext;
@@ -275,7 +275,7 @@ impl Connection {
     /// `table_name` 支持两种格式：
     /// - 非限定：`"users"`  → 在默认 schema `"main"` 下查找
     /// - 限定：  `"main.users"` → 在指定 schema 下查找
-    fn get_table(&self, table_name: &str) -> Result<TableHandle> {
+    pub(crate) fn get_table(&self, table_name: &str) -> Result<TableHandle> {
         let key = parse_table_name(table_name);
         let ctx = self.context.lock();
         ctx.db
@@ -308,7 +308,7 @@ impl Connection {
     }
 
     /// 获取读事务句柄（短暂锁 context 后释放）。
-    fn acquire_read_transaction(&self) -> Arc<DuckTxnHandle> {
+    pub(crate) fn acquire_read_transaction(&self) -> Arc<DuckTxnHandle> {
         if let Some(txn) = self.get_transaction() {
             txn
         } else {
@@ -326,7 +326,7 @@ impl Connection {
 
     // ── storage::data_table::ClientContext 构建 ───────────────────────────────
 
-    fn build_storage_context(
+    pub(crate) fn build_storage_context(
         txn: &Arc<DuckTxnHandle>,
     ) -> crate::storage::data_table::ClientContext {
         let txn_guard = txn.lock_inner();
@@ -409,17 +409,19 @@ impl Connection {
 
         // 获取事务句柄（不持有 context 锁）
         let txn = self.acquire_read_transaction();
+        let storage_context = Self::build_storage_context(&txn);
+        let storage_column_ids: Vec<StorageIndex> =
+            column_ids.iter().copied().map(StorageIndex).collect();
 
         let mut state = crate::storage::table::scan_state::TableScanState::new();
-        table
-            .storage
-            .initialize_scan(&mut state, column_ids.clone(), None);
         {
             let txn_guard = txn.lock_inner();
-            txn_guard.storage.initialize_scan_state(
-                table.storage.info.table_id(),
-                &mut state.local_state,
-                &column_ids,
+            table.storage.initialize_scan(
+                &storage_context,
+                &*txn_guard,
+                &mut state,
+                &storage_column_ids,
+                None,
             );
         }
 

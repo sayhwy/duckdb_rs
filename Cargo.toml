@@ -8,6 +8,7 @@ build = "build.rs"
 parking_lot     = "0.12"
 crossbeam-queue = "0.3"
 anyhow = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 
 [build-dependencies]
 cc = "1"
@@ -23,3 +24,7 @@ path = "src/bin/test_duckdb_interop.rs"
 [[bin]]
 name = "read_million_students"
 path = "src/bin/test_read_million_students.rs"
+
+[[bin]]
+name = "test_tokio_parallel_customer_scan"
+path = "src/bin/test_tokio_parallel_customer_scan.rs"

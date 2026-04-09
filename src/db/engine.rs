@@ -41,6 +41,8 @@
 //! ```
 
 use crate::common::types::LogicalType;
+use crate::storage::data_table::{StorageIndex, TableFilterSet};
+use crate::storage::table::scan_state::{ParallelTableScanState, TableScanState};
 
 // ─── Error Type ───────────────────────────────────────────────────────────────
 
@@ -63,4 +65,45 @@ pub struct SchemaInfo {
     pub name: String,
     /// 该 Schema 下的所有表。
     pub tables: Vec<SchemaTableInfo>,
+}
+
+/// 存储层可识别的表扫描请求。
+///
+/// 对齐 DuckDB 的 `column_ids + table_filters` 入口，
+/// 不直接承载执行器表达式树。
+#[derive(Clone, Default)]
+pub struct TableScanRequest {
+    pub column_ids: Vec<StorageIndex>,
+    pub filters: Option<TableFilterSet>,
+}
+
+impl TableScanRequest {
+    pub fn new(column_ids: Vec<StorageIndex>) -> Self {
+        Self {
+            column_ids,
+            filters: None,
+        }
+    }
+}
+
+/// Engine 侧共享扫描状态。
+///
+/// 这层对应执行器持有的 global state，内部只保存 scan request 和输出类型。
+pub struct EngineScanGlobalState {
+    pub request: TableScanRequest,
+    pub result_types: Vec<LogicalType>,
+}
+
+/// Engine 侧线程私有扫描状态。
+///
+/// 内部直接持有 DuckDB 风格的 `TableScanState`。
+pub struct EngineScanLocalState {
+    pub scan_state: TableScanState,
+}
+
+/// Engine 侧并行扫描共享状态。
+///
+/// 内部直接持有 DuckDB 风格的 `ParallelTableScanState`。
+pub struct EngineParallelScanState {
+    pub parallel_state: ParallelTableScanState,
 }

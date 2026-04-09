@@ -1,10 +1,16 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::engine::{EngineError, SchemaInfo, SchemaTableInfo};
+use super::engine::{
+    EngineError, EngineParallelScanState, EngineScanGlobalState, EngineScanLocalState,
+    SchemaInfo, SchemaTableInfo, TableScanRequest,
+};
 use crate::common::errors::{Result, anyhow};
 use crate::common::types::{DataChunk, LogicalType};
-use crate::db::conn::{Connection, DatabaseInstance};
+use crate::db::conn::{Connection, DatabaseInstance, TableHandle};
+use crate::storage::data_table::StorageIndex;
+use crate::storage::table::scan_state::{ParallelTableScanState, TableScanState};
+use crate::transaction::duck_transaction_manager::DuckTxnHandle;
 
 // ─── DuckdbEngine ──────────────────────────────────────────────────────────────
 
@@ -79,6 +85,42 @@ pub struct DuckConnection {
 }
 
 impl DuckConnection {
+    fn resolve_scan(
+        &self,
+        table_name: &str,
+        mut request: TableScanRequest,
+    ) -> Result<ResolvedScan, EngineError> {
+        let table = self.conn.get_table(table_name)?;
+        if request.column_ids.is_empty() {
+            request.column_ids = (0..table.storage.column_count())
+                .map(|idx| StorageIndex(idx as u64))
+                .collect();
+        }
+
+        let result_types: Vec<LogicalType> = request
+            .column_ids
+            .iter()
+            .map(|idx| {
+                table.storage.column_definitions[idx.0 as usize]
+                    .logical_type
+                    .clone()
+            })
+            .collect();
+
+        let txn = self.conn.acquire_read_transaction();
+        let storage_context = Connection::build_storage_context(&txn);
+
+        Ok(ResolvedScan {
+            table,
+            txn,
+            storage_context,
+            global_state: EngineScanGlobalState {
+                request,
+                result_types,
+            },
+        })
+    }
+
     // ── 事务管理 ──────────────────────────────────────────────────────────────
 
     /// 开启事务（`BEGIN TRANSACTION`）。
@@ -123,13 +165,121 @@ impl DuckConnection {
         self.conn.delete_chunk(table_name, row_ids)
     }
 
+    /// 初始化顺序扫描。
+    ///
+    /// 返回值持有：
+    /// - engine 级 global state
+    /// - 线程私有 local scan state
+    /// - 绑定当前事务的存储上下文
+    pub fn begin_scan(
+        &self,
+        table_name: &str,
+        request: TableScanRequest,
+    ) -> Result<DuckTableScanHandle, EngineError> {
+        let resolved = self.resolve_scan(table_name, request)?;
+        let column_ids = resolved
+            .global_state
+            .request
+            .column_ids
+            .clone();
+        let mut local_state = EngineScanLocalState {
+            scan_state: TableScanState::new(),
+        };
+        {
+            let txn_guard = resolved.txn.lock_inner();
+            resolved.table.storage.initialize_scan(
+                &resolved.storage_context,
+                &*txn_guard,
+                &mut local_state.scan_state,
+                &column_ids,
+                resolved.global_state.request.filters.as_ref(),
+            );
+        }
+
+        Ok(DuckTableScanHandle {
+            table: resolved.table,
+            txn: resolved.txn,
+            global_state: resolved.global_state,
+            local_state,
+        })
+    }
+
+    /// 初始化并行扫描共享状态。
+    ///
+    /// worker 线程应通过返回值反复领取 `DuckTableScanTask`，
+    /// 然后在各自线程内调用 `next_chunk`。
+    pub fn begin_parallel_scan(
+        &self,
+        table_name: &str,
+        request: TableScanRequest,
+    ) -> Result<DuckParallelScanHandle, EngineError> {
+        let resolved = self.resolve_scan(table_name, request)?;
+        let mut parallel_state = EngineParallelScanState {
+            parallel_state: ParallelTableScanState {
+                scan_state: crate::storage::table::scan_state::ParallelCollectionScanState {
+                    row_groups: None,
+                    current_row_group: None,
+                    next_row_group_index: 0,
+                    vector_index: 0,
+                    max_row: 0,
+                    batch_index: 0,
+                    processed_rows: 0,
+                    lock: parking_lot::Mutex::new(()),
+                },
+                local_state: crate::storage::table::scan_state::ParallelCollectionScanState {
+                    row_groups: None,
+                    current_row_group: None,
+                    next_row_group_index: 0,
+                    vector_index: 0,
+                    max_row: 0,
+                    batch_index: 0,
+                    processed_rows: 0,
+                    lock: parking_lot::Mutex::new(()),
+                },
+            },
+        };
+        resolved.table.storage.initialize_parallel_scan(
+            &resolved.storage_context,
+            &mut parallel_state.parallel_state,
+            &[],
+        );
+
+        Ok(DuckParallelScanHandle {
+            table: resolved.table,
+            txn: resolved.txn,
+            storage_context: resolved.storage_context,
+            global_state: resolved.global_state,
+            parallel_state,
+        })
+    }
+
     /// 扫描表数据，可见当前事务内的未提交写入。
+    ///
+    /// 这是兼容层，内部走 `begin_scan` + `next_chunk`。
     pub fn scan(
         &self,
         table_name: &str,
         column_ids: Option<Vec<u64>>,
     ) -> Result<Vec<DataChunk>, EngineError> {
-        self.conn.scan_chunks(table_name, column_ids)
+        let request = TableScanRequest::new(
+            column_ids
+                .unwrap_or_default()
+                .into_iter()
+                .map(StorageIndex)
+                .collect(),
+        );
+        let mut handle = self.begin_scan(table_name, request)?;
+        let mut chunks = Vec::new();
+        loop {
+            let mut chunk = DataChunk::new();
+            chunk.initialize(handle.result_types(), crate::common::types::STANDARD_VECTOR_SIZE);
+            if !handle.next_chunk(&mut chunk)? {
+                break;
+            }
+            chunk.flatten();
+            chunks.push(chunk);
+        }
+        Ok(chunks)
     }
 
     // ── Schema / DDL ──────────────────────────────────────────────────────────
@@ -189,5 +339,134 @@ impl DuckConnection {
         }
         self.db.create_table(schema, table, columns);
         Ok(())
+    }
+}
+
+struct ResolvedScan {
+    table: TableHandle,
+    txn: Arc<DuckTxnHandle>,
+    storage_context: crate::storage::data_table::ClientContext,
+    global_state: EngineScanGlobalState,
+}
+
+/// 顺序扫描句柄。
+///
+/// 这层对应 engine 的 `global state + local state`。
+pub struct DuckTableScanHandle {
+    table: TableHandle,
+    txn: Arc<DuckTxnHandle>,
+    global_state: EngineScanGlobalState,
+    local_state: EngineScanLocalState,
+}
+
+impl DuckTableScanHandle {
+    pub fn global_state(&self) -> &EngineScanGlobalState {
+        &self.global_state
+    }
+
+    pub fn local_state(&self) -> &EngineScanLocalState {
+        &self.local_state
+    }
+
+    pub fn result_types(&self) -> &[LogicalType] {
+        &self.global_state.result_types
+    }
+
+    pub fn next_chunk(&mut self, result: &mut DataChunk) -> Result<bool, EngineError> {
+        let txn_guard = self.txn.lock_inner();
+        self.table
+            .storage
+            .scan(&*txn_guard, result, &mut self.local_state.scan_state);
+        Ok(result.size() > 0)
+    }
+}
+
+/// 并行扫描共享句柄。
+///
+/// 这层对应 engine 的 global state 和 global_parallel_state。
+pub struct DuckParallelScanHandle {
+    table: TableHandle,
+    txn: Arc<DuckTxnHandle>,
+    storage_context: crate::storage::data_table::ClientContext,
+    global_state: EngineScanGlobalState,
+    parallel_state: EngineParallelScanState,
+}
+
+impl DuckParallelScanHandle {
+    pub fn global_state(&self) -> &EngineScanGlobalState {
+        &self.global_state
+    }
+
+    pub fn parallel_state(&self) -> &EngineParallelScanState {
+        &self.parallel_state
+    }
+
+    pub fn result_types(&self) -> &[LogicalType] {
+        &self.global_state.result_types
+    }
+
+    pub fn next_task(&mut self) -> Result<Option<DuckTableScanTask>, EngineError> {
+        let mut local_state = EngineScanLocalState {
+            scan_state: TableScanState::new(),
+        };
+        let column_ids: Vec<u64> = self
+            .global_state
+            .request
+            .column_ids
+            .iter()
+            .map(|idx| idx.0)
+            .collect();
+        local_state.scan_state.initialize(column_ids);
+
+        let rows = self.table.storage.next_parallel_scan(
+            &self.storage_context,
+            &mut self.parallel_state.parallel_state,
+            &mut local_state.scan_state,
+        );
+        if rows == 0 {
+            return Ok(None);
+        }
+
+        Ok(Some(DuckTableScanTask {
+            table: self.table.clone(),
+            txn: Arc::clone(&self.txn),
+            global_state: EngineScanGlobalState {
+                request: self.global_state.request.clone(),
+                result_types: self.global_state.result_types.clone(),
+            },
+            local_state,
+        }))
+    }
+}
+
+/// 并行 worker 私有扫描任务。
+///
+/// 这层对应执行器线程拿到的 local state。
+pub struct DuckTableScanTask {
+    table: TableHandle,
+    txn: Arc<DuckTxnHandle>,
+    global_state: EngineScanGlobalState,
+    local_state: EngineScanLocalState,
+}
+
+impl DuckTableScanTask {
+    pub fn global_state(&self) -> &EngineScanGlobalState {
+        &self.global_state
+    }
+
+    pub fn local_state(&self) -> &EngineScanLocalState {
+        &self.local_state
+    }
+
+    pub fn result_types(&self) -> &[LogicalType] {
+        &self.global_state.result_types
+    }
+
+    pub fn next_chunk(&mut self, result: &mut DataChunk) -> Result<bool, EngineError> {
+        let txn_guard = self.txn.lock_inner();
+        self.table
+            .storage
+            .scan(&*txn_guard, result, &mut self.local_state.scan_state);
+        Ok(result.size() > 0)
     }
 }

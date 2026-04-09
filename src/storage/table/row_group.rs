@@ -189,6 +189,10 @@ impl RowGroup {
         self.row_start
     }
 
+    pub fn get_collection(&self) -> Option<Arc<super::row_group_collection::RowGroupCollection>> {
+        self.collection.upgrade()
+    }
+
     pub fn row_end(&self) -> Idx {
         self.row_start + self.count()
     }
@@ -338,7 +342,7 @@ impl RowGroup {
     /// when a row group was merged from local storage via `merge_storage`).
     pub fn initialize_scan(&self, state: &mut CollectionScanState, node_row_start: Idx) -> bool {
         // Zone-map check — prune the whole row group if possible.
-        if !self.check_zonemap(&state.filters) {
+        if !self.check_zonemap(&state.get_filter_info()) {
             return false;
         }
 
@@ -361,7 +365,7 @@ impl RowGroup {
         //
         // We clone column_ids to avoid borrow-checker conflicts when we
         // also borrow state.column_scans mutably.
-        let column_ids: Vec<u64> = state.column_ids.clone();
+        let column_ids = state.get_column_ids();
         for (i, &col_id) in column_ids.iter().enumerate() {
             let col = self.get_column(col_id as usize);
             if let Some(scan) = state.column_scans.get_mut(i) {
@@ -381,7 +385,7 @@ impl RowGroup {
         node_row_start: Idx,
         vector_offset: Idx,
     ) -> bool {
-        if !self.check_zonemap(&state.filters) {
+        if !self.check_zonemap(&state.get_filter_info()) {
             return false;
         }
 
@@ -400,7 +404,7 @@ impl RowGroup {
         }
 
         let row_number = vector_offset * STANDARD_VECTOR_SIZE;
-        let column_ids: Vec<u64> = state.column_ids.clone();
+        let column_ids = state.get_column_ids();
         for (i, &col_id) in column_ids.iter().enumerate() {
             let col = self.get_column(col_id as usize);
             if let Some(scan) = state.column_scans.get_mut(i) {
@@ -449,7 +453,7 @@ impl RowGroup {
     /// Mirrors C++ `RowGroup::NextVector`.
     fn next_vector(&self, state: &mut CollectionScanState) {
         state.vector_index += 1;
-        let column_ids: Vec<u64> = state.column_ids.clone();
+        let column_ids = state.get_column_ids();
         for (i, &col_id) in column_ids.iter().enumerate() {
             let col = self.get_column(col_id as usize);
             if let Some(scan) = state.column_scans.get_mut(i) {
@@ -519,8 +523,8 @@ impl RowGroup {
             }
 
             // ── Column scan ───────────────────────────────────────────────────
-            let has_filters = state.filters.has_filters();
-            let column_ids: Vec<u64> = state.column_ids.clone();
+            let has_filters = state.get_filter_info().has_filters();
+            let column_ids = state.get_column_ids();
 
             if count == max_count && !has_filters {
                 // Fast path: no deletions, no filters — scan the full vector.

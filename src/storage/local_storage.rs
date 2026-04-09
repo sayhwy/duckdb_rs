@@ -451,7 +451,7 @@ impl LocalTableStorage {
         }
 
         // C++: collection.InitializeScan(context, state, state.GetColumnIds(), table_filters.get());
-        let column_ids = state.get_column_ids().to_vec();
+        let column_ids = state.get_column_ids();
         collection.initialize_scan(state, &column_ids);
     }
 
@@ -729,6 +729,10 @@ impl LocalTableManager {
         self.table_storage.lock().get(&table_id).cloned()
     }
 
+    pub fn get_storage_for_table(&self, table: &DataTable) -> Option<Arc<Mutex<LocalTableStorage>>> {
+        self.get_storage(table.info.table_id())
+    }
+
     /// 若不存在则创建本地存储并返回（C++: `GetOrCreateStorage`）。
     pub fn get_or_create_storage(
         &self,
@@ -873,14 +877,14 @@ impl LocalStorage {
     /// 初始化对本地存储的顺序扫描（C++: `InitializeScan`）。
     pub fn initialize_scan(
         &self,
-        table_id: u64,
+        table: &DataTable,
         state: &mut CollectionScanState,
         table_filters: Option<&crate::storage::data_table::TableFilterSet>,
     ) {
         // C++: auto storage = table_manager.GetStorage(table);
         //      if (!storage || storage->GetCollection().GetTotalRows() == 0) return;
         //      storage->InitializeScan(state, table_filters);
-        let storage = match self.table_manager.get_storage(table_id) {
+        let storage = match self.table_manager.get_storage_for_table(table) {
             Some(s) => s,
             None => return,
         };
@@ -896,33 +900,26 @@ impl LocalStorage {
     /// C++ 原型: `Scan(CollectionScanState&, const vector<StorageIndex>&, DataChunk&)`
     ///
     /// 通过 `table_id` 查找本地集合并驱动扫描。
-    pub fn scan(&self, table_id: u64, state: &mut CollectionScanState, result: &mut DataChunk) {
+    pub fn scan(&self, state: &mut CollectionScanState, _column_ids: &[StorageIndex], result: &mut DataChunk) {
         // C++: state.Scan(transaction, result);
-        // 在 Rust 中，CollectionScanState 不直接持有 collection 引用，
-        // 需通过 table_id 找到对应集合后驱动扫描。
-        let storage = match self.table_manager.get_storage(table_id) {
-            Some(s) => s,
-            None => return,
-        };
-        let collection = storage.lock().get_collection();
         // 本地未提交数据对事务自身完全可见；使用事务 ID 0 访问所有本地行。
         let txn_data = TransactionData {
             start_time: 0,
             transaction_id: 0,
         };
-        collection.scan(txn_data, state, result);
+        let _ = state.scan(txn_data, result);
     }
 
     /// 初始化并行扫描状态（C++: `InitializeParallelScan`）。
-    pub fn initialize_parallel_scan(&self, table_id: u64, state: &mut ParallelCollectionScanState) {
+    pub fn initialize_parallel_scan(&self, table: &DataTable, state: &mut ParallelCollectionScanState) {
         // C++: if (!storage) { state.max_row = 0; state.vector_index = 0; ... }
         //      else { storage->GetCollection().InitializeParallelScan(state); }
-        match self.table_manager.get_storage(table_id) {
+        match self.table_manager.get_storage_for_table(table) {
             None => {
                 state.max_row = 0;
-                state
-                    .current_row_group_index
-                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                state.row_groups = None;
+                state.current_row_group = None;
+                state.next_row_group_index = 0;
             }
             Some(s) => {
                 s.lock().get_collection().initialize_parallel_scan(state);
@@ -933,13 +930,14 @@ impl LocalStorage {
     /// 推进并行扫描（C++: `NextParallelScan`）。
     pub fn next_parallel_scan(
         &self,
-        table_id: u64,
+        _context: &ClientContext,
+        table: &DataTable,
         state: &mut ParallelCollectionScanState,
         scan_state: &mut CollectionScanState,
     ) -> bool {
         // C++: if (!storage) return false;
         //      return storage->GetCollection().NextParallelScan(context, state, scan_state);
-        let storage = match self.table_manager.get_storage(table_id) {
+        let storage = match self.table_manager.get_storage_for_table(table) {
             Some(s) => s,
             None => return false,
         };
@@ -1240,12 +1238,12 @@ impl LocalStorage {
     /// 设置 `state.column_ids` 并在存在本地行组时初始化扫描位置。
     pub fn initialize_scan_state(
         &self,
-        table_id: u64,
+        table: &DataTable,
         state: &mut CollectionScanState,
         column_ids: &[u64],
     ) {
         state.set_column_ids(column_ids.to_vec());
-        self.initialize_scan(table_id, state, None);
+        self.initialize_scan(table, state, None);
     }
 
     /// 本事务在该表上追加的净行数（C++: `AddedRows`）。

@@ -30,7 +30,7 @@ use super::column_data::{PersistentCollectionData, PersistentRowGroupData};
 use super::data_table_info::DataTableInfo;
 use super::persistent_table_data::PersistentTableData;
 use super::row_group::{RowGroup, RowGroupPointer, RowGroupWriteInfo};
-use super::scan_state::{CollectionScanState, ParallelCollectionScanState};
+use super::scan_state::{CollectionScanState, ParallelCollectionScanState, RowGroupSegmentRef};
 use super::segment_base::SegmentBase;
 use super::segment_tree::SegmentTree;
 use super::table_statistics::TableStatistics;
@@ -187,7 +187,7 @@ impl RowGroupCollection {
     /// - `state.column_ids`         — projected column indices.
     /// - `state.column_scans`       — one per projected column.
     /// - `state.max_row`            — upper row bound (= total_rows).
-    /// - `state.row_group_index`    — first row group to scan.
+    /// - `state.current_row_group`  — first row group to scan.
     ///
     /// Also calls `RowGroup::initialize_scan` on the root row group so that
     /// column scan states are ready before the first call to `scan`.
@@ -202,16 +202,17 @@ impl RowGroupCollection {
         state.set_column_ids(column_ids.to_vec());
 
         // Get the root row group (first segment).
+        let tree_guard = self.owned_row_groups.lock();
+        let tree = Arc::clone(&*tree_guard);
+        drop(tree_guard);
+        state.row_groups = Some(Arc::clone(&tree));
         let (root_arc, root_idx, base_row_id, root_row_start) = {
-            let tree_guard = self.owned_row_groups.lock();
-            let tree = Arc::clone(&*tree_guard);
-            drop(tree_guard);
             let lock = tree.lock();
             let base = tree.base_row_id();
             match tree.get_root_segment(&lock) {
                 None => {
+                    state.current_row_group = None;
                     // Empty collection.
-                    state.row_group_index = None;
                     state.max_row = 0;
                     return;
                 }
@@ -222,7 +223,11 @@ impl RowGroupCollection {
         // C++: state.max_row = row_start + GetTotalRows()
         // base_row_id is the collection's starting row offset (may be i64::MAX for local storage).
         state.max_row = base_row_id + self.total_rows();
-        state.row_group_index = Some(root_idx);
+        state.current_row_group = Some(RowGroupSegmentRef {
+            row_start: root_row_start,
+            index: root_idx,
+            row_group: Arc::clone(&root_arc),
+        });
         // C++: row_group->GetNode().InitializeScan(*state, *row_group)
         // Pass the SegmentNode's row_start so merged row groups (with wrong self.row_start) work.
         root_arc.initialize_scan(state, root_row_start);
@@ -253,85 +258,13 @@ impl RowGroupCollection {
         state: &mut CollectionScanState,
         result: &mut DataChunk,
     ) -> bool {
-        let tree = self.get_row_groups();
-
-        loop {
-            let rg_idx = match state.row_group_index {
-                None => return false,
-                Some(idx) => idx,
-            };
-
-            // Clone Arc without holding the tree lock during scan.
-            let (rg_arc, rg_row_start, rg_count): (Arc<RowGroup>, Idx, Idx) = {
-                let lock = tree.lock();
-                match lock.0.get(rg_idx) {
-                    None => return false,
-                    Some(node) => (node.arc(), node.row_start(), node.node().count()),
-                }
-            };
-
-            // Scan the current row group.
-            rg_arc.scan(transaction, state, result);
-
-            if result.size() > 0 {
-                return true;
-            }
-
-            // Row group exhausted.
-            // C++: if (max_row <= row_group->GetRowStart() + row_group->GetNode().count)
-            if state.max_row <= rg_row_start + rg_count {
-                state.row_group_index = None;
-                return false;
-            }
-
-            // Advance to the next row group, skipping zone-map-pruned ones.
-            // C++: do { row_group = GetNextRowGroup(*row_group); ... } while (row_group)
-            let mut curr_idx = rg_idx;
-            loop {
-                let next = {
-                    let lock = tree.lock();
-                    let next_idx = curr_idx + 1;
-                    if next_idx < lock.0.len() {
-                        Some((
-                            lock.0[next_idx].index(),
-                            lock.0[next_idx].row_start(),
-                            lock.0[next_idx].arc(),
-                        ))
-                    } else {
-                        None
-                    }
-                };
-
-                match next {
-                    None => {
-                        state.row_group_index = None;
-                        return false;
-                    }
-                    Some((next_idx, next_row_start, next_arc)) => {
-                        // C++: if (row_group->GetRowStart() >= max_row) { row_group = None; break }
-                        if next_row_start >= state.max_row {
-                            state.row_group_index = None;
-                            return false;
-                        }
-                        state.row_group_index = Some(next_idx);
-                        curr_idx = next_idx;
-                        // C++: row_group->GetNode().InitializeScan(*this, *row_group)
-                        // Pass SegmentNode's row_start so merged row groups work correctly.
-                        if next_arc.initialize_scan(state, next_row_start) {
-                            break; // Found a scannable row group — go back to outer loop.
-                        }
-                        // Zone-map pruned → continue to the next one.
-                    }
-                }
-            }
-            // Outer loop continues with the new `state.row_group_index`.
-        }
+        state.scan(transaction, result)
     }
 
     pub fn initialize_parallel_scan(&self, state: &mut ParallelCollectionScanState) {
-        state
-            .current_row_group_index
-            .store(0, std::sync::atomic::Ordering::Relaxed);
+        state.row_groups = Some(self.get_row_groups());
+        state.current_row_group = None;
+        state.next_row_group_index = 0;
         state.max_row = self.total_rows();
     }
 
@@ -598,8 +531,9 @@ impl RowGroupCollection {
     ) {
         state.set_column_ids(column_ids.to_vec());
         state.max_row = end_row.min(self.total_rows());
+        state.row_groups = Some(self.get_row_groups());
         if start_row >= state.max_row {
-            state.row_group_index = None;
+            state.current_row_group = None;
             state.max_row_group_row = 0;
             return;
         }
@@ -614,13 +548,17 @@ impl RowGroupCollection {
                     .then(|| (idx, start, node.node().count(), node.arc()))
             })
         else {
-            state.row_group_index = None;
+            state.current_row_group = None;
             state.max_row_group_row = 0;
             return;
         };
         drop(lock);
 
-        state.row_group_index = Some(node_index);
+        state.current_row_group = Some(RowGroupSegmentRef {
+            row_start: row_group_start,
+            index: node_index,
+            row_group: row_group.clone(),
+        });
         let vector_offset = (start_row - row_group_start) / super::types::STANDARD_VECTOR_SIZE;
         let _ = row_group.initialize_scan_with_offset(state, row_group_start, vector_offset);
     }
@@ -893,32 +831,45 @@ impl RowGroupCollection {
         // C++:
         //   auto &row_group_index = state.current_row_group;
         //   loop:
-        //     auto current = state.current_row_group_index.fetch_add(1);
+        //     auto current = row_group_index++;
         //     if (current >= row_groups.size()) return false;
         //     if (row_group->InitializeScan(scan_state)) return true;
-        let tree = self.get_row_groups();
+        let Some(tree) = state.row_groups.clone() else {
+            return false;
+        };
         loop {
-            let idx = state
-                .current_row_group_index
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-            let (row_group_arc, node_idx, node_row_start) = {
-                let lock = tree.lock();
-                match lock.0.get(idx as usize) {
-                    None => return false,
-                    Some(node) => {
-                        let rs = node.row_start();
-                        if rs >= state.max_row {
-                            return false;
-                        }
-                        (node.arc(), node.index(), rs)
-                    }
-                }
+            let current_ref = {
+                let _guard = state.lock.lock();
+                let idx = state.next_row_group_index;
+                state.next_row_group_index += 1;
+                let current_ref = {
+                    let lock = tree.lock();
+                    lock.0.get(idx as usize).map(|node| RowGroupSegmentRef {
+                        row_start: node.row_start(),
+                        index: node.index(),
+                        row_group: node.arc(),
+                    })
+                };
+                state.current_row_group = current_ref.clone();
+                current_ref
             };
 
+            let Some(current_row_group) = current_ref else {
+                state.current_row_group = None;
+                return false;
+            };
+            if current_row_group.row_start >= state.max_row {
+                state.current_row_group = None;
+                return false;
+            }
+
             // Attempt to initialise the scan for this row group.
-            scan_state.row_group_index = Some(node_idx);
-            if row_group_arc.initialize_scan(scan_state, node_row_start) {
+            scan_state.row_groups = Some(Arc::clone(&tree));
+            scan_state.current_row_group = Some(current_row_group.clone());
+            if current_row_group
+                .row_group
+                .initialize_scan(scan_state, current_row_group.row_start)
+            {
                 return true;
             }
             // Zone-map pruned — try the next one.

@@ -45,6 +45,7 @@ use crate::storage::table::delete_state::TableDeleteState;
 use crate::storage::table::persistent_table_data::PersistentTableData;
 use crate::storage::table::row_group_collection::RowGroupCollection;
 use crate::storage::table::scan_state::{ColumnFetchState, ParallelTableScanState, TableScanState};
+use crate::storage::table::segment_base::SegmentBase;
 use crate::storage::table::types::{Idx, RowId, TransactionData};
 use crate::storage::write_ahead_log::WriteAheadLog;
 use crate::transaction::duck_transaction::DuckTransaction;
@@ -69,6 +70,7 @@ use std::sync::{
 /// # C++ 对应
 /// `duckdb/main/client_context.hpp`
 /// `LocalStorage::Get(context, db)` → `context.local_storage`
+#[derive(Clone)]
 pub struct ClientContext {
     /// 当前事务的本地写入缓冲区（C++: 通过 `LocalStorage::Get(context, db)` 访问）。
     pub local_storage: LocalStorage,
@@ -107,6 +109,7 @@ impl ColumnDefinition {
 /// 列过滤集（C++: `TableFilterSet`）。
 ///
 /// 携带谓词下推的列级过滤器；完整实现在执行层。
+#[derive(Clone, Default)]
 pub struct TableFilterSet;
 
 /// 物理列存储索引（C++: `StorageIndex`，区别于逻辑 `LogicalIndex`）。
@@ -114,6 +117,10 @@ pub struct TableFilterSet;
 /// 用于指定 Scan/Fetch 时需要读取的列。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StorageIndex(pub u64);
+
+/// 逻辑列索引路径（C++: `ColumnIndex`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ColumnIndex(pub u64);
 
 /// 扫描模式（C++: `TableScanType`）。
 ///
@@ -426,19 +433,19 @@ impl DataTable {
     /// ```
     pub fn initialize_scan(
         &self,
+        context: &ClientContext,
+        _transaction: &DuckTransaction,
         state: &mut TableScanState,
-        column_ids: Vec<u64>,
-        _table_filters: Option<&TableFilterSet>,
+        column_ids: &[StorageIndex],
+        table_filters: Option<&TableFilterSet>,
     ) {
-        // 初始化公共列 ID 列表
-        state.initialize(column_ids.clone());
-        // 持久化行组部分（对应 row_groups->InitializeScan(...)）
+        let storage_column_ids: Vec<u64> = column_ids.iter().map(|column_id| column_id.0).collect();
+        state.initialize(storage_column_ids.clone());
         self.row_groups
-            .initialize_scan(&mut state.table_state, &column_ids);
-        // 事务本地部分（对应 local_storage.InitializeScan(...)）
-        state.local_state.set_column_ids(column_ids);
-        state.local_state.row_group_index = None;
-        state.local_state.max_row = 0;
+            .initialize_scan(&mut state.table_state, &storage_column_ids);
+        context
+            .local_storage
+            .initialize_scan(self, &mut state.local_state, table_filters);
     }
 
     /// 推进顺序扫描，填充一批结果（C++: `DataTable::Scan()`）。
@@ -473,10 +480,7 @@ impl DataTable {
             start_time: transaction.start_time,
             transaction_id: transaction.transaction_id,
         };
-        if self
-            .row_groups
-            .scan(tx_data, &mut state.table_state, result)
-        {
+        if state.table_state.scan(tx_data, result) {
             debug_assert!(result.size() > 0, "scan returned true but result is empty");
             return;
         }
@@ -486,8 +490,12 @@ impl DataTable {
         //         local_storage.Scan(state.local_state, state.GetColumnIds(), result);
         {
             let local_storage: &LocalStorage = &transaction.storage;
-            let table_id = self.info.table_id();
-            local_storage.scan(table_id, &mut state.local_state, result);
+            let local_column_ids: Vec<StorageIndex> = state
+                .column_ids()
+                .into_iter()
+                .map(StorageIndex)
+                .collect();
+            local_storage.scan(&mut state.local_state, &local_column_ids, result);
         }
     }
 
@@ -529,17 +537,17 @@ impl DataTable {
     ///   row_groups->InitializeParallelScan(state.scan_state);
     ///   local_storage.InitializeParallelScan(*this, state.local_state);
     /// ```
-    pub fn initialize_parallel_scan(&self, state: &mut ParallelTableScanState) {
-        // C++: row_groups->InitializeParallelScan(state.scan_state);
-        //      local_storage.InitializeParallelScan(*this, state.local_state);
+    pub fn initialize_parallel_scan(
+        &self,
+        context: &ClientContext,
+        state: &mut ParallelTableScanState,
+        _column_indexes: &[ColumnIndex],
+    ) {
         self.row_groups
             .initialize_parallel_scan(&mut state.scan_state);
-        // Local storage parallel scan not yet wired up.
-        state
-            .local_state
-            .current_row_group_index
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-        state.local_state.max_row = 0;
+        context
+            .local_storage
+            .initialize_parallel_scan(self, &mut state.local_state);
     }
 
     /// 推进并行扫描（C++: `DataTable::NextParallelScan()`）。
@@ -557,47 +565,35 @@ impl DataTable {
     /// ```
     pub fn next_parallel_scan(
         &self,
+        context: &ClientContext,
         parallel_state: &mut ParallelTableScanState,
         scan_state: &mut TableScanState,
-    ) -> bool {
-        // C++: if (row_groups->NextParallelScan(context, state.scan_state, scan_state.table_state)) return true;
-        //      if (local_storage.NextParallelScan(...)) return true;
-        //      return false;
-        // Claim the next row group index atomically.
-        use std::sync::atomic::Ordering;
-        let tree = self.row_groups.get_row_groups();
-        let total = tree.segment_count() as u64;
-        loop {
-            let current = parallel_state
-                .scan_state
-                .current_row_group_index
-                .load(Ordering::Relaxed);
-            if current >= total {
-                break;
-            }
-            let claimed = parallel_state
-                .scan_state
-                .current_row_group_index
-                .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Relaxed);
-            if claimed.is_ok() {
-                // Initialize scan_state.table_state for this row group.
-                let lock = tree.lock();
-                if let Some(node) = tree.get_segment_by_index(&lock, current as i64) {
-                    let rg: Arc<crate::storage::table::row_group::RowGroup> = node.arc();
-                    let idx = node.index();
-                    let node_row_start = node.row_start();
-                    drop(lock);
-                    let col_ids = scan_state.column_ids().to_vec();
-                    self.row_groups
-                        .initialize_scan(&mut scan_state.table_state, &col_ids);
-                    scan_state.table_state.row_group_index = Some(idx);
-                    rg.initialize_scan(&mut scan_state.table_state, node_row_start);
-                }
-                return true;
-            }
+    ) -> Idx {
+        if self
+            .row_groups
+            .next_parallel_scan(&mut parallel_state.scan_state, &mut scan_state.table_state)
+        {
+            return scan_state
+                .table_state
+                .current_row_group
+                .as_ref()
+                .map(|row_group| row_group.row_group.count())
+                .unwrap_or(0);
         }
-        // Local storage parallel scan not yet implemented.
-        false
+        if context.local_storage.next_parallel_scan(
+            context,
+            self,
+            &mut parallel_state.local_state,
+            &mut scan_state.local_state,
+        ) {
+            return scan_state
+                .local_state
+                .current_row_group
+                .as_ref()
+                .map(|row_group| row_group.row_group.count())
+                .unwrap_or(0);
+        }
+        0
     }
 
     /// 用于 CREATE INDEX 的提交行扫描（C++: `DataTable::CreateIndexScan()`）。
@@ -690,18 +686,10 @@ impl DataTable {
         let mut chunk = DataChunk::new();
         chunk.initialize(&types, crate::common::types::STANDARD_VECTOR_SIZE);
 
-        let Some(row_group_index) = state.table_state.row_group_index else {
+        let Some(current_row_group) = state.table_state.current_row_group.clone() else {
             return;
         };
-        let current_row_group_start = {
-            let tree = self.row_groups.get_row_groups();
-            let lock = tree.lock();
-            match tree.get_segment_by_index(&lock, row_group_index as i64) {
-                Some(node) => node.row_start(),
-                None => return,
-            }
-        };
-        let mut current_row = current_row_group_start
+        let mut current_row = current_row_group.row_start
             + state.table_state.vector_index * crate::storage::table::types::STANDARD_VECTOR_SIZE;
         while current_row < end {
             chunk.reset();
@@ -1375,7 +1363,6 @@ impl DataTable {
         state.initialize(column_ids.clone());
         self.row_groups
             .initialize_scan(&mut state.table_state, &column_ids);
-        state.local_state.set_column_ids(column_ids);
         state
     }
 
@@ -1393,14 +1380,13 @@ impl DataTable {
             start_row,
             end_row,
         );
-        state.local_state.set_column_ids(column_ids);
         state
     }
 
     pub fn scan_committed_chunk(&self, state: &mut TableScanState, result: &mut DataChunk) -> bool {
-        if result.column_count() != state.column_ids().len() {
-            let types: Vec<LogicalType> = state
-                .column_ids()
+        let column_ids = state.column_ids();
+        if result.column_count() != column_ids.len() {
+            let types: Vec<LogicalType> = column_ids
                 .iter()
                 .map(|idx| self.column_definitions[*idx as usize].logical_type.clone())
                 .collect();
