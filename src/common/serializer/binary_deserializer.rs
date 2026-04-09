@@ -2,6 +2,7 @@ use std::io;
 
 use crate::common::types::LogicalType;
 use crate::storage::metadata::{MetaBlockPointer, ReadStream};
+use crate::storage::statistics::BaseStatistics;
 use crate::storage::table::row_group::RowGroupPointer;
 use crate::storage::table::types::{CompressionType, DataPointer, INVALID_BLOCK, Idx};
 
@@ -239,6 +240,7 @@ impl<'a> BinaryMetadataDeserializer<'a> {
         let mut block_id = INVALID_BLOCK;
         let mut offset = 0u32;
         let mut compression = CompressionType::Uncompressed;
+        let mut statistics = BaseStatistics::create_empty(logical_type.clone());
         loop {
             match self.next_field()? {
                 100 => row_start = self.read_varint()?,
@@ -249,7 +251,9 @@ impl<'a> BinaryMetadataDeserializer<'a> {
                     offset = off;
                 }
                 103 => compression = read_compression_type(self.read_u8()),
-                104 => skip_base_statistics(self, logical_type)?,
+                104 => {
+                    statistics = BaseStatistics::deserialize_checkpoint(self, logical_type.clone())?
+                }
                 105 => skip_optional_nullable(self)?,
                 MESSAGE_TERMINATOR_FIELD_ID => {
                     return Ok(DataPointer {
@@ -257,6 +261,8 @@ impl<'a> BinaryMetadataDeserializer<'a> {
                         offset,
                         row_start,
                         tuple_count,
+                        compression_type: compression,
+                        statistics,
                     });
                 }
                 other => {
@@ -345,13 +351,18 @@ fn read_compression_type(value: u8) -> CompressionType {
         1 => CompressionType::Uncompressed,
         2 => CompressionType::Constant,
         3 => CompressionType::Rle,
-        4 => CompressionType::BitPacking,
-        5 => CompressionType::Dictionary,
-        6 => CompressionType::Fsst,
-        7 => CompressionType::Chimp,
-        8 => CompressionType::Patas,
-        9 => CompressionType::Alprd,
-        10 => CompressionType::ZStd,
+        4 => CompressionType::Dictionary,
+        5 => CompressionType::PforDelta,
+        6 => CompressionType::BitPacking,
+        7 => CompressionType::Fsst,
+        8 => CompressionType::Chimp,
+        9 => CompressionType::Patas,
+        10 => CompressionType::Alp,
+        11 => CompressionType::Alprd,
+        12 => CompressionType::ZStd,
+        13 => CompressionType::Roaring,
+        14 => CompressionType::Empty,
+        15 => CompressionType::DictFSST,
         _ => CompressionType::Uncompressed,
     }
 }

@@ -15,7 +15,9 @@
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-use super::column_data::ColumnData;
+use super::column_data::{ColumnData, ColumnDataKind, ColumnDataType};
+use super::column_segment::{ColumnSegment, ColumnSegmentType};
+use super::segment_base::SegmentBase;
 use super::types::{DataPointer, Idx};
 
 // 使用统一的统计信息模块
@@ -100,6 +102,8 @@ impl PartialBlock for PartialBlockForCheckpoint {
 
 /// Checkpoint 期间单列的状态（C++: `class ColumnCheckpointState`）。
 pub struct ColumnCheckpointState {
+    /// 原始列数据（C++: `ColumnData &original_column`）。
+    pub original_column: Option<Arc<ColumnData>>,
     /// 全局统计信息（C++: `unique_ptr<BaseStatistics> global_stats`）。
     pub global_stats: BaseStatistics,
     /// 本次 checkpoint 生成的数据指针列表（C++: `vector<DataPointer> data_pointers`）。
@@ -112,7 +116,9 @@ impl ColumnCheckpointState {
     /// 创建新的 checkpoint 状态
     pub fn new(row_group_id: u64, column_id: u64, partial_block_manager_id: u64) -> Self {
         // 使用默认的 integer 类型创建统计信息
+        let _ = (row_group_id, column_id, partial_block_manager_id);
         Self {
+            original_column: None,
             global_stats: BaseStatistics::create_empty(crate::common::types::LogicalType::integer()),
             data_pointers: Vec::new(),
             result_column: None,
@@ -122,9 +128,79 @@ impl ColumnCheckpointState {
     /// 创建带指定类型的 checkpoint 状态
     pub fn with_type(logical_type: crate::common::types::LogicalType) -> Self {
         Self {
+            original_column: None,
             global_stats: BaseStatistics::create_empty(logical_type),
             data_pointers: Vec::new(),
             result_column: None,
+        }
+    }
+
+    /// 绑定原始列数据。
+    pub fn set_original_column(&mut self, original_column: Arc<ColumnData>) {
+        self.global_stats = BaseStatistics::create_empty(original_column.ctx.logical_type.clone());
+        self.original_column = Some(original_column);
+    }
+
+    /// 获取原始列。
+    pub fn get_original_column(&self) -> Arc<ColumnData> {
+        self.original_column
+            .as_ref()
+            .cloned()
+            .expect("original_column not set")
+    }
+
+    /// 获取 checkpoint 结果列；若尚未创建则按 DuckDB 语义创建空列。
+    pub fn get_result_column(&mut self) -> Arc<ColumnData> {
+        if self.result_column.is_none() {
+            let original = self.get_original_column();
+            self.result_column = Some(ColumnDataKind::create(
+                Arc::clone(&original.ctx.info),
+                original.ctx.column_index,
+                original.ctx.logical_type.clone(),
+                ColumnDataType::CheckpointTarget,
+                false,
+            ));
+        }
+        self.result_column.as_ref().cloned().unwrap()
+    }
+
+    /// 获取最终结果列。
+    pub fn get_final_result(&mut self) -> Arc<ColumnData> {
+        if self.result_column.is_none() {
+            return self.get_original_column();
+        }
+        let original_count = self
+            .original_column
+            .as_ref()
+            .map(|column| column.count())
+            .unwrap_or_default();
+        let result = self.result_column.as_ref().cloned().unwrap();
+        result
+            .ctx
+            .count
+            .store(original_count, std::sync::atomic::Ordering::Relaxed);
+        result
+    }
+
+    /// Attach a checkpoint-produced segment to the result column.
+    ///
+    /// This restores DuckDB's `ColumnCheckpointState::FlushSegment` role at the
+    /// storage-tree level: compressed transient segments are materialized into
+    /// the checkpoint target column, while persistent metadata is collected
+    /// later from that column.
+    pub fn flush_segment(&mut self, segment: Arc<ColumnSegment>) {
+        let result = self.get_result_column();
+        let start_row = result.count();
+        result.ctx.append_existing_segment(Arc::clone(&segment), start_row);
+        if segment.segment_type == ColumnSegmentType::Persistent {
+            self.data_pointers.push(DataPointer {
+                block_id: segment.block_id,
+                offset: segment.block_offset as u32,
+                row_start: start_row,
+                tuple_count: segment.count(),
+                compression_type: segment.compression,
+                statistics: segment.stats.lock().statistics().clone(),
+            });
         }
     }
 

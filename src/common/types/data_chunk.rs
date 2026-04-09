@@ -542,6 +542,9 @@ pub struct Vector {
     seq_start: i64,
     /// 序列步长（C++: `sequence_increment`）。
     seq_increment: i64,
+
+    /// `VARCHAR` 长字符串的所有权存储。
+    string_aux: Vec<Box<[u8]>>,
 }
 
 impl Vector {
@@ -559,6 +562,7 @@ impl Vector {
             sel: None,
             seq_start: 0,
             seq_increment: 0,
+            string_aux: Vec::new(),
         }
     }
 
@@ -576,6 +580,7 @@ impl Vector {
             sel: None,
             seq_start: 0,
             seq_increment: 0,
+            string_aux: Vec::new(),
         }
     }
 
@@ -592,6 +597,7 @@ impl Vector {
             sel: None,
             seq_start: 0,
             seq_increment: 0,
+            string_aux: Vec::new(),
         }
     }
 
@@ -606,6 +612,7 @@ impl Vector {
             sel: None,
             seq_start: start,
             seq_increment: increment,
+            string_aux: Vec::new(),
         }
     }
 
@@ -644,9 +651,22 @@ impl Vector {
         self.validity = other.validity.clone();
     }
 
+    /// 将此向量设置为 Dictionary 向量，引用给定子向量与选择向量。
+    pub fn set_dictionary(&mut self, child: &Vector, sel: SelectionVector) {
+        self.logical_type = child.logical_type.clone();
+        self.vector_type = VectorType::Dictionary;
+        self.child = Some(Box::new(child.shallow_clone()));
+        self.sel = Some(sel);
+        self.validity = child.validity.clone();
+        self.seq_start = 0;
+        self.seq_increment = 0;
+        self.data.clear();
+        self.string_aux.clear();
+    }
+
     /// 浅克隆（仅克隆元数据，不克隆大缓冲区）。
     pub fn shallow_clone(&self) -> Self {
-        Self {
+        let mut result = Self {
             vector_type: self.vector_type,
             logical_type: self.logical_type.clone(),
             data: self.data.clone(),
@@ -655,7 +675,10 @@ impl Vector {
             sel: self.sel.clone(),
             seq_start: self.seq_start,
             seq_increment: self.seq_increment,
-        }
+            string_aux: self.string_aux.clone(),
+        };
+        result.rebind_varchar_pointers();
+        result
     }
 
     // ── 数据访问 ──────────────────────────────────────────────────────────
@@ -663,6 +686,63 @@ impl Vector {
     /// 返回 Flat 向量的原始字节切片（可写）。
     pub fn raw_data_mut(&mut self) -> &mut [u8] {
         &mut self.data
+    }
+
+    fn rebind_varchar_pointers(&mut self) {
+        if self.logical_type.id != LogicalTypeId::Varchar {
+            return;
+        }
+        let mut aux_idx = 0usize;
+        for row in 0..(self.data.len() / 16) {
+            let offset = row * 16;
+            let len = u32::from_le_bytes(self.data[offset..offset + 4].try_into().unwrap()) as usize;
+            if len > 12 {
+                let Some(bytes) = self.string_aux.get(aux_idx) else {
+                    break;
+                };
+                let ptr = bytes.as_ptr() as u64;
+                self.data[offset + 8..offset + 16].copy_from_slice(&ptr.to_le_bytes());
+                aux_idx += 1;
+            }
+        }
+    }
+
+    pub fn write_varchar_bytes(&mut self, row: usize, value: &[u8]) {
+        debug_assert_eq!(self.logical_type.id, LogicalTypeId::Varchar);
+        let offset = row * 16;
+        let len = value.len() as u32;
+        let dst = &mut self.data[offset..offset + 16];
+        dst.fill(0);
+        dst[..4].copy_from_slice(&len.to_le_bytes());
+        if value.len() <= 12 {
+            dst[4..4 + value.len()].copy_from_slice(value);
+        } else {
+            dst[4..8].copy_from_slice(&value[..4]);
+            let bytes: Box<[u8]> = value.to_vec().into_boxed_slice();
+            let ptr = bytes.as_ptr() as u64;
+            dst[8..16].copy_from_slice(&ptr.to_le_bytes());
+            self.string_aux.push(bytes);
+        }
+        self.validity.set_valid(row);
+    }
+
+    pub fn reset_varchar_storage(&mut self) {
+        if self.logical_type.id == LogicalTypeId::Varchar {
+            self.string_aux.clear();
+        }
+    }
+
+    pub fn read_varchar_bytes(&self, row: usize) -> Vec<u8> {
+        debug_assert_eq!(self.logical_type.id, LogicalTypeId::Varchar);
+        let offset = row * 16;
+        let len = u32::from_le_bytes(self.data[offset..offset + 4].try_into().unwrap()) as usize;
+        if len <= 12 {
+            self.data[offset + 4..offset + 4 + len].to_vec()
+        } else {
+            let ptr =
+                u64::from_le_bytes(self.data[offset + 8..offset + 16].try_into().unwrap()) as *const u8;
+            unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
+        }
     }
 
     /// 将向量展平为 Flat 布局，丢弃选择向量等间接层
@@ -707,31 +787,62 @@ impl Vector {
 
                 if let Some(child) = self.child.as_mut() {
                     child.flatten(child_count);
-
-                    let mut flat = vec![0u8; count * elem_size];
-                    let mut validity = ValidityMask::new(count);
-                    validity.reset(count);
-
-                    for row_idx in 0..count {
-                        let src_row = selected_indices
-                            .as_ref()
-                            .map(|indices| indices[row_idx] as usize)
-                            .unwrap_or(row_idx);
-                        if src_row * elem_size + elem_size <= child.data.len() {
-                            let src = &child.data[src_row * elem_size..(src_row + 1) * elem_size];
-                            flat[row_idx * elem_size..(row_idx + 1) * elem_size]
-                                .copy_from_slice(src);
+                    if self.logical_type.id == LogicalTypeId::Varchar {
+                        let mut values = Vec::with_capacity(count);
+                        let mut row_validity = Vec::with_capacity(count);
+                        for row_idx in 0..count {
+                            let src_row = selected_indices
+                                .as_ref()
+                                .map(|indices| indices[row_idx] as usize)
+                                .unwrap_or(row_idx);
+                            let is_valid = child.validity.row_is_valid(src_row);
+                            row_validity.push(is_valid);
+                            if is_valid {
+                                values.push(child.read_varchar_bytes(src_row));
+                            } else {
+                                values.push(Vec::new());
+                            }
                         }
-                        if !child.validity.row_is_valid(src_row) {
-                            validity.set_invalid(row_idx);
+
+                        self.data = vec![0u8; count * elem_size];
+                        self.validity = ValidityMask::new(count);
+                        self.validity.reset(count);
+                        self.string_aux.clear();
+
+                        for row_idx in 0..count {
+                            if !row_validity[row_idx] {
+                                self.validity.set_invalid(row_idx);
+                                continue;
+                            }
+                            self.write_varchar_bytes(row_idx, &values[row_idx]);
                         }
+                    } else {
+                        let mut flat = vec![0u8; count * elem_size];
+                        let mut validity = ValidityMask::new(count);
+                        validity.reset(count);
+
+                        for row_idx in 0..count {
+                            let src_row = selected_indices
+                                .as_ref()
+                                .map(|indices| indices[row_idx] as usize)
+                                .unwrap_or(row_idx);
+                            if src_row * elem_size + elem_size <= child.data.len() {
+                                let src = &child.data[src_row * elem_size..(src_row + 1) * elem_size];
+                                flat[row_idx * elem_size..(row_idx + 1) * elem_size]
+                                    .copy_from_slice(src);
+                            }
+                            if !child.validity.row_is_valid(src_row) {
+                                validity.set_invalid(row_idx);
+                            }
+                        }
+
+                        self.data = flat;
+                        self.validity = validity;
                     }
-
-                    self.data = flat;
-                    self.validity = validity;
                 } else {
                     self.data = vec![0u8; count * elem_size];
                     self.validity.reset(count);
+                    self.string_aux.clear();
                 }
                 self.child = None;
                 self.sel = None;
@@ -743,6 +854,15 @@ impl Vector {
     /// 将 `other` 的第 `src_row` 行的值写入本向量第 `dst_row` 行
     /// （C++: 对应 `Vector::SetValue` / copy 操作的一部分）。
     pub fn copy_row_from(&mut self, other: &Vector, src_row: usize, dst_row: usize) {
+        if self.logical_type.id == LogicalTypeId::Varchar && other.logical_type.id == LogicalTypeId::Varchar {
+            if !other.validity.row_is_valid(src_row) {
+                self.validity.set_invalid(dst_row);
+                return;
+            }
+            let value = other.read_varchar_bytes(src_row);
+            self.write_varchar_bytes(dst_row, &value);
+            return;
+        }
         let elem_size = self.logical_type.physical_size();
         if src_row * elem_size + elem_size <= other.data.len()
             && dst_row * elem_size + elem_size <= self.data.len()
@@ -780,6 +900,12 @@ impl Vector {
         src_offset: usize,
         dst_offset: usize,
     ) {
+        if self.logical_type.id == LogicalTypeId::Varchar && other.logical_type.id == LogicalTypeId::Varchar {
+            for i in 0..count {
+                self.copy_row_from(other, src_offset + i, dst_offset + i);
+            }
+            return;
+        }
         let elem_size = self.logical_type.physical_size();
         let src_start = src_offset * elem_size;
         let src_end = src_start + count * elem_size;
@@ -816,6 +942,7 @@ impl Vector {
                     sel: None,
                     seq_start: 0,
                     seq_increment: 0,
+                    string_aux: std::mem::take(&mut self.string_aux),
                 });
                 self.child = Some(child);
                 self.sel = Some(SelectionVector {
@@ -854,6 +981,7 @@ impl Vector {
         self.data.capacity()
             + cardinality / 8 + 1   // validity bits
             + self.child.as_ref().map_or(0, |c| c.allocation_size(cardinality))
+            + self.string_aux.iter().map(|v| v.len()).sum::<usize>()
     }
 }
 
@@ -900,6 +1028,7 @@ impl VectorCache {
         vector.sel = None;
         vector.seq_start = 0;
         vector.seq_increment = 0;
+        vector.string_aux.clear();
     }
 }
 
@@ -1454,14 +1583,7 @@ impl DataChunkBuilder {
                 bytes.len()
             );
         }
-
-        let offset = row * 16;
-        let dst = &mut vector.raw_data_mut()[offset..offset + 16];
-        dst.fill(0);
-        let len = u32::try_from(bytes.len()).map_err(|_| anyhow!("varchar 长度超过 u32"))?;
-        dst[..4].copy_from_slice(&len.to_le_bytes());
-        dst[4..4 + bytes.len()].copy_from_slice(bytes);
-        vector.validity.set_valid(row);
+        vector.write_varchar_bytes(row, bytes);
         Ok(self)
     }
 }

@@ -1,5 +1,5 @@
 # duckdb_rs
-duckdb存储的Rust实现
+DuckDB存储的Rust实现
 
 
 
@@ -14,3 +14,5 @@ duckdb存储的Rust实现
 - [ ] BufferPool是否起到内存管理
 - [ ] 崩溃恢复验证
 - [ ] 异步机制
+- [ ] 并发验证
+- [ ] scan下推

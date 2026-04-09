@@ -29,6 +29,8 @@ use std::sync::{
 use parking_lot::Mutex;
 
 use super::append_state::ColumnAppendState;
+use super::column_checkpoint_state::ColumnCheckpointState;
+use super::column_data_checkpointer::{ColumnCheckpointInfo, ColumnDataCheckpointer};
 use super::column_segment::{
     ColumnSegment, ColumnSegmentType, SegmentStatistics, UnifiedVectorFormat,
 };
@@ -42,7 +44,9 @@ use super::types::{
     TransactionData,
 };
 use super::update_segment::UpdateSegment;
+use crate::common::serializer::BinarySerializer;
 use crate::common::types::{LogicalTypeId, Vector};
+use crate::storage::serialization as storage_serialization;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ColumnDataType
@@ -165,7 +169,7 @@ impl ColumnDataContext {
         };
 
         let stats = if !has_parent {
-            Some(Mutex::new(SegmentStatistics::default()))
+            Some(Mutex::new(SegmentStatistics::new(logical_type.clone())))
         } else {
             None
         };
@@ -420,6 +424,21 @@ impl ColumnDataContext {
                     }
                 }
             }
+            if !state.initialized {
+                let (seg_arc, row_start) = {
+                    let lock = self.data.lock();
+                    let idx = match state.current_segment_index {
+                        Some(idx) if idx < lock.0.len() => idx,
+                        _ => break,
+                    };
+                    let node = &lock.0[idx];
+                    (node.arc(), node.row_start())
+                };
+                state.segment_row_start = row_start;
+                state.internal_index = row_start;
+                seg_arc.initialize_scan(state);
+                state.initialized = true;
+            }
             // Clone Arc to avoid holding the tree lock during scan.
             let (seg_arc, current_start, current_count) = {
                 let lock = self.data.lock();
@@ -549,6 +568,27 @@ impl ColumnDataContext {
             .fetch_add(segment_size, Ordering::Relaxed);
         let mut lock = self.data.lock();
         self.data.append_segment(&mut lock, seg, start_row);
+    }
+
+    /// Append an already-created segment into this column.
+    ///
+    /// Mirrors the checkpoint path where compressed transient segments are
+    /// attached to the checkpoint target column before metadata serialization.
+    pub fn append_existing_segment(&self, segment: Arc<ColumnSegment>, start_row: Idx) {
+        self.allocation_size
+            .fetch_add(segment.segment_size(), Ordering::Relaxed);
+        self.count
+            .store(start_row + segment.count(), Ordering::Relaxed);
+        {
+            let mut compression = self.compression.lock();
+            match *compression {
+                None => *compression = Some(segment.compression),
+                Some(existing) if existing == segment.compression => {}
+                Some(_) => *compression = None,
+            }
+        }
+        let mut lock = self.data.lock();
+        self.data.append_segment(&mut lock, segment, start_row);
     }
 
     /// Prepare `state` for appending to this column.
@@ -757,6 +797,8 @@ impl ColumnDataContext {
                     offset: seg.block_offset as u32, // C++: block_pointer.offset (u32)
                     row_start,
                     tuple_count: seg.count(),
+                    compression_type: seg.compression,
+                    statistics: seg.stats.lock().statistics().clone(),
                 };
                 row_start += seg.count();
                 dp
@@ -929,6 +971,35 @@ impl ColumnDataKind {
     /// `true` if any segment is transient or has pending updates.
     pub fn has_any_changes(&self) -> bool {
         self.ctx.has_any_changes()
+    }
+
+    /// Checkpoint this column and return the checkpoint state.
+    ///
+    /// Mirrors `ColumnData::Checkpoint`.
+    pub fn checkpoint(
+        self: &Arc<Self>,
+        row_group_id: u64,
+        compression_type: CompressionType,
+    ) -> Arc<Mutex<ColumnCheckpointState>> {
+        let checkpoint_state = Arc::new(Mutex::new(ColumnCheckpointState::with_type(
+            self.ctx.logical_type.clone(),
+        )));
+        checkpoint_state
+            .lock()
+            .set_original_column(Arc::clone(self));
+
+        if self.ctx.data.lock().0.is_empty() {
+            return checkpoint_state;
+        }
+
+        let mut checkpointer = ColumnDataCheckpointer::new(
+            vec![checkpoint_state.clone()],
+            row_group_id,
+            ColumnCheckpointInfo { compression_type },
+        );
+        checkpointer.checkpoint();
+        checkpointer.finalize_checkpoint();
+        checkpoint_state
     }
 
     // ── Scan ──────────────────────────────────────────────────────────────────
@@ -1257,6 +1328,35 @@ impl ColumnDataKind {
 // PersistentColumnData
 // ─────────────────────────────────────────────────────────────────────────────
 
+pub(crate) fn logical_type_to_physical(logical_type: &LogicalType) -> PhysicalType {
+    match logical_type.id {
+        LogicalTypeId::Boolean | LogicalTypeId::Validity => PhysicalType::Bool,
+        LogicalTypeId::TinyInt => PhysicalType::Int8,
+        LogicalTypeId::SmallInt => PhysicalType::Int16,
+        LogicalTypeId::Integer | LogicalTypeId::Date => PhysicalType::Int32,
+        LogicalTypeId::BigInt | LogicalTypeId::Time | LogicalTypeId::Timestamp => PhysicalType::Int64,
+        LogicalTypeId::HugeInt => PhysicalType::Int128,
+        LogicalTypeId::Float => PhysicalType::Float,
+        LogicalTypeId::Double => PhysicalType::Double,
+        LogicalTypeId::Varchar => PhysicalType::VarChar,
+        LogicalTypeId::List => PhysicalType::List,
+        LogicalTypeId::Struct => PhysicalType::Struct,
+        LogicalTypeId::Array => PhysicalType::Array,
+        LogicalTypeId::Decimal => {
+            if logical_type.width <= 4 {
+                PhysicalType::Int16
+            } else if logical_type.width <= 9 {
+                PhysicalType::Int32
+            } else if logical_type.width <= 18 {
+                PhysicalType::Int64
+            } else {
+                PhysicalType::Int128
+            }
+        }
+        _ => PhysicalType::Invalid,
+    }
+}
+
 /// Serialised form of one column's storage, produced during checkpoint.
 ///
 /// Mirrors `struct PersistentColumnData` in `column_data.hpp`.
@@ -1289,7 +1389,7 @@ impl PersistentColumnData {
     /// Create from a `LogicalType`.
     pub fn new(logical_type: &LogicalType) -> Self {
         PersistentColumnData {
-            physical_type: PhysicalType::Invalid,
+            physical_type: logical_type_to_physical(logical_type),
             logical_type_id: logical_type.id,
             has_updates: false,
             pointers: Vec::new(),
@@ -1303,6 +1403,90 @@ impl PersistentColumnData {
     /// C++: `PersistentColumnData::HasUpdates`.
     pub fn has_updates_recursive(&self) -> bool {
         self.has_updates || self.child_columns.iter().any(|c| c.has_updates_recursive())
+    }
+
+    pub fn serialize(&self, serializer: &mut BinarySerializer<'_>) {
+        if self.has_updates {
+            panic!("column data with updates cannot be serialized");
+        }
+
+        if self.logical_type_id == LogicalTypeId::Variant {
+            serializer.begin_list(100, self.pointers.len());
+            for data_pointer in &self.pointers {
+                serializer.list_write_object(|s| {
+                    storage_serialization::write_data_pointer(s, data_pointer)
+                });
+            }
+            serializer.end_list();
+
+            if let Some(validity) = self.child_columns.first() {
+                serializer.begin_object(101);
+                validity.serialize(serializer);
+                serializer.end_object();
+            }
+            if let Some(unshredded) = self.child_columns.get(1) {
+                serializer.begin_object(102);
+                unshredded.serialize(serializer);
+                serializer.end_object();
+            }
+            if let Some(shredded) = self.child_columns.get(2) {
+                serializer.begin_object(103);
+                shredded.serialize(serializer);
+                serializer.end_object();
+            }
+            return;
+        }
+
+        serializer.begin_list(100, self.pointers.len());
+        for data_pointer in &self.pointers {
+            serializer.list_write_object(|s| {
+                if self.logical_type_id == LogicalTypeId::Varchar {
+                    storage_serialization::write_data_pointer_varchar(s, data_pointer);
+                } else {
+                    storage_serialization::write_data_pointer(s, data_pointer);
+                }
+            });
+        }
+        serializer.end_list();
+
+        if self.logical_type_id == LogicalTypeId::Validity {
+            return;
+        }
+
+        match self.physical_type {
+            PhysicalType::List | PhysicalType::Array => {
+                if let Some(validity) = self.child_columns.first() {
+                    serializer.begin_object(101);
+                    validity.serialize(serializer);
+                    serializer.end_object();
+                }
+                if let Some(child_column) = self.child_columns.get(1) {
+                    serializer.begin_object(102);
+                    child_column.serialize(serializer);
+                    serializer.end_object();
+                }
+            }
+            PhysicalType::Struct => {
+                if let Some(validity) = self.child_columns.first() {
+                    serializer.begin_object(101);
+                    validity.serialize(serializer);
+                    serializer.end_object();
+                }
+                let sub_columns = self.child_columns.len().saturating_sub(1);
+                serializer.begin_list(102, sub_columns);
+                for child in self.child_columns.iter().skip(1) {
+                    serializer.list_write_object(|s| child.serialize(s));
+                }
+                serializer.end_list();
+            }
+            _ => {
+                if let Some(validity) = self.child_columns.first() {
+                    serializer.begin_object(101);
+                    validity.serialize(serializer);
+                    serializer.end_object();
+                }
+            }
+        }
     }
 }
 

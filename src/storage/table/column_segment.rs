@@ -19,6 +19,7 @@ use super::scan_state::ColumnScanState;
 use super::segment_base::SegmentBase;
 use super::types::{BlockId, CompressionType, Idx, LogicalType};
 use crate::common::types::{SelectionVector, ValidityMask, Vector, VectorType};
+use crate::function::compression_config::get_compression_function;
 use crate::storage::buffer::BlockHandle;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -199,6 +200,7 @@ impl ColumnSegment {
         compression: CompressionType,
     ) -> Self {
         let type_size = logical_type.physical_size() as Idx;
+        let stats = SegmentStatistics::new(logical_type.clone());
         // For validity columns, initialize buffer to 0xFF (all bits set = all valid)
         // This matches DuckDB's ValidityInitSegment behavior
         let buffer = if logical_type.id == crate::common::types::LogicalTypeId::Validity {
@@ -215,7 +217,7 @@ impl ColumnSegment {
             block_id: super::types::INVALID_BLOCK,
             block_offset: 0,
             segment_size,
-            stats: Mutex::new(SegmentStatistics::default()),
+            stats: Mutex::new(stats),
             compression,
             segment_state: Mutex::new(None),
             block_handle: None,
@@ -327,20 +329,16 @@ impl ColumnSegment {
     /// - **Persistent**: pin the block via `BlockHandle::load()` and store the
     ///   resulting `BufferHandle` in `state.pinned_buffer` (RAII unpin on drop).
     pub fn initialize_scan(&self, state: &mut ColumnScanState) {
-        match self.segment_type {
-            ColumnSegmentType::Transient => {
-                // Buffer already in Vec<u8>; nothing to pin.
-                state.pinned_buffer = None;
-            }
-            ColumnSegmentType::Persistent => {
-                // Pin through BufferManager so the memory reservation and
-                // reader lifecycle match DuckDB's block pool behavior.
-                state.pinned_buffer =
-                    self.block_handle.as_ref().map(|handle: &Arc<BlockHandle>| {
-                        handle.block_manager.buffer_manager().pin(handle.clone())
-                    });
-            }
-        }
+        let function = self.get_compression_function();
+        debug_assert!(
+            function.init_scan.is_some(),
+            "compression {:?} for {:?} does not implement init_scan",
+            self.compression,
+            self.logical_type
+        );
+        state.scan_state = function
+            .init_scan
+            .and_then(|init_scan| init_scan(self, state));
     }
 
     /// Scan `scan_count` rows from this segment into `result` at `result_offset`.
@@ -357,13 +355,26 @@ impl ColumnSegment {
         result_offset: Idx,
         scan_type: ScanVectorType,
     ) {
+        let function = self.get_compression_function();
         match scan_type {
             ScanVectorType::ScanEntireVector => {
                 debug_assert_eq!(result_offset, 0);
-                self.scan_vector_internal(state, scan_count, result);
+                let scan_vector = function.scan_vector.unwrap_or_else(|| {
+                    panic!(
+                        "compression {:?} does not implement scan_vector",
+                        self.compression
+                    )
+                });
+                scan_vector(self, state, scan_count, result);
             }
             ScanVectorType::ScanFlatVector => {
-                self.scan_partial_internal(state, scan_count, result, result_offset);
+                let scan_partial = function.scan_partial.unwrap_or_else(|| {
+                    panic!(
+                        "compression {:?} does not implement scan_partial",
+                        self.compression
+                    )
+                });
+                scan_partial(self, state, scan_count, result, result_offset);
             }
         }
     }
@@ -375,7 +386,12 @@ impl ColumnSegment {
     /// - **Transient**: copies `scan_count * type_size` bytes from `self.buffer`.
     /// - **Persistent**: copies from `state.pinned_buffer` (the pinned block
     ///   payload), starting at `self.block_offset + position_in_segment * type_size`.
-    fn scan_vector_internal(&self, state: &ColumnScanState, scan_count: Idx, result: &mut Vector) {
+    pub(crate) fn fixed_size_scan_vector(
+        &self,
+        state: &ColumnScanState,
+        scan_count: Idx,
+        result: &mut Vector,
+    ) {
         let type_size = self.type_size as usize;
         if type_size == 0 {
             return;
@@ -418,7 +434,7 @@ impl ColumnSegment {
     /// pre-allocated flat result buffer.
     ///
     /// Mirrors `FixedSizeScanPartial<T>` in `fixed_size_uncompressed.cpp`.
-    fn scan_partial_internal(
+    pub(crate) fn fixed_size_scan_partial(
         &self,
         state: &ColumnScanState,
         scan_count: Idx,
@@ -467,8 +483,13 @@ impl ColumnSegment {
     /// → For uncompressed: `UncompressedFunctions::EmptySkip` (no-op).
     /// The caller (`ColumnDataContext::skip`) then sets
     /// `state.internal_index = state.offset_in_column`.
-    pub fn skip(&self, _state: &mut ColumnScanState) {
-        // Uncompressed: no codec state to advance.
+    pub fn skip(&self, state: &mut ColumnScanState) {
+        let function = self.get_compression_function();
+        let skip = function.skip.unwrap_or_else(|| {
+            panic!("compression {:?} does not implement skip", self.compression)
+        });
+        let skip_count = state.offset_in_column.saturating_sub(state.internal_index);
+        skip(self, state, skip_count);
     }
 
     // ── Append ───────────────────────────────────────────────
@@ -484,13 +505,15 @@ impl ColumnSegment {
     /// C++: `ColumnSegment::InitializeAppend(ColumnAppendState &state)`
     /// → `FixedSizeInitAppend`: pins the block buffer, stores handle in
     ///   `state.append_state`.  In Rust `buffer` is already allocated.
-    pub fn initialize_append(&self, _state: &mut ColumnAppendState) {
-        debug_assert_eq!(
-            self.segment_type,
-            ColumnSegmentType::Transient,
-            "initialize_append called on a persistent segment"
-        );
-        // Uncompressed: buffer already allocated; nothing else to do.
+    pub fn initialize_append(&self, state: &mut ColumnAppendState) {
+        let function = self.get_compression_function();
+        let init_append = function.init_append.unwrap_or_else(|| {
+            panic!(
+                "compression {:?} does not implement init_append",
+                self.compression
+            )
+        });
+        init_append(self, state);
     }
 
     /// Append `append_count` rows from `vdata` starting at logical `offset`.
@@ -505,18 +528,16 @@ impl ColumnSegment {
     /// → dispatches to `function.get().append(...)` → `FixedSizeAppend<T, StandardFixedSizeAppend>`.
     pub fn append(
         &self,
-        _state: &mut ColumnAppendState,
+        state: &mut ColumnAppendState,
         vdata: &UnifiedVectorFormat<'_>,
         offset: Idx,
         append_count: Idx,
     ) -> Idx {
-        match self.compression {
-            CompressionType::Uncompressed => self.fixed_size_append(vdata, offset, append_count),
-            other => panic!(
-                "compression {:?} not yet implemented for ColumnSegment::append",
-                other
-            ),
-        }
+        let function = self.get_compression_function();
+        let append = function.append.unwrap_or_else(|| {
+            panic!("compression {:?} does not implement append", self.compression)
+        });
+        append(self, state, vdata, offset, append_count)
     }
 
     /// Uncompressed fixed-size append logic.
@@ -536,11 +557,12 @@ impl ColumnSegment {
     /// self.count += copy_count
     /// return copy_count
     /// ```
-    fn fixed_size_append(
+    pub(crate) fn fixed_size_append(
         &self,
         vdata: &UnifiedVectorFormat<'_>,
         offset: Idx,
         append_count: Idx,
+        _state: &mut ColumnAppendState,
     ) -> Idx {
         let type_size = self.type_size as usize;
         if type_size == 0 {
@@ -587,15 +609,29 @@ impl ColumnSegment {
     ///
     /// C++: `idx_t ColumnSegment::FinalizeAppend(ColumnAppendState &state)`
     /// → `FixedSizeFinalizeAppend<T>`: returns `segment.count * sizeof(T)`.
-    pub fn finalize_append(&self, _state: &mut ColumnAppendState) -> Idx {
-        self.count() * self.type_size
+    pub fn finalize_append(&self, state: &mut ColumnAppendState) -> Idx {
+        let function = self.get_compression_function();
+        let finalize_append = function.finalize_append.unwrap_or_else(|| {
+            panic!(
+                "compression {:?} does not implement finalize_append",
+                self.compression
+            )
+        });
+        finalize_append(self, state)
     }
 
     /// Revert appended rows back to `new_count`.
     ///
     /// C++: `void ColumnSegment::RevertAppend(idx_t start_row)`
     pub fn revert_append(&self, new_count: Idx) {
-        self.count.store(new_count, Ordering::SeqCst);
+        let function = self.get_compression_function();
+        let revert_append = function.revert_append.unwrap_or_else(|| {
+            panic!(
+                "compression {:?} does not implement revert_append",
+                self.compression
+            )
+        });
+        revert_append(self, new_count);
     }
 
     // ── Persistence ──────────────────────────────────────────
@@ -605,6 +641,137 @@ impl ColumnSegment {
         debug_assert_eq!(self.segment_type, ColumnSegmentType::Transient);
         self.block_id = block_id;
         self.segment_type = ColumnSegmentType::Persistent;
+    }
+
+    pub(crate) fn initialize_scan_buffer(&self, state: &mut ColumnScanState) {
+        match self.segment_type {
+            ColumnSegmentType::Transient => {
+                state.pinned_buffer = None;
+            }
+            ColumnSegmentType::Persistent => {
+                state.pinned_buffer =
+                    self.block_handle.as_ref().map(|handle: &Arc<BlockHandle>| {
+                        handle.block_manager.buffer_manager().pin(handle.clone())
+                    });
+            }
+        }
+    }
+
+    pub(crate) fn fixed_size_initialize_append(&self, _state: &mut ColumnAppendState) {
+        debug_assert_eq!(
+            self.segment_type,
+            ColumnSegmentType::Transient,
+            "initialize_append called on a persistent segment"
+        );
+    }
+
+    pub(crate) fn fixed_size_finalize_append(&self, _state: &mut ColumnAppendState) -> Idx {
+        self.count() * self.type_size
+    }
+
+    pub(crate) fn fixed_size_revert_append(&self, new_count: Idx) {
+        self.count.store(new_count, Ordering::SeqCst);
+    }
+
+    pub(crate) fn fixed_size_fetch_row(&self, row_id: Idx, result: &mut Vector, result_idx: Idx) {
+        let type_size = self.type_size as usize;
+        if type_size == 0 {
+            return;
+        }
+        let src_byte = row_id as usize * type_size;
+        let dst_byte = result_idx as usize * type_size;
+        let dst = result.raw_data_mut();
+        match self.segment_type {
+            ColumnSegmentType::Transient => {
+                let buf = self.buffer.lock();
+                dst[dst_byte..dst_byte + type_size]
+                    .copy_from_slice(&buf[src_byte..src_byte + type_size]);
+            }
+            ColumnSegmentType::Persistent => {
+                let handle = self
+                    .block_handle
+                    .as_ref()
+                    .expect("persistent segment missing block handle");
+                let pinned = handle.block_manager.buffer_manager().pin(handle.clone());
+                let _ = pinned.with_data(|block_data| {
+                    let base = self.block_offset as usize + src_byte;
+                    dst[dst_byte..dst_byte + type_size]
+                        .copy_from_slice(&block_data[base..base + type_size]);
+                });
+            }
+        }
+    }
+
+    pub(crate) fn fixed_size_select(
+        &self,
+        state: &ColumnScanState,
+        result: &mut Vector,
+        sel: &SelectionVector,
+        sel_count: Idx,
+    ) {
+        result.vector_type = VectorType::Flat;
+        let type_size = self.type_size as usize;
+        let start = state.position_in_segment() as usize;
+        for i in 0..sel_count as usize {
+            let source_idx = sel.get_index(i);
+            let absolute_row = start + source_idx;
+            let dst_byte = i * type_size;
+            let src_byte = absolute_row * type_size;
+            match self.segment_type {
+                ColumnSegmentType::Transient => {
+                    let buf = self.buffer.lock();
+                    result.raw_data_mut()[dst_byte..dst_byte + type_size]
+                        .copy_from_slice(&buf[src_byte..src_byte + type_size]);
+                }
+                ColumnSegmentType::Persistent => {
+                    if let Some(handle) = state.pinned_buffer.as_ref() {
+                        let _ = handle.with_data(|block_data| {
+                            let base = self.block_offset as usize + src_byte;
+                            result.raw_data_mut()[dst_byte..dst_byte + type_size]
+                                .copy_from_slice(&block_data[base..base + type_size]);
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    fn get_compression_function(&self) -> &'static crate::function::compression_function::CompressionFunction {
+        get_compression_function(self.compression, self.physical_type())
+    }
+
+    fn physical_type(&self) -> super::types::PhysicalType {
+        use crate::common::types::LogicalTypeId;
+        use super::types::PhysicalType;
+
+        match self.logical_type.id {
+            LogicalTypeId::Boolean | LogicalTypeId::Validity => PhysicalType::Bool,
+            LogicalTypeId::TinyInt => PhysicalType::Int8,
+            LogicalTypeId::SmallInt => PhysicalType::Int16,
+            LogicalTypeId::Integer | LogicalTypeId::Date => PhysicalType::Int32,
+            LogicalTypeId::BigInt | LogicalTypeId::Time | LogicalTypeId::Timestamp => {
+                PhysicalType::Int64
+            }
+            LogicalTypeId::HugeInt => PhysicalType::Int128,
+            LogicalTypeId::Float => PhysicalType::Float,
+            LogicalTypeId::Double => PhysicalType::Double,
+            LogicalTypeId::Varchar => PhysicalType::VarChar,
+            LogicalTypeId::List => PhysicalType::List,
+            LogicalTypeId::Struct => PhysicalType::Struct,
+            LogicalTypeId::Array => PhysicalType::Array,
+            LogicalTypeId::Decimal => {
+                if self.logical_type.width <= 4 {
+                    PhysicalType::Int16
+                } else if self.logical_type.width <= 9 {
+                    PhysicalType::Int32
+                } else if self.logical_type.width <= 18 {
+                    PhysicalType::Int64
+                } else {
+                    PhysicalType::Int128
+                }
+            }
+            _ => PhysicalType::Invalid,
+        }
     }
 }
 

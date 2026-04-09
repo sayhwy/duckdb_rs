@@ -28,12 +28,29 @@ pub const ROW_GROUP_SIZE: Idx = 122880;
 pub use crate::storage::metadata::MetaBlockPointer;
 
 /// A data pointer that locates column data on disk (C++: `DataPointer`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DataPointer {
     pub block_id: BlockId,
     pub offset: u32,
     pub row_start: Idx,
     pub tuple_count: Idx,
+    pub compression_type: CompressionType,
+    pub statistics: crate::storage::statistics::BaseStatistics,
+}
+
+impl Default for DataPointer {
+    fn default() -> Self {
+        Self {
+            block_id: INVALID_BLOCK,
+            offset: 0,
+            row_start: 0,
+            tuple_count: 0,
+            compression_type: CompressionType::Uncompressed,
+            statistics: crate::storage::statistics::BaseStatistics::create_empty(
+                crate::common::types::LogicalType::integer(),
+            ),
+        }
+    }
 }
 
 /// Bundled transaction context passed to storage methods (C++: `TransactionData`).
@@ -141,11 +158,16 @@ pub enum CompressionType {
     Uncompressed,
     Constant,
     Rle,
-    BitPacking,
     Dictionary,
+    PforDelta,
+    BitPacking,
     Fsst,
     Chimp,
     Patas,
+    Alp,
     Alprd,
     ZStd,
+    Roaring,
+    Empty,
+    DictFSST,
 }

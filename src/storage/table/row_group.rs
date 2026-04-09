@@ -32,6 +32,7 @@ use super::chunk_info::SelectionVector;
 use super::column_checkpoint_state::PartialBlockManager;
 use super::column_data::{
     ColumnData, ColumnDataKind, ColumnKindData, PersistentColumnData, PersistentRowGroupData,
+    logical_type_to_physical,
 };
 use super::column_segment::{SegmentStatistics, UnifiedVectorFormat};
 use super::row_version_manager::RowVersionManager;
@@ -44,6 +45,7 @@ use super::types::{
 };
 use crate::common::serializer::{BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID};
 use crate::common::types::{DataChunk, Vector};
+use crate::storage::buffer::BlockManager as _;
 use crate::storage::table::column_segment::ColumnSegment;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -243,9 +245,6 @@ impl RowGroup {
             let mut lock = column.ctx.data.lock();
             let mut row_start = 0;
             for pointer in pointers {
-                let type_size = logical_type.physical_size() as usize;
-                let byte_count = pointer.tuple_count as usize * type_size;
-
                 // Register the block with the BufferPool (idempotent: returns
                 // the existing handle if already registered).  Data is NOT read
                 // here; it will be loaded lazily on the first pin inside
@@ -257,9 +256,9 @@ impl RowGroup {
                     pointer.block_id,
                     pointer.offset as Idx, // byte offset into block payload
                     pointer.tuple_count,
-                    byte_count as Idx,
-                    super::types::CompressionType::Uncompressed,
-                    super::column_segment::SegmentStatistics::default(),
+                    storage.block_manager.get_block_size() as Idx,
+                    pointer.compression_type,
+                    super::column_segment::SegmentStatistics::from_stats(pointer.statistics.clone()),
                     block_handle.clone(),
                 );
                 let segment = Arc::new(segment);
@@ -658,7 +657,7 @@ impl RowGroup {
 
                 // Per-column segment statistics, updated by append.
                 // C++: column.Append(*collection.GetStats().GetStats(i).lock(), ...)
-                let mut seg_stats = SegmentStatistics::default();
+                let mut seg_stats = SegmentStatistics::new(chunk.data[i].logical_type.clone());
                 col.append(&mut seg_stats, &mut state.states[i], &vdata, append_count);
 
                 // Wire per-append SegmentStatistics into the collection-level TableStatistics.
@@ -872,16 +871,13 @@ impl RowGroup {
             info.compression_types.len()
         );
 
-        // Checkpoint each column.
-        //
-        // Full implementation: call `col.checkpoint(self, ColumnCheckpointInfo { info, col_idx })`
-        // which writes transient segments to disk blocks via `info.partial_block_manager`
-        // and returns a new persistent `ColumnData`.
-        //
-        // Current implementation: Arc-clone the existing column.  All data is already
-        // in memory; the clone is O(1) reference-count increment.
         let result_columns: Vec<Option<Arc<ColumnData>>> = (0..col_count)
-            .map(|col_idx| Some(Arc::clone(&self.get_column(col_idx))))
+            .map(|col_idx| {
+                let column = self.get_column(col_idx);
+                let checkpoint_state =
+                    column.checkpoint(self.row_start as u64, info.compression_types[col_idx]);
+                Some(checkpoint_state.lock().get_final_result())
+            })
             .collect();
 
         // Build the result row group with checkpointed columns and shared version info.
@@ -906,7 +902,7 @@ impl RowGroup {
         RowGroupWriteData {
             result_row_group: result_rg,
             reuse_existing_metadata_blocks: false,
-            should_checkpoint: true,
+            should_checkpoint: false,
         }
     }
 
@@ -1041,43 +1037,6 @@ fn push_delete_undo(
 // Serialisation helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Map a `LogicalTypeId` to its physical storage representation.
-///
-/// Mirrors the `LogicalType::GetInternalType()` mapping in C++.
-fn logical_type_id_to_physical(logical_type: &crate::common::types::LogicalType) -> PhysicalType {
-    use crate::common::types::LogicalTypeId::*;
-    match logical_type.id {
-        Boolean => PhysicalType::Bool,
-        TinyInt => PhysicalType::Int8,
-        SmallInt => PhysicalType::Int16,
-        Integer => PhysicalType::Int32,
-        // BigInt (i64), Time (μs as i64), Timestamp (μs as i64)
-        BigInt | Time | Timestamp => PhysicalType::Int64,
-        // Date is stored as int32 days since epoch (DuckDB date_t / PhysicalType::INT32).
-        Date => PhysicalType::Int32,
-        Decimal => {
-            if logical_type.width <= 4 {
-                PhysicalType::Int16
-            } else if logical_type.width <= 9 {
-                PhysicalType::Int32
-            } else if logical_type.width <= 18 {
-                PhysicalType::Int64
-            } else {
-                PhysicalType::Int128
-            }
-        }
-        HugeInt => PhysicalType::Int128,
-        Float => PhysicalType::Float,
-        Double => PhysicalType::Double,
-        Varchar => PhysicalType::VarChar,
-        List => PhysicalType::List,
-        Struct | Map => PhysicalType::Struct,
-        // Validity bitmask columns are stored as arrays of uint8.
-        Validity => PhysicalType::Uint8,
-        _ => PhysicalType::Invalid,
-    }
-}
-
 /// Recursively serialise a `ColumnData` into a `PersistentColumnData`.
 ///
 /// Mirrors C++ `ColumnData::Serialize()`:
@@ -1087,7 +1046,7 @@ fn serialize_column_to_persistent(
     col: &ColumnData,
     logical_type: &LogicalType,
 ) -> PersistentColumnData {
-    let physical_type = logical_type_id_to_physical(logical_type);
+    let physical_type = logical_type_to_physical(logical_type);
     let logical_type_id = logical_type.id;
     let has_updates = col.has_updates();
     let pointers = col.ctx.get_data_pointers();

@@ -21,6 +21,7 @@
 //! | `optional_ptr<SegmentNode<RowGroup>>` | `usize` (index) + reference to tree |
 
 use std::sync::Arc;
+use std::any::Any;
 
 use parking_lot::Mutex;
 
@@ -35,7 +36,10 @@ use crate::storage::buffer::BufferHandle;
 /// Codec-specific scan cursor for one `ColumnSegment`.
 ///
 /// Mirrors `struct SegmentScanState`.
-pub trait SegmentScanState: Send + Sync + std::fmt::Debug {}
+pub trait SegmentScanState: Send + Sync + std::fmt::Debug + Any {
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ColumnScanState

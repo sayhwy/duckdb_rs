@@ -3,6 +3,7 @@
 mod catalog;
 pub mod common;
 pub mod db;
+pub mod function;
 pub mod storage;
 pub mod transaction;
 

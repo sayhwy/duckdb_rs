@@ -21,11 +21,12 @@ use crate::storage::metadata::WriteStream;
 use crate::storage::metadata::{MetaBlockPointer, MetadataManager, MetadataWriter};
 use crate::storage::serialization as storage_serialization;
 use crate::storage::storage_info::{DatabaseHeader, INVALID_BLOCK};
-use crate::storage::table::column_data::ColumnData;
+use crate::storage::table::column_data::{ColumnData, ColumnKindData, PersistentColumnData};
 use crate::storage::table::column_segment::ColumnSegmentType;
-use crate::storage::table::row_group::RowGroupPointer;
+use crate::storage::table::row_group::{RowGroupPointer, RowGroupWriteInfo};
 use crate::storage::table::segment_base::SegmentBase;
 use crate::storage::table::types::{CompressionType, Idx, STANDARD_VECTOR_SIZE};
+use crate::storage::statistics::BaseStatistics;
 
 /// Checkpoint 绠＄悊鍣?
 pub struct CheckpointManager {
@@ -124,7 +125,12 @@ impl CheckpointManager {
         let mut idx = 0i64;
         while let Some(row_group) = table.row_groups.get_row_group(idx) {
             if row_group.count() > 0 {
-                let pointer = self.write_row_group(writer, &row_group);
+                let write_info = RowGroupWriteInfo {
+                    compression_types: vec![CompressionType::Auto; row_group.get_column_count()],
+                    partial_block_manager: None,
+                };
+                let write_data = row_group.write_to_disk(&write_info);
+                let pointer = self.write_row_group(writer, &write_data.result_row_group);
                 row_group_pointers.push(pointer);
             }
             idx += 1;
@@ -162,7 +168,7 @@ impl CheckpointManager {
         row_group: &std::sync::Arc<crate::storage::table::row_group::RowGroup>,
     ) -> RowGroupPointer {
         let mut column_pointers = Vec::new();
-        let col_count = row_group.column_pointers.len();
+        let col_count = row_group.get_column_count();
         for col_idx in 0..col_count {
             let column = row_group.get_column(col_idx);
             column_pointers.push(self.write_column(writer, &column));
@@ -181,70 +187,86 @@ impl CheckpointManager {
         writer: &mut MetadataWriter<'_>,
         column: &std::sync::Arc<ColumnData>,
     ) -> MetaBlockPointer {
-        use crate::common::types::LogicalTypeId;
-
         let pointer = writer.get_meta_block_pointer();
-        let data_pointers = self.write_column_segments(column);
-        let col_type = &column.ctx.logical_type;
-
+        let persistent_column = self.create_persistent_column_data(column);
         let mut serializer = BinarySerializer::new(writer as &mut dyn WriteStream);
-
         serializer.begin_root_object();
-
-        // Field 100: data_pointers for main column
-        serializer.begin_list(100, data_pointers.len());
-        for data_pointer in &data_pointers {
-            serializer.list_write_object(|s| {
-                if col_type.id == LogicalTypeId::Varchar {
-                    storage_serialization::write_data_pointer_varchar(
-                        s,
-                        data_pointer.tuple_count,
-                        data_pointer.block_id,
-                        data_pointer.offset,
-                    );
-                } else {
-                    storage_serialization::write_data_pointer(
-                        s,
-                        data_pointer.tuple_count,
-                        data_pointer.block_id,
-                        data_pointer.offset,
-                    );
-                }
-            });
-        }
-        serializer.end_list();
-
-        // Field 101: validity child column (complete PersistentColumnData)
-        // Get validity column based on column type
-        let validity_column = match &column.kind {
-            crate::storage::table::column_data::ColumnKindData::Standard { validity } => {
-                validity.as_ref()
-            }
-            crate::storage::table::column_data::ColumnKindData::List { validity, .. } => {
-                Some(validity)
-            }
-            crate::storage::table::column_data::ColumnKindData::Array { validity, .. } => {
-                Some(validity)
-            }
-            crate::storage::table::column_data::ColumnKindData::Struct { validity, .. } => {
-                Some(validity)
-            }
-            crate::storage::table::column_data::ColumnKindData::Variant { validity, .. } => {
-                validity.as_ref()
-            }
-            crate::storage::table::column_data::ColumnKindData::Validity => None,
-        };
-
-        if validity_column.is_some() {
-            // The in-memory validity-column implementation is not checkpoint-compatible yet.
-            // Persist it as DuckDB's COMPRESSION_EMPTY validity segment instead, which means
-            // "all rows valid" to the official reader.
-            write_empty_validity_column(&mut serializer, column.count());
-        }
-
-        // OnObjectEnd for parent PersistentColumnData
+        persistent_column.serialize(&mut serializer);
         serializer.end_object();
         pointer
+    }
+
+    fn create_persistent_column_data(
+        &self,
+        column: &std::sync::Arc<ColumnData>,
+    ) -> PersistentColumnData {
+        let mut result = PersistentColumnData::new(&column.ctx.logical_type);
+        result.has_updates = column.has_updates();
+        result.pointers = self.write_column_segments(column);
+
+        match &column.kind {
+            ColumnKindData::Standard { validity } => {
+                if let Some(validity) = validity {
+                    result
+                        .child_columns
+                        .push(self.create_validity_persistent_column(column.count(), validity));
+                }
+            }
+            ColumnKindData::Validity => {}
+            ColumnKindData::List {
+                validity,
+                child_column,
+            }
+            | ColumnKindData::Array {
+                validity,
+                child_column,
+                ..
+            } => {
+                result
+                    .child_columns
+                    .push(self.create_validity_persistent_column(column.count(), validity));
+                result
+                    .child_columns
+                    .push(self.create_persistent_column_data(child_column));
+            }
+            ColumnKindData::Struct {
+                validity,
+                sub_columns,
+            } => {
+                result
+                    .child_columns
+                    .push(self.create_validity_persistent_column(column.count(), validity));
+                for child in sub_columns {
+                    result.child_columns.push(self.create_persistent_column_data(child));
+                }
+            }
+            ColumnKindData::Variant {
+                validity,
+                sub_columns,
+            } => {
+                if let Some(validity) = validity {
+                    result
+                        .child_columns
+                        .push(self.create_validity_persistent_column(column.count(), validity));
+                }
+                for child in sub_columns {
+                    result.child_columns.push(self.create_persistent_column_data(child));
+                }
+            }
+        }
+
+        result
+    }
+
+    fn create_validity_persistent_column(
+        &self,
+        tuple_count: Idx,
+        validity: &std::sync::Arc<ColumnData>,
+    ) -> PersistentColumnData {
+        if validity.count() == 0 {
+            return create_empty_validity_persistent_column(tuple_count);
+        }
+        self.create_persistent_column_data(validity)
     }
 
     fn write_column_segments(
@@ -271,6 +293,8 @@ impl CheckpointManager {
                         offset: segment.block_offset as u32,
                         row_start,
                         tuple_count,
+                        compression_type: segment.compression,
+                        statistics: segment.stats.lock().statistics().clone(),
                     });
                 }
                 ColumnSegmentType::Transient => {
@@ -347,6 +371,8 @@ impl CheckpointManager {
                             offset: 0,
                             row_start,
                             tuple_count,
+                            compression_type: CompressionType::Uncompressed,
+                            statistics: segment.stats.lock().statistics().clone(),
                         });
                     } else if is_validity {
                         // Validity mask format:
@@ -369,9 +395,15 @@ impl CheckpointManager {
                             offset: 0,
                             row_start,
                             tuple_count,
+                            compression_type: segment.compression,
+                            statistics: segment.stats.lock().statistics().clone(),
                         });
                     } else {
-                        let used_bytes = tuple_count as usize * segment.type_size as usize;
+                        let used_bytes = if segment.compression == CompressionType::Uncompressed {
+                            tuple_count as usize * segment.type_size as usize
+                        } else {
+                            segment.segment_size() as usize
+                        };
                         {
                             let buffer = segment.buffer.lock();
                             block.payload_mut()[..used_bytes]
@@ -383,6 +415,8 @@ impl CheckpointManager {
                             offset: 0,
                             row_start,
                             tuple_count,
+                            compression_type: segment.compression,
+                            statistics: segment.stats.lock().statistics().clone(),
                         });
                     }
                 }
@@ -392,39 +426,23 @@ impl CheckpointManager {
     }
 }
 
-fn write_empty_validity_column(serializer: &mut BinarySerializer<'_>, tuple_count: Idx) {
-    serializer.begin_object(101);
-    serializer.begin_list(100, 1);
-    serializer.list_write_object(|s| {
-        // DuckDB internal enum value: CompressionType::COMPRESSION_EMPTY = 14.
-        write_data_pointer_with_compression(s, tuple_count, -1, 0, 14, true, false);
-    });
-    serializer.end_list();
-    serializer.end_object();
-}
-
-fn write_data_pointer_with_compression(
-    serializer: &mut BinarySerializer<'_>,
-    tuple_count: Idx,
-    block_id: i64,
-    offset: u32,
-    compression_tag: u8,
-    has_no_null: bool,
-    has_null: bool,
-) {
-    serializer.write_varint(101, tuple_count);
-    serializer.begin_object(102);
-    serializer.write_signed_varint(100, block_id);
-    serializer.write_varint(101, offset as u64);
-    serializer.end_object();
-    serializer.write_u8(103, compression_tag);
-    serializer.begin_object(104);
-    serializer.write_bool(100, has_null);
-    serializer.write_bool(101, has_no_null);
-    serializer.write_varint(102, if has_null { tuple_count } else { 0 });
-    serializer.begin_object(103);
-    serializer.end_object();
-    serializer.end_object();
+fn create_empty_validity_persistent_column(tuple_count: Idx) -> PersistentColumnData {
+    let validity_type = crate::common::types::LogicalType::validity();
+    let mut result = PersistentColumnData::new(&validity_type);
+    let mut statistics = BaseStatistics::create_empty(validity_type);
+    statistics.set_has_no_null();
+    statistics.set_distinct_count(0);
+    result
+        .pointers
+        .push(crate::storage::table::types::DataPointer {
+            block_id: INVALID_BLOCK,
+            offset: 0,
+            row_start: 0,
+            tuple_count,
+            compression_type: CompressionType::Empty,
+            statistics,
+        });
+    result
 }
 
 mod catalog_type {
