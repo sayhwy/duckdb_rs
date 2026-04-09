@@ -10,6 +10,7 @@ use crate::common::types::{DataChunk, LogicalType};
 use crate::db::conn::{Connection, DatabaseInstance, TableHandle};
 use crate::storage::data_table::StorageIndex;
 use crate::storage::table::scan_state::{ParallelTableScanState, TableScanState};
+use crate::storage::table::segment_base::SegmentBase;
 use crate::transaction::duck_transaction_manager::DuckTxnHandle;
 
 // ─── DuckdbEngine ──────────────────────────────────────────────────────────────
@@ -425,6 +426,15 @@ impl DuckParallelScanHandle {
         );
         if rows == 0 {
             return Ok(None);
+        }
+
+        if let Some(current_row_group) = local_state.scan_state.table_state.current_row_group.as_ref() {
+            local_state.scan_state.table_state.max_row =
+                current_row_group.row_start.saturating_add(current_row_group.row_group.count());
+        }
+        if let Some(current_row_group) = local_state.scan_state.local_state.current_row_group.as_ref() {
+            local_state.scan_state.local_state.max_row =
+                current_row_group.row_start.saturating_add(current_row_group.row_group.count());
         }
 
         Ok(Some(DuckTableScanTask {
