@@ -419,12 +419,12 @@ impl DuckParallelScanHandle {
             .collect();
         local_state.scan_state.initialize(column_ids);
 
-        let rows = self.table.storage.next_parallel_scan(
+        let claimed = self.table.storage.next_parallel_scan(
             &self.storage_context,
             &mut self.parallel_state.parallel_state,
             &mut local_state.scan_state,
         );
-        if rows == 0 {
+        if !claimed {
             return Ok(None);
         }
 

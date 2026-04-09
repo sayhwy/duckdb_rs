@@ -568,17 +568,12 @@ impl DataTable {
         context: &ClientContext,
         parallel_state: &mut ParallelTableScanState,
         scan_state: &mut TableScanState,
-    ) -> Idx {
+    ) -> bool {
         if self
             .row_groups
             .next_parallel_scan(&mut parallel_state.scan_state, &mut scan_state.table_state)
         {
-            return scan_state
-                .table_state
-                .current_row_group
-                .as_ref()
-                .map(|row_group| row_group.row_group.count())
-                .unwrap_or(0);
+            return true;
         }
         if context.local_storage.next_parallel_scan(
             context,
@@ -586,14 +581,9 @@ impl DataTable {
             &mut parallel_state.local_state,
             &mut scan_state.local_state,
         ) {
-            return scan_state
-                .local_state
-                .current_row_group
-                .as_ref()
-                .map(|row_group| row_group.row_group.count())
-                .unwrap_or(0);
+            return true;
         }
-        0
+        false
     }
 
     /// 用于 CREATE INDEX 的提交行扫描（C++: `DataTable::CreateIndexScan()`）。
