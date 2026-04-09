@@ -603,7 +603,9 @@ impl<T: BitpackingValue + std::fmt::Debug + Default + Send + Sync + 'static> Bit
         }
         segment.set_count(self.current_segment_count);
         *segment.stats.lock() = self.current_segment_stats.clone();
-        self.checkpoint_state.lock().flush_segment(segment);
+        self.checkpoint_state
+            .lock()
+            .flush_segment(segment, total_segment_size as Idx);
     }
 
     fn finalize(&mut self) {

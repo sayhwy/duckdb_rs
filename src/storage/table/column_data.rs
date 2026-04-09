@@ -29,7 +29,7 @@ use std::sync::{
 use parking_lot::Mutex;
 
 use super::append_state::ColumnAppendState;
-use super::column_checkpoint_state::ColumnCheckpointState;
+use super::column_checkpoint_state::{ColumnCheckpointState, PartialBlockManager};
 use super::column_data_checkpointer::{ColumnCheckpointInfo, ColumnDataCheckpointer};
 use super::column_segment::{
     ColumnSegment, ColumnSegmentType, SegmentStatistics, UnifiedVectorFormat,
@@ -46,6 +46,7 @@ use super::types::{
 use super::update_segment::UpdateSegment;
 use crate::common::serializer::BinarySerializer;
 use crate::common::types::{LogicalTypeId, Vector};
+use crate::storage::buffer::BlockManager;
 use crate::storage::serialization as storage_serialization;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -980,13 +981,16 @@ impl ColumnDataKind {
         self: &Arc<Self>,
         row_group_id: u64,
         compression_type: CompressionType,
+        partial_block_manager: Arc<PartialBlockManager>,
     ) -> Arc<Mutex<ColumnCheckpointState>> {
         let checkpoint_state = Arc::new(Mutex::new(ColumnCheckpointState::with_type(
             self.ctx.logical_type.clone(),
         )));
-        checkpoint_state
-            .lock()
-            .set_original_column(Arc::clone(self));
+        {
+            let mut state = checkpoint_state.lock();
+            state.set_original_column(Arc::clone(self));
+            state.set_partial_block_manager(partial_block_manager);
+        }
 
         if self.ctx.data.lock().0.is_empty() {
             return checkpoint_state;

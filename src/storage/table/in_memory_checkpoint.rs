@@ -74,7 +74,7 @@
 //! - `AddSegmentToTail(ColumnData&, ColumnSegment&, uint32_t)` -> `add_segment_to_tail()` (no-op)
 //! - `Clear()` -> `clear()`
 
-use super::column_checkpoint_state::{BlockManager, PartialBlockManager, PartialBlockState};
+use super::column_checkpoint_state::{PartialBlockManager, PartialBlockState};
 use super::table_statistics::TableStatistics;
 use super::types::{Idx, MetaBlockPointer};
 use std::sync::Arc;
@@ -305,7 +305,7 @@ impl InMemoryCheckpointer {
                 force,
                 in_memory: true,
             },
-            partial_block_manager: PartialBlockManager,
+            partial_block_manager: PartialBlockManager::empty(),
         }
     }
 

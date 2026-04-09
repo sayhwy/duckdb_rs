@@ -158,7 +158,7 @@ impl OptimisticDataWriter {
                 // In a full implementation, this would get the block manager from table IO manager
                 collection
                     .partial_block_managers
-                    .push(Box::new(PartialBlockManager));
+                    .push(Box::new(self.create_partial_block_manager()));
             }
         }
 
@@ -263,15 +263,15 @@ impl OptimisticDataWriter {
     /// Mirrors `Merge(unique_ptr<PartialBlockManager> &other_manager)`.
     pub fn merge_partial_manager(&mut self, other_manager: &mut Box<PartialBlockManager>) {
         if self.partial_manager.is_none() {
-            // Take ownership of the other manager
-            self.partial_manager = Some(Box::new(PartialBlockManager));
-            // In a full implementation, we would move the actual manager here
+            self.partial_manager = Some(Box::new(self.create_partial_block_manager()));
+            if let Some(ref mut pm) = self.partial_manager {
+                pm.merge(other_manager.as_mut());
+            }
             return;
         }
 
-        // Merge the other manager into ours
         if let Some(ref mut pm) = self.partial_manager {
-            pm.merge(other_manager);
+            pm.merge(other_manager.as_mut());
         }
     }
 
@@ -314,9 +314,7 @@ impl OptimisticDataWriter {
 
         // Allocate partial block manager if not yet allocated
         if self.partial_manager.is_none() {
-            // In a full implementation, we would get the block manager from the table
-            // and create a proper PartialBlockManager
-            self.partial_manager = Some(Box::new(PartialBlockManager));
+            self.partial_manager = Some(Box::new(self.create_partial_block_manager()));
         }
 
         true
@@ -344,7 +342,7 @@ impl OptimisticDataWriter {
         // Create write info
         let write_info = crate::storage::table::row_group::RowGroupWriteInfo {
             compression_types,
-            partial_block_manager: None,
+            partial_block_manager: Arc::new(self.create_partial_block_manager()),
         };
 
         // Write each row group to disk
@@ -389,39 +387,14 @@ impl OptimisticDataWriter {
         // For now, return Auto (let the system choose)
         CompressionType::Auto
     }
-}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PartialBlockManager Extensions
-// ─────────────────────────────────────────────────────────────────────────────
-
-impl PartialBlockManager {
-    /// Clear all blocks in this manager.
-    ///
-    /// Mirrors `ClearBlocks()`.
-    pub fn clear_blocks(&mut self) {
-        // In a full implementation, this would release all allocated blocks
-    }
-
-    /// Flush all partial blocks to disk.
-    ///
-    /// Mirrors `FlushPartialBlocks()`.
-    pub fn flush_partial_blocks(&mut self) {
-        // In a full implementation, this would write all buffered data to disk
-    }
-
-    /// Merge another partial block manager into this one.
-    ///
-    /// Mirrors `Merge(PartialBlockManager &other)`.
-    pub fn merge(&mut self, _other: &mut Box<PartialBlockManager>) {
-        // In a full implementation, this would merge the blocks from other into self
-    }
-
-    /// Rollback all partial writes.
-    ///
-    /// Mirrors `Rollback()`.
-    pub fn rollback(&mut self) {
-        // In a full implementation, this would discard all buffered data
+    fn create_partial_block_manager(&self) -> PartialBlockManager {
+        let runtime = self
+            .table
+            .info
+            .persistent_storage()
+            .expect("OptimisticDataWriter requires persistent storage runtime");
+        PartialBlockManager::new(runtime.block_manager.clone())
     }
 }
 

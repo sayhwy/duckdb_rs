@@ -154,6 +154,17 @@ impl DatabaseInstance {
 
         let catalog_entry = TableCatalogEntry::new(catalog_name, schema, table_id, create_info);
         let storage = DataTable::new(1, table_id, schema, table, storage_columns, None);
+        if self.path != SingleFileStorageManager::IN_MEMORY_PATH {
+            let block_manager = self.storage_manager.block_manager_arc();
+            let metadata_manager = Arc::new(MetadataManager::new(
+                block_manager.clone(),
+                block_manager.buffer_manager(),
+            ));
+            storage.info.set_persistent_storage(Arc::new(PersistentStorageRuntime {
+                block_manager,
+                metadata_manager,
+            }));
+        }
         self.tables.lock().insert(
             (normalize_name(schema), normalize_name(table)),
             TableHandle {

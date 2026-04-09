@@ -150,6 +150,9 @@ impl LocalTableStorage {
             .collect();
         let virtual_table =
             DataTable::new(info.db_id, info.table_io_manager_id, "", "", col_defs, None);
+        if let Some(runtime) = info.persistent_storage() {
+            virtual_table.info.set_persistent_storage(runtime);
+        }
 
         // 创建最小上下文供乐观写入器持有。
         // 写入器仅用该上下文读取写缓冲阈值（默认 2），无副作用。
@@ -254,6 +257,9 @@ impl LocalTableStorage {
             col_defs,
             None,
         );
+        if let Some(runtime) = new_info.persistent_storage() {
+            new_virtual_table.info.set_persistent_storage(runtime);
+        }
 
         let optimistic_writer = OptimisticDataWriter::new_with_parent(
             Arc::clone(&new_virtual_table),
@@ -323,6 +329,9 @@ impl LocalTableStorage {
             col_defs,
             None,
         );
+        if let Some(runtime) = new_info.persistent_storage() {
+            new_virtual_table.info.set_persistent_storage(runtime);
+        }
 
         let optimistic_writer = OptimisticDataWriter::new_with_parent(
             Arc::clone(&new_virtual_table),
@@ -384,6 +393,9 @@ impl LocalTableStorage {
             col_defs,
             None,
         );
+        if let Some(runtime) = new_info.persistent_storage() {
+            new_virtual_table.info.set_persistent_storage(runtime);
+        }
 
         let optimistic_writer = OptimisticDataWriter::new_with_parent(
             Arc::clone(&new_virtual_table),

@@ -22,10 +22,10 @@ use crate::storage::metadata::{MetaBlockPointer, MetadataManager, MetadataWriter
 use crate::storage::serialization as storage_serialization;
 use crate::storage::storage_info::{DatabaseHeader, INVALID_BLOCK};
 use crate::storage::table::column_data::{ColumnData, ColumnKindData, PersistentColumnData};
-use crate::storage::table::column_segment::ColumnSegmentType;
+use crate::storage::table::column_checkpoint_state::PartialBlockManager;
 use crate::storage::table::row_group::{RowGroupPointer, RowGroupWriteInfo};
 use crate::storage::table::segment_base::SegmentBase;
-use crate::storage::table::types::{CompressionType, Idx, STANDARD_VECTOR_SIZE};
+use crate::storage::table::types::{CompressionType, Idx};
 use crate::storage::statistics::BaseStatistics;
 
 /// Checkpoint 绠＄悊鍣?
@@ -122,12 +122,13 @@ impl CheckpointManager {
 
         // Step 1: Checkpoint all row groups - this writes column data to disk
         let mut row_group_pointers = Vec::new();
+        let partial_block_manager = Arc::new(PartialBlockManager::new(self.block_manager.clone()));
         let mut idx = 0i64;
         while let Some(row_group) = table.row_groups.get_row_group(idx) {
             if row_group.count() > 0 {
                 let write_info = RowGroupWriteInfo {
                     compression_types: vec![CompressionType::Auto; row_group.get_column_count()],
-                    partial_block_manager: None,
+                    partial_block_manager: Arc::clone(&partial_block_manager),
                 };
                 let write_data = row_group.write_to_disk(&write_info);
                 let pointer = self.write_row_group(writer, &write_data.result_row_group);
@@ -202,7 +203,7 @@ impl CheckpointManager {
     ) -> PersistentColumnData {
         let mut result = PersistentColumnData::new(&column.ctx.logical_type);
         result.has_updates = column.has_updates();
-        result.pointers = self.write_column_segments(column);
+        result.pointers = column.ctx.get_data_pointers();
 
         match &column.kind {
             ColumnKindData::Standard { validity } => {
@@ -269,161 +270,6 @@ impl CheckpointManager {
         self.create_persistent_column_data(validity)
     }
 
-    fn write_column_segments(
-        &self,
-        column: &std::sync::Arc<ColumnData>,
-    ) -> Vec<crate::storage::table::types::DataPointer> {
-        use crate::common::types::LogicalTypeId;
-
-        let mut result = Vec::new();
-        column.ctx.for_each_segment(|segment, row_start| {
-            let tuple_count = segment.count();
-            if tuple_count == 0 {
-                return;
-            }
-
-            // Calculate the actual byte size for this segment
-            // For validity columns (BIT type), use bitmask format
-            let is_validity = segment.logical_type.id == LogicalTypeId::Validity;
-
-            match segment.segment_type {
-                ColumnSegmentType::Persistent => {
-                    result.push(crate::storage::table::types::DataPointer {
-                        block_id: segment.block_id,
-                        offset: segment.block_offset as u32,
-                        row_start,
-                        tuple_count,
-                        compression_type: segment.compression,
-                        statistics: segment.stats.lock().statistics().clone(),
-                    });
-                }
-                ColumnSegmentType::Transient => {
-                    let block_id = self.block_manager.get_free_block_id_for_checkpoint();
-                    let mut block = self.block_manager.create_block(block_id, None);
-
-                    let is_varchar = segment.logical_type.id == LogicalTypeId::Varchar;
-
-                    if is_varchar {
-                        // VARCHAR 鍒椾娇鐢ㄥ瓧绗︿覆瀛楀吀鏍煎紡锛堝搴?DuckDB UncompressedStringStorage锛?
-                        //
-                        // 鍧楀竷灞€锛堝尮閰?UncompressedStringStorage 鎵弿閫昏緫锛?
-                        //   [0..4]             uint32_t dict_size  锛堝瓧绗︿覆鏁版嵁瀛楄妭鎬绘暟锛?
-                        //   [4..8]             uint32_t dict_end   锛堥粯璁?block_alloc_size锛?
-                        //   [8..8+n*4]         int32_t[n] offsets  锛堥€愯绱闀垮害锛?
-                        //   [..]                瀛楃涓叉暟鎹紙閫氳繃 dict_pos=dict_end-dict_offset 瀹氫綅锛?
-                        let block_alloc = self.block_manager.get_block_alloc_size() as usize;
-                        let n = tuple_count as usize;
-                        let buf = segment.buffer.lock();
-
-                        // 浠?string_t (16瀛楄妭) 鎻愬彇瀛楃涓插唴瀹?
-                        let mut str_data: Vec<Vec<u8>> = Vec::with_capacity(n);
-                        for i in 0..n {
-                            let base = i * 16;
-                            let len = u32::from_le_bytes(buf[base..base + 4].try_into().unwrap())
-                                as usize;
-                            if len <= 12 {
-                                let bytes = buf[base + 4..base + 4 + len].to_vec();
-                                str_data.push(bytes);
-                            } else {
-                                // 瓒呭嚭 inline 闀垮害锛屾殏涓嶆敮鎸侊紝鍐欏叆绌轰覆
-                                str_data.push(Vec::new());
-                            }
-                        }
-                        drop(buf);
-
-                        let dict_size: usize = str_data.iter().map(|s| s.len()).sum();
-                        let offset_section = 8 + n * 4;
-
-                        let payload = block.payload_mut();
-                        // Compact dictionary so that:
-                        //   dict_end = offset_section + dict_size
-                        // i.e. dictionary bytes start right after the offsets array.
-                        let total_size = offset_section + dict_size;
-                        let dict_end = total_size;
-                        assert!(
-                            dict_end <= payload.len(),
-                            "VARCHAR segment too large for one block"
-                        );
-
-                        // dict_size
-                        payload[0..4].copy_from_slice(&(dict_size as u32).to_le_bytes());
-                        // dict_end points to the end of the dictionary region.
-                        payload[4..8].copy_from_slice(&(dict_end as u32).to_le_bytes());
-
-                        // 鍐欏叆绱鍋忕Щ閲?
-                        let mut cumulative = 0u32;
-                        for (i, s) in str_data.iter().enumerate() {
-                            cumulative += s.len() as u32;
-                            let pos = 8 + i * 4;
-                            payload[pos..pos + 4]
-                                .copy_from_slice(&(cumulative as i32).to_le_bytes());
-                            if !s.is_empty() {
-                                // Place the string exactly like DuckDB:
-                                // dict_pos = dict_end - dict_offset (where dict_offset == cumulative).
-                                let dict_pos = dict_end - cumulative as usize;
-                                payload[dict_pos..dict_pos + s.len()].copy_from_slice(s);
-                            }
-                        }
-
-                        self.block_manager.write_block(&block, block_id);
-                        result.push(crate::storage::table::types::DataPointer {
-                            block_id,
-                            offset: 0,
-                            row_start,
-                            tuple_count,
-                            compression_type: CompressionType::Uncompressed,
-                            statistics: segment.stats.lock().statistics().clone(),
-                        });
-                    } else if is_validity {
-                        // Validity mask format:
-                        // - Each vector (STANDARD_VECTOR_SIZE rows) uses 32 bytes (STANDARD_MASK_SIZE)
-                        // - All bits set to 1 means all valid (0xFF bytes)
-                        // - We compute the size per DuckDB's ValidityFinalizeAppend:
-                        //   ((count + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE) * STANDARD_MASK_SIZE
-                        let vector_count =
-                            (tuple_count + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
-                        let used_bytes = vector_count as usize * 32; // STANDARD_MASK_SIZE = 32
-
-                        // Write validity mask - for now assume all valid (0xFF)
-                        // This matches DuckDB's ValidityInitSegment behavior
-                        for byte in block.payload_mut()[..used_bytes].iter_mut() {
-                            *byte = 0xFF;
-                        }
-                        self.block_manager.write_block(&block, block_id);
-                        result.push(crate::storage::table::types::DataPointer {
-                            block_id,
-                            offset: 0,
-                            row_start,
-                            tuple_count,
-                            compression_type: segment.compression,
-                            statistics: segment.stats.lock().statistics().clone(),
-                        });
-                    } else {
-                        let used_bytes = if segment.compression == CompressionType::Uncompressed {
-                            tuple_count as usize * segment.type_size as usize
-                        } else {
-                            segment.segment_size() as usize
-                        };
-                        {
-                            let buffer = segment.buffer.lock();
-                            block.payload_mut()[..used_bytes]
-                                .copy_from_slice(&buffer[..used_bytes]);
-                        }
-                        self.block_manager.write_block(&block, block_id);
-                        result.push(crate::storage::table::types::DataPointer {
-                            block_id,
-                            offset: 0,
-                            row_start,
-                            tuple_count,
-                            compression_type: segment.compression,
-                            statistics: segment.stats.lock().statistics().clone(),
-                        });
-                    }
-                }
-            }
-        });
-        result
-    }
 }
 
 fn create_empty_validity_persistent_column(tuple_count: Idx) -> PersistentColumnData {

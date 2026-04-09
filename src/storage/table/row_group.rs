@@ -46,6 +46,7 @@ use super::types::{
 use crate::common::serializer::{BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID};
 use crate::common::types::{DataChunk, Vector};
 use crate::storage::buffer::BlockManager as _;
+use crate::storage::buffer::BlockManager;
 use crate::storage::table::column_segment::ColumnSegment;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -60,7 +61,7 @@ pub struct RowGroupWriteInfo {
     /// Global partial block manager for packing multiple column segments into
     /// one physical block to improve space efficiency.
     /// Mirrors `PartialBlockManager &manager` in C++.
-    pub partial_block_manager: Option<Box<PartialBlockManager>>,
+    pub partial_block_manager: Arc<PartialBlockManager>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -875,7 +876,11 @@ impl RowGroup {
             .map(|col_idx| {
                 let column = self.get_column(col_idx);
                 let checkpoint_state =
-                    column.checkpoint(self.row_start as u64, info.compression_types[col_idx]);
+                    column.checkpoint(
+                        self.row_start as u64,
+                        info.compression_types[col_idx],
+                        Arc::clone(&info.partial_block_manager),
+                    );
                 Some(checkpoint_state.lock().get_final_result())
             })
             .collect();

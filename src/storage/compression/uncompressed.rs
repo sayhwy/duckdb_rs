@@ -212,8 +212,10 @@ fn flush_segment(state: &mut UncompressedCompressState) {
         return;
     }
     let segment_size = state.current_segment.finalize_append(&mut state.append_state);
-    state.checkpoint_state.lock().flush_segment(Arc::clone(&state.current_segment));
-    let _ = segment_size;
+    state
+        .checkpoint_state
+        .lock()
+        .flush_segment(Arc::clone(&state.current_segment), segment_size);
 }
 
 fn fixed_size_init_scan(

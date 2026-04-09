@@ -836,6 +836,14 @@ impl SingleFileStorageManager {
         *self.db_instance.lock() = Some(db_instance);
     }
 
+    pub fn block_manager_arc(&self) -> Arc<dyn BlockManager> {
+        self.block_manager_inner
+            .lock()
+            .as_ref()
+            .cloned()
+            .expect("SingleFileStorageManager block manager not initialized")
+    }
+
     pub fn set_replaying_wal(&self, replaying: bool) {
         self.replaying_wal.store(replaying, Ordering::Release);
     }
