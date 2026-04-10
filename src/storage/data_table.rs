@@ -555,7 +555,7 @@ impl DataTable {
     /// 线程安全地从共享的 `ParallelTableScanState` 中领取下一个扫描块，
     /// 将结果写入线程私有的 `scan_state`。
     ///
-    /// 返回 `true` 表示成功领取到工作块，`false` 表示扫描已完成。
+    /// 返回当前领取到的 row group 行数；返回 `0` 表示扫描已完成。
     ///
     /// ```text
     /// C++:
@@ -568,12 +568,17 @@ impl DataTable {
         context: &ClientContext,
         parallel_state: &mut ParallelTableScanState,
         scan_state: &mut TableScanState,
-    ) -> bool {
+    ) -> usize {
         if self
             .row_groups
             .next_parallel_scan(&mut parallel_state.scan_state, &mut scan_state.table_state)
         {
-            return true;
+            return scan_state
+                .table_state
+                .current_row_group
+                .as_ref()
+                .map(|current_row_group| current_row_group.row_group.count() as usize)
+                .unwrap_or(0);
         }
         if context.local_storage.next_parallel_scan(
             context,
@@ -581,9 +586,14 @@ impl DataTable {
             &mut parallel_state.local_state,
             &mut scan_state.local_state,
         ) {
-            return true;
+            return scan_state
+                .local_state
+                .current_row_group
+                .as_ref()
+                .map(|current_row_group| current_row_group.row_group.count() as usize)
+                .unwrap_or(0);
         }
-        false
+        0
     }
 
     /// 用于 CREATE INDEX 的提交行扫描（C++: `DataTable::CreateIndexScan()`）。
@@ -719,9 +729,9 @@ impl DataTable {
     ///   idx_t parallel_scan_tuple_count = STANDARD_VECTOR_SIZE * parallel_scan_vector_count;
     ///   return GetTotalRows() / parallel_scan_tuple_count + 1;
     /// ```
-    pub fn max_threads(&self) -> Idx {
+    pub fn max_threads(&self, _context: &ClientContext) -> Idx {
         use crate::storage::table::types::STANDARD_VECTOR_SIZE;
-        let row_group_size = 122_880u64; // Storage::DEFAULT_ROW_GROUP_SIZE
+        let row_group_size = self.get_row_group_size();
         let parallel_scan_vector_count = row_group_size / STANDARD_VECTOR_SIZE;
         let parallel_scan_tuple_count = STANDARD_VECTOR_SIZE * parallel_scan_vector_count;
         self.get_total_rows() / parallel_scan_tuple_count + 1

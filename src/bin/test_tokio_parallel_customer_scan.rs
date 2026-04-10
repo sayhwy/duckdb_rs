@@ -16,7 +16,7 @@ struct WorkerStats {
     rows_read: usize,
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     println!();
     println!("╔════════════════════════════════════════════════════════════════════╗");
@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
             .context("duck_table_scan_init_global 失败")?,
     );
     let result_types = global_scan.result_types().to_vec();
-    let task_count = global_scan.max_threads();
+    let task_count = 15;
     println!("  已调用 DuckConnection::duck_table_scan_init_global");
     println!("  内部链路: DuckTableScanInitGlobal -> DataTable::InitializeParallelScan -> DataTable::MaxThreads");
     println!("  输出列数: {}", result_types.len());
@@ -66,8 +66,8 @@ async fn main() -> Result<()> {
                 if !has_data {
                     break;
                 }
-                chunk.pretty_print();
-                sleep(Duration::from_secs(10));
+                // chunk.pretty_print();
+                // sleep(Duration::from_secs(10));
                 stats.chunks_read += 1;
                 stats.rows_read += chunk.size();
             }
@@ -76,8 +76,8 @@ async fn main() -> Result<()> {
     }
 
     println!("步骤 4：每个 worker 按 DuckDB 并行 scan 流程工作");
-    println!("  local init: TableScanGlobalState::init_local_state()");
-    println!("  scan loop: TableScanGlobalState::table_scan(local_state, chunk)");
+    println!("  local init: DuckTableScanState::init_local_state()");
+    println!("  scan loop: DuckTableScanState::table_scan(local_state, chunk)");
     println!("  内部链路: InitLocalState -> DataTable::NextParallelScan(...); TableScanFunc -> DataTable::Scan(...) / DataTable::NextParallelScan(...)");
     println!();
 

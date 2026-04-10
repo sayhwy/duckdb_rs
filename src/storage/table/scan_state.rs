@@ -436,6 +436,8 @@ impl TableScanState {
     }
 
     pub fn initialize(&mut self, column_ids: Vec<u64>) {
+        self.table_state.set_column_ids(column_ids.clone());
+        self.local_state.set_column_ids(column_ids.clone());
         self.shared.lock().column_ids = column_ids;
     }
 

@@ -838,7 +838,7 @@ impl RowGroupCollection {
             return false;
         };
         loop {
-            let current_ref = {
+            let (current_ref, max_row) = {
                 let _guard = state.lock.lock();
                 let idx = state.next_row_group_index;
                 state.next_row_group_index += 1;
@@ -851,7 +851,17 @@ impl RowGroupCollection {
                     })
                 };
                 state.current_row_group = current_ref.clone();
-                current_ref
+                let max_row = current_ref
+                    .as_ref()
+                    .map(|current_row_group| {
+                        current_row_group
+                            .row_start
+                            .saturating_add(current_row_group.row_group.count())
+                            .min(state.max_row)
+                    })
+                    .unwrap_or(0);
+                state.batch_index += 1;
+                (current_ref, max_row)
             };
 
             let Some(current_row_group) = current_ref else {
@@ -866,6 +876,8 @@ impl RowGroupCollection {
             // Attempt to initialise the scan for this row group.
             scan_state.row_groups = Some(Arc::clone(&tree));
             scan_state.current_row_group = Some(current_row_group.clone());
+            scan_state.max_row = max_row;
+            scan_state.batch_index = state.batch_index;
             if current_row_group
                 .row_group
                 .initialize_scan(scan_state, current_row_group.row_start)

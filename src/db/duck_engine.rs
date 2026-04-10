@@ -164,64 +164,19 @@ impl DuckConnection {
         self.conn.delete_chunk(table_name, row_ids)
     }
 
-    /// 初始化顺序扫描。
-    ///
-    /// 返回值持有：
-    /// - engine 级 global state
-    /// - 线程私有 local scan state
-    /// - 绑定当前事务的存储上下文
-    pub fn begin_scan(
-        &self,
-        table_name: &str,
-        request: TableScanRequest,
-    ) -> Result<DuckTableScanHandle, EngineError> {
-        let resolved = self.resolve_scan(table_name, request)?;
-        let column_ids = resolved.bind_data.request.column_ids.clone();
-        let mut local_state = TableScanLocalState {
-            scan_state: TableScanState::new(),
-            finished: false,
-        };
-        local_state.scan_state.initialize(
-            resolved
-                .bind_data
-                .request
-                .column_ids
-                .iter()
-                .map(|idx| idx.0)
-                .collect(),
-        );
-        {
-            let txn_guard = resolved.txn.lock_inner();
-            resolved.table.storage.initialize_scan(
-                &resolved.storage_context,
-                &*txn_guard,
-                &mut local_state.scan_state,
-                &column_ids,
-                resolved.bind_data.request.filters.as_ref(),
-            );
-        }
-
-        Ok(DuckTableScanHandle {
-            table: resolved.table,
-            txn: resolved.txn,
-            bind_data: resolved.bind_data,
-            local_state,
-        })
-    }
-
     /// 初始化 table scan 的 global state。
     ///
     /// 对齐 `DuckTableScanInitGlobal(...)`：
     /// - 使用绑定阶段的 `TableScanBindData`
     /// - 调用 `DataTable::InitializeParallelScan(...)`
-    /// - 在构造 `TableScanGlobalState` 时调用 `DataTable::MaxThreads()`
+    /// - 在构造 `DuckTableScanState` 时调用 `DataTable::MaxThreads()`
     pub fn duck_table_scan_init_global(
         &self,
         table_name: &str,
         request: TableScanRequest,
-    ) -> Result<TableScanGlobalState, EngineError> {
+    ) -> Result<DuckTableScanState, EngineError> {
         let resolved = self.resolve_scan(table_name, request)?;
-        let max_threads = resolved.table.storage.max_threads() as usize;
+        let max_threads = resolved.table.storage.max_threads(&resolved.storage_context) as usize;
         let mut parallel_state = ParallelTableScanState {
             scan_state: ParallelCollectionScanState {
                 row_groups: None,
@@ -250,7 +205,7 @@ impl DuckConnection {
             &[],
         );
 
-        Ok(TableScanGlobalState {
+        Ok(DuckTableScanState {
             table: resolved.table,
             txn: resolved.txn,
             storage_context: resolved.storage_context,
@@ -275,12 +230,14 @@ impl DuckConnection {
                 .map(StorageIndex)
                 .collect(),
         );
-        let mut handle = self.begin_scan(table_name, request)?;
+        let global_state = self.duck_table_scan_init_global(table_name, request)?;
+        let result_types = global_state.result_types().to_vec();
+        let mut local_state = global_state.init_local_state();
         let mut chunks = Vec::new();
         loop {
             let mut chunk = DataChunk::new();
-            chunk.initialize(handle.result_types(), crate::common::types::STANDARD_VECTOR_SIZE);
-            if !handle.next_chunk(&mut chunk)? {
+            chunk.initialize(&result_types, crate::common::types::STANDARD_VECTOR_SIZE);
+            if !global_state.table_scan(&mut local_state, &mut chunk)? {
                 break;
             }
             chunk.flatten();
@@ -356,40 +313,8 @@ struct ResolvedScan {
     bind_data: TableScanBindData,
 }
 
-/// 顺序扫描句柄。
-///
-/// 这层对应 engine 的 `global state + local state`。
-pub struct DuckTableScanHandle {
-    table: TableHandle,
-    txn: Arc<DuckTxnHandle>,
-    bind_data: TableScanBindData,
-    local_state: TableScanLocalState,
-}
-
-impl DuckTableScanHandle {
-    pub fn bind_data(&self) -> &TableScanBindData {
-        &self.bind_data
-    }
-
-    pub fn local_state(&self) -> &TableScanLocalState {
-        &self.local_state
-    }
-
-    pub fn result_types(&self) -> &[LogicalType] {
-        &self.bind_data.result_types
-    }
-
-    pub fn next_chunk(&mut self, result: &mut DataChunk) -> Result<bool, EngineError> {
-        let txn_guard = self.txn.lock_inner();
-        self.table
-            .storage
-            .scan(&*txn_guard, result, &mut self.local_state.scan_state);
-        Ok(result.size() > 0)
-    }
-}
-
-/// table scan 的 global state。
-pub struct TableScanGlobalState {
+/// 对齐 DuckDB 的 `class DuckTableScanState`。
+pub struct DuckTableScanState {
     table: TableHandle,
     txn: Arc<DuckTxnHandle>,
     storage_context: crate::storage::data_table::ClientContext,
@@ -398,7 +323,7 @@ pub struct TableScanGlobalState {
     max_threads: usize,
 }
 
-impl TableScanGlobalState {
+impl DuckTableScanState {
     pub fn bind_data(&self) -> &TableScanBindData {
         &self.bind_data
     }
@@ -415,7 +340,8 @@ impl TableScanGlobalState {
     pub fn init_local_state(&self) -> TableScanLocalState {
         let mut local_state = TableScanLocalState {
             scan_state: TableScanState::new(),
-            finished: false,
+            rows_scanned: 0,
+            rows_in_current_row_group: 0,
         };
         local_state.scan_state.initialize(
             self.bind_data
@@ -427,23 +353,11 @@ impl TableScanGlobalState {
         );
 
         let mut parallel_state = self.parallel_state.lock();
-        if !self.table.storage.next_parallel_scan(
+        local_state.rows_in_current_row_group = self.table.storage.next_parallel_scan(
             &self.storage_context,
             &mut parallel_state,
             &mut local_state.scan_state,
-        ) {
-            local_state.finished = true;
-            return local_state;
-        }
-
-        if let Some(current_row_group) = local_state.scan_state.table_state.current_row_group.as_ref() {
-            local_state.scan_state.table_state.max_row =
-                current_row_group.row_start.saturating_add(current_row_group.row_group.count());
-        }
-        if let Some(current_row_group) = local_state.scan_state.local_state.current_row_group.as_ref() {
-            local_state.scan_state.local_state.max_row =
-                current_row_group.row_start.saturating_add(current_row_group.row_group.count());
-        }
+        );
         local_state
     }
 
@@ -454,7 +368,7 @@ impl TableScanGlobalState {
         result: &mut DataChunk,
     ) -> Result<bool, EngineError> {
         loop {
-            if local_state.finished {
+            if local_state.rows_in_current_row_group == 0 {
                 return Ok(false);
             }
 
@@ -466,22 +380,15 @@ impl TableScanGlobalState {
                 return Ok(true);
             }
 
+            local_state.rows_scanned += local_state.rows_in_current_row_group;
             let mut parallel_state = self.parallel_state.lock();
-            if !self.table.storage.next_parallel_scan(
+            local_state.rows_in_current_row_group = self.table.storage.next_parallel_scan(
                 &self.storage_context,
                 &mut parallel_state,
                 &mut local_state.scan_state,
-            ) {
-                local_state.finished = true;
+            );
+            if local_state.rows_in_current_row_group == 0 {
                 return Ok(false);
-            }
-            if let Some(current_row_group) = local_state.scan_state.table_state.current_row_group.as_ref() {
-                local_state.scan_state.table_state.max_row =
-                    current_row_group.row_start.saturating_add(current_row_group.row_group.count());
-            }
-            if let Some(current_row_group) = local_state.scan_state.local_state.current_row_group.as_ref() {
-                local_state.scan_state.local_state.max_row =
-                    current_row_group.row_start.saturating_add(current_row_group.row_group.count());
             }
         }
     }
@@ -490,5 +397,6 @@ impl TableScanGlobalState {
 /// table scan 的 local state。
 pub struct TableScanLocalState {
     pub scan_state: TableScanState,
-    finished: bool,
+    pub rows_scanned: usize,
+    pub rows_in_current_row_group: usize,
 }

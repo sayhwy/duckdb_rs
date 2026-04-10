@@ -3,7 +3,7 @@ pub mod duck_engine;
 pub mod engine;
 
 pub use duck_engine::{
-    DuckConnection, DuckEngine, DuckTableScanHandle, TableScanGlobalState, TableScanLocalState,
+    DuckConnection, DuckEngine, DuckTableScanState, TableScanLocalState,
 };
 pub use engine::{
     EngineError, SchemaInfo, SchemaTableInfo, TableScanBindData, TableScanRequest,
