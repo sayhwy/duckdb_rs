@@ -42,7 +42,6 @@
 
 use crate::common::types::LogicalType;
 use crate::storage::data_table::{StorageIndex, TableFilterSet};
-use crate::storage::table::scan_state::{ParallelTableScanState, TableScanState};
 
 // ─── Error Type ───────────────────────────────────────────────────────────────
 
@@ -86,24 +85,11 @@ impl TableScanRequest {
     }
 }
 
-/// Engine 侧共享扫描状态。
+/// Table scan 绑定数据。
 ///
-/// 这层对应执行器持有的 global state，内部只保存 scan request 和输出类型。
-pub struct EngineScanGlobalState {
+/// 对齐 DuckDB 的 `TableScanBindData`：
+/// 保存绑定阶段解析好的列列表和输出类型。
+pub struct TableScanBindData {
     pub request: TableScanRequest,
     pub result_types: Vec<LogicalType>,
-}
-
-/// Engine 侧线程私有扫描状态。
-///
-/// 内部直接持有 DuckDB 风格的 `TableScanState`。
-pub struct EngineScanLocalState {
-    pub scan_state: TableScanState,
-}
-
-/// Engine 侧并行扫描共享状态。
-///
-/// 内部直接持有 DuckDB 风格的 `ParallelTableScanState`。
-pub struct EngineParallelScanState {
-    pub parallel_state: ParallelTableScanState,
 }

@@ -3,11 +3,10 @@ pub mod duck_engine;
 pub mod engine;
 
 pub use duck_engine::{
-    DuckConnection, DuckEngine, DuckParallelScanHandle, DuckTableScanHandle, DuckTableScanTask,
+    DuckConnection, DuckEngine, DuckTableScanHandle, TableScanGlobalState, TableScanLocalState,
 };
 pub use engine::{
-    EngineError, EngineParallelScanState, EngineScanGlobalState, EngineScanLocalState,
-    SchemaInfo, SchemaTableInfo, TableScanRequest,
+    EngineError, SchemaInfo, SchemaTableInfo, TableScanBindData, TableScanRequest,
 };
 
 use std::collections::HashMap;

@@ -37,6 +37,7 @@
 //!   当前实现通过公开 `raw_data()` 接口将此决策推迟给调用方。
 
 use crate::common::errors::{Result, anyhow, bail};
+use std::fmt::Write as _;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LogicalType（独立定义，作为 common/types 层的基础类型）
@@ -983,6 +984,87 @@ impl Vector {
             + self.child.as_ref().map_or(0, |c| c.allocation_size(cardinality))
             + self.string_aux.iter().map(|v| v.len()).sum::<usize>()
     }
+
+    fn resolved_row_index(&self, row: usize) -> usize {
+        match self.vector_type {
+            VectorType::Constant => 0,
+            VectorType::Dictionary => self
+                .sel
+                .as_ref()
+                .map(|sel| sel.get_index(row))
+                .unwrap_or(row),
+            _ => row,
+        }
+    }
+
+    fn row_is_valid_for_display(&self, row: usize) -> bool {
+        match self.vector_type {
+            VectorType::Dictionary => self
+                .child
+                .as_ref()
+                .map(|child| child.row_is_valid_for_display(self.resolved_row_index(row)))
+                .unwrap_or(true),
+            VectorType::Sequence => true,
+            _ => self.validity.row_is_valid(self.resolved_row_index(row)),
+        }
+    }
+
+    fn format_value_at(&self, row: usize) -> String {
+        if !self.row_is_valid_for_display(row) {
+            return "NULL".to_string();
+        }
+
+        match self.vector_type {
+            VectorType::Dictionary => {
+                if let Some(child) = self.child.as_ref() {
+                    return child.format_value_at(self.resolved_row_index(row));
+                }
+                return "<INVALID DICTIONARY>".to_string();
+            }
+            VectorType::Sequence => {
+                let value = self.seq_start + (row as i64) * self.seq_increment;
+                return value.to_string();
+            }
+            _ => {}
+        }
+
+        let row = self.resolved_row_index(row);
+        let elem_size = self.logical_type.physical_size();
+        let offset = row * elem_size;
+        if offset + elem_size > self.data.len() {
+            return "<OUT OF BOUNDS>".to_string();
+        }
+
+        let bytes = &self.data[offset..offset + elem_size];
+        match self.logical_type.id {
+            LogicalTypeId::Boolean => {
+                if bytes[0] == 0 {
+                    "false".to_string()
+                } else {
+                    "true".to_string()
+                }
+            }
+            LogicalTypeId::TinyInt => i8::from_le_bytes([bytes[0]]).to_string(),
+            LogicalTypeId::UTinyInt => bytes[0].to_string(),
+            LogicalTypeId::SmallInt => i16::from_le_bytes(bytes.try_into().unwrap()).to_string(),
+            LogicalTypeId::USmallInt => u16::from_le_bytes(bytes.try_into().unwrap()).to_string(),
+            LogicalTypeId::Integer => i32::from_le_bytes(bytes.try_into().unwrap()).to_string(),
+            LogicalTypeId::UInteger => u32::from_le_bytes(bytes.try_into().unwrap()).to_string(),
+            LogicalTypeId::BigInt => i64::from_le_bytes(bytes.try_into().unwrap()).to_string(),
+            LogicalTypeId::UBigInt => u64::from_le_bytes(bytes.try_into().unwrap()).to_string(),
+            LogicalTypeId::Float => f32::from_le_bytes(bytes.try_into().unwrap()).to_string(),
+            LogicalTypeId::Double => f64::from_le_bytes(bytes.try_into().unwrap()).to_string(),
+            LogicalTypeId::Varchar => {
+                String::from_utf8_lossy(&self.read_varchar_bytes(row)).into_owned()
+            }
+            LogicalTypeId::Date => {
+                let days = i32::from_le_bytes(bytes.try_into().unwrap());
+                format!("DATE({days})")
+            }
+            LogicalTypeId::Blob => format!("BLOB({} bytes)", bytes.len()),
+            _ => format!("<{}>", self.logical_type.name()),
+        }
+    }
 }
 
 impl std::fmt::Debug for Vector {
@@ -1378,6 +1460,76 @@ impl DataChunk {
             self.count,
             self.capacity
         )
+    }
+
+    /// 以表格形式返回 chunk 内容，便于调试查看。
+    pub fn to_pretty_string(&self) -> String {
+        let mut headers = Vec::with_capacity(self.column_count());
+        let mut rows = Vec::with_capacity(self.size());
+        let mut widths = Vec::with_capacity(self.column_count());
+
+        for (idx, vector) in self.data.iter().enumerate() {
+            let header = format!("c{idx}:{}", vector.logical_type.name());
+            widths.push(header.chars().count());
+            headers.push(header);
+        }
+
+        for row_idx in 0..self.size() {
+            let mut row = Vec::with_capacity(self.column_count());
+            for (col_idx, vector) in self.data.iter().enumerate() {
+                let value = vector.format_value_at(row_idx);
+                widths[col_idx] = widths[col_idx].max(value.chars().count());
+                row.push(value);
+            }
+            rows.push(row);
+        }
+
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "{}",
+            self.to_string()
+        );
+
+        if self.column_count() == 0 {
+            out.push_str("(empty chunk)\n");
+            return out;
+        }
+
+        let separator = |widths: &[usize]| -> String {
+            let mut line = String::new();
+            line.push('+');
+            for width in widths {
+                line.push_str(&"-".repeat(*width + 2));
+                line.push('+');
+            }
+            line
+        };
+
+        let border = separator(&widths);
+        let _ = writeln!(out, "{border}");
+        out.push('|');
+        for (idx, header) in headers.iter().enumerate() {
+            let _ = write!(out, " {:width$} |", header, width = widths[idx]);
+        }
+        out.push('\n');
+        let _ = writeln!(out, "{border}");
+
+        for row in rows {
+            out.push('|');
+            for (idx, cell) in row.iter().enumerate() {
+                let _ = write!(out, " {:width$} |", cell, width = widths[idx]);
+            }
+            out.push('\n');
+        }
+
+        let _ = writeln!(out, "{border}");
+        out
+    }
+
+    /// 直接将 chunk 以表格形式输出到 stdout。
+    pub fn pretty_print(&self) {
+        print!("{}", self.to_pretty_string());
     }
 
     /// Debug 验证（C++: `DataChunk::Verify()`）。
@@ -1842,6 +1994,45 @@ mod tests {
         let s = chunk.to_string();
         assert!(s.contains("2 Columns"));
         assert!(s.contains("3 rows"));
+    }
+
+    #[test]
+    fn data_chunk_to_pretty_string_shows_rows() {
+        let types = vec![
+            LogicalType::integer(),
+            LogicalType::varchar(),
+            LogicalType::boolean(),
+        ];
+        let mut builder = DataChunkBuilder::new(&types, 2);
+        builder.set_i32(0, 0, 42).unwrap();
+        builder.set_varchar_inline(1, 0, "Alice").unwrap();
+        builder.set_bool(2, 0, true).unwrap();
+        builder.set_null(1, 1).unwrap();
+        builder.set_bool(2, 1, false).unwrap();
+        let chunk = builder.finish();
+
+        let pretty = chunk.to_pretty_string();
+        assert!(pretty.contains("c0:INTEGER"));
+        assert!(pretty.contains("c1:VARCHAR"));
+        assert!(pretty.contains("42"));
+        assert!(pretty.contains("Alice"));
+        assert!(pretty.contains("NULL"));
+        assert!(pretty.contains("false"));
+    }
+
+    #[test]
+    fn data_chunk_to_pretty_string_handles_non_flat_vectors() {
+        let mut chunk = DataChunk::new();
+        chunk.data.push(Vector::new_constant(LogicalType::integer()));
+        chunk.data.push(Vector::new_sequence(LogicalType::bigint(), 10, 2));
+        chunk.set_cardinality(3);
+        chunk.data[0].raw_data_mut()[..4].copy_from_slice(&7i32.to_le_bytes());
+
+        let pretty = chunk.to_pretty_string();
+        assert!(pretty.contains("7"));
+        assert!(pretty.contains("10"));
+        assert!(pretty.contains("12"));
+        assert!(pretty.contains("14"));
     }
 
     #[test]
