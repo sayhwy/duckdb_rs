@@ -1,5 +1,6 @@
 use std::io;
 
+use crate::catalog::{LogicalType, LogicalTypeId};
 use crate::common::serializer::MESSAGE_TERMINATOR_FIELD_ID;
 use crate::storage::metadata::MetaBlockPointer;
 use crate::storage::metadata::ReadStream;
@@ -7,10 +8,7 @@ use crate::storage::metadata::ReadStream;
 #[derive(Debug, Clone)]
 pub struct ColumnInfo {
     pub name: String,
-    pub type_id: u32,
-    pub type_name: String,
-    pub decimal_width: u8,
-    pub decimal_scale: u8,
+    pub logical_type: LogicalType,
 }
 
 #[derive(Debug, Clone)]
@@ -97,64 +95,78 @@ impl<'a> BinaryDeserializer<'a> {
     }
 }
 
-fn type_id_to_name(id: u32) -> &'static str {
-    match id {
-        0 => "INVALID",
-        1 => "SQLNULL",
-        2 => "UNKNOWN",
-        3 => "ANY",
-        4 => "USER",
-        10 => "BOOLEAN",
-        11 => "TINYINT",
-        12 => "SMALLINT",
-        13 => "INTEGER",
-        14 => "BIGINT",
-        15 => "DATE",
-        16 => "TIME",
-        17 => "TIMESTAMP_SEC",
-        18 => "TIMESTAMP_MS",
-        19 => "TIMESTAMP",
-        20 => "TIMESTAMP_NS",
-        21 => "DECIMAL",
-        22 => "FLOAT",
-        23 => "DOUBLE",
-        24 => "CHAR",
-        25 => "VARCHAR",
-        26 => "BLOB",
-        27 => "INTERVAL",
-        28 => "UTINYINT",
-        29 => "USMALLINT",
-        30 => "UINTEGER",
-        31 => "UBIGINT",
-        32 => "TIMESTAMP_TZ",
-        33 => "TIME_TZ",
-        34 => "JSON",
-        35 => "ENUM",
-        36 => "LIST",
-        37 => "STRUCT",
-        38 => "MAP",
-        39 => "UNION",
-        40 => "BITSTRING",
-        41 => "HUGEINT",
-        42 => "POINTER",
-        43 => "VALIDITY",
-        44 => "UUID",
-        45 => "UHUGEINT",
-        46 => "ARRAY",
-        47 => "VARINT",
-        _ => "UNKNOWN",
+fn logical_type_from_id(type_id: u32) -> LogicalType {
+    match type_id {
+        10 => LogicalType::boolean(),
+        11 => LogicalType::new(LogicalTypeId::TinyInt),
+        12 => LogicalType::new(LogicalTypeId::SmallInt),
+        13 => LogicalType::integer(),
+        14 => LogicalType::bigint(),
+        15 => LogicalType::date(),
+        16 => LogicalType::new(LogicalTypeId::Time),
+        17 => LogicalType::new(LogicalTypeId::TimestampS),
+        18 => LogicalType::new(LogicalTypeId::TimestampMs),
+        19 => LogicalType::timestamp(),
+        20 => LogicalType::new(LogicalTypeId::TimestampNs),
+        21 => LogicalType::decimal(0, 0),
+        22 => LogicalType::new(LogicalTypeId::Float),
+        23 => LogicalType::double(),
+        25 => LogicalType::varchar(),
+        26 => LogicalType::blob(),
+        27 => LogicalType::new(LogicalTypeId::Interval),
+        28 => LogicalType::new(LogicalTypeId::UTinyInt),
+        29 => LogicalType::new(LogicalTypeId::USmallInt),
+        30 => LogicalType::new(LogicalTypeId::UInteger),
+        31 => LogicalType::new(LogicalTypeId::UBigInt),
+        34 => LogicalType::new(LogicalTypeId::Json),
+        36 => LogicalType::list(LogicalType::new(LogicalTypeId::Invalid)),
+        37 => LogicalType::struct_type(Vec::new()),
+        38 => LogicalType::new(LogicalTypeId::Map),
+        41 => LogicalType::new(LogicalTypeId::HugeInt),
+        43 => LogicalType::new(LogicalTypeId::Validity),
+        44 => LogicalType::new(LogicalTypeId::Uuid),
+        45 => LogicalType::new(LogicalTypeId::UHugeInt),
+        46 => LogicalType::array(LogicalType::new(LogicalTypeId::Invalid), 0),
+        _ => LogicalType::new(LogicalTypeId::Invalid),
     }
 }
 
-fn read_extra_type_info_decimal(
-    r: &mut BinaryDeserializer<'_>,
-) -> io::Result<(u8, u8)> {
+fn read_child_type_list(r: &mut BinaryDeserializer<'_>) -> io::Result<Vec<(String, LogicalType)>> {
+    let count = r.read_varint()? as usize;
+    let mut children = Vec::with_capacity(count);
+    for _ in 0..count {
+        let mut name = String::new();
+        let mut logical_type = LogicalType::new(LogicalTypeId::Invalid);
+        loop {
+            let fid = r.read_field_id();
+            if fid == MESSAGE_TERMINATOR_FIELD_ID {
+                break;
+            }
+            match fid {
+                100 => name = r.read_string()?,
+                101 => logical_type = read_logical_type(r)?,
+                _ => {
+                    let _ = r.read_varint()?;
+                }
+            }
+        }
+        children.push((name, logical_type));
+    }
+    Ok(children)
+}
+
+fn read_extra_type_info(r: &mut BinaryDeserializer<'_>, base_type: &mut LogicalType) -> io::Result<()> {
     let mut info_type = 0u32;
-    let mut width = 0u8;
-    let mut scale = 0u8;
+    let mut list_child = None;
+    let mut array_child = None;
+    let mut array_size = 0usize;
+    let mut struct_children = Vec::new();
+    let mut decimal_width = 0u8;
+    let mut decimal_scale = 0u8;
+
     loop {
         let fid = r.read_field_id();
-        if fid == 0xFFFF {
+        if fid == MESSAGE_TERMINATOR_FIELD_ID {
             break;
         }
         match fid {
@@ -167,38 +179,67 @@ fn read_extra_type_info_decimal(
                     r.skip_object_varint_only()?;
                 }
             }
-            200 => width = r.read_varint()? as u8,
-            201 => scale = r.read_varint()? as u8,
+            200 => match info_type {
+                2 => decimal_width = r.read_varint()? as u8,
+                4 => list_child = Some(read_logical_type(r)?),
+                5 => struct_children = read_child_type_list(r)?,
+                9 => array_child = Some(read_logical_type(r)?),
+                _ => {
+                    let _ = r.read_varint()?;
+                }
+            },
+            201 => match info_type {
+                2 => decimal_scale = r.read_varint()? as u8,
+                9 => array_size = r.read_varint()? as usize,
+                _ => {
+                    let _ = r.read_varint()?;
+                }
+            },
             _ => {
                 let _ = r.read_varint()?;
             }
         }
     }
-    if info_type == 2 {
-        Ok((width, scale))
-    } else {
-        Ok((0, 0))
+
+    match info_type {
+        2 => {
+            *base_type = LogicalType::decimal(decimal_width, decimal_scale);
+        }
+        4 => {
+            *base_type = LogicalType::list(
+                list_child.unwrap_or_else(|| LogicalType::new(LogicalTypeId::Invalid)),
+            );
+        }
+        5 => {
+            *base_type = LogicalType::struct_type(struct_children);
+        }
+        9 => {
+            *base_type = LogicalType::array(
+                array_child.unwrap_or_else(|| LogicalType::new(LogicalTypeId::Invalid)),
+                array_size,
+            );
+        }
+        _ => {}
     }
+    Ok(())
 }
 
-fn read_logical_type(r: &mut BinaryDeserializer<'_>) -> io::Result<(u32, u8, u8)> {
+fn read_logical_type(r: &mut BinaryDeserializer<'_>) -> io::Result<LogicalType> {
     let mut type_id = 0u32;
-    let mut decimal_width = 0u8;
-    let mut decimal_scale = 0u8;
+    let mut logical_type = LogicalType::new(LogicalTypeId::Invalid);
     loop {
         let fid = r.read_field_id();
-        if fid == 0xFFFF {
+        if fid == MESSAGE_TERMINATOR_FIELD_ID {
             break;
         }
         match fid {
             100 => {
                 type_id = r.read_varint()? as u32;
+                logical_type = logical_type_from_id(type_id);
             }
             101 => {
                 if r.read_u8() == 1 {
-                    let (width, scale) = read_extra_type_info_decimal(r)?;
-                    decimal_width = width;
-                    decimal_scale = scale;
+                    read_extra_type_info(r, &mut logical_type)?;
                 }
             }
             102 => {
@@ -217,14 +258,16 @@ fn read_logical_type(r: &mut BinaryDeserializer<'_>) -> io::Result<(u32, u8, u8)
             }
         }
     }
-    Ok((type_id, decimal_width, decimal_scale))
+    if matches!(logical_type.id, LogicalTypeId::Invalid) && type_id != 0 {
+        Ok(logical_type_from_id(type_id))
+    } else {
+        Ok(logical_type)
+    }
 }
 
 fn read_column_definition(r: &mut BinaryDeserializer<'_>) -> io::Result<ColumnInfo> {
     let mut name = String::new();
-    let mut type_id = 0u32;
-    let mut decimal_width = 0u8;
-    let mut decimal_scale = 0u8;
+    let mut logical_type = LogicalType::new(LogicalTypeId::Invalid);
 
     loop {
         let fid = r.read_field_id();
@@ -234,10 +277,7 @@ fn read_column_definition(r: &mut BinaryDeserializer<'_>) -> io::Result<ColumnIn
         match fid {
             100 => name = r.read_string()?,
             101 => {
-                let (parsed_type_id, width, scale) = read_logical_type(r)?;
-                type_id = parsed_type_id;
-                decimal_width = width;
-                decimal_scale = scale;
+                logical_type = read_logical_type(r)?;
             }
             _ => {
                 let _ = r.read_varint()?;
@@ -247,10 +287,7 @@ fn read_column_definition(r: &mut BinaryDeserializer<'_>) -> io::Result<ColumnIn
 
     Ok(ColumnInfo {
         name,
-        type_id,
-        type_name: type_id_to_name(type_id).to_string(),
-        decimal_width,
-        decimal_scale,
+        logical_type,
     })
 }
 

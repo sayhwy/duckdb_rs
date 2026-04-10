@@ -129,12 +129,45 @@ fn catalog_type_to_storage_type(
         LogicalTypeId::SmallInt => StorageLogicalType::smallint(),
         LogicalTypeId::Integer => StorageLogicalType::integer(),
         LogicalTypeId::BigInt => StorageLogicalType::bigint(),
+        LogicalTypeId::HugeInt => StorageLogicalType::new(StorageTypeId::HugeInt),
+        LogicalTypeId::UTinyInt => StorageLogicalType::utinyint(),
+        LogicalTypeId::USmallInt => StorageLogicalType::usmallint(),
+        LogicalTypeId::UInteger => StorageLogicalType::uinteger(),
+        LogicalTypeId::UBigInt => StorageLogicalType::ubigint(),
         LogicalTypeId::Float => StorageLogicalType::float(),
         LogicalTypeId::Double => StorageLogicalType::double(),
         LogicalTypeId::Decimal => StorageLogicalType::decimal(logical_type.width, logical_type.scale),
         LogicalTypeId::Varchar => StorageLogicalType::varchar(),
+        LogicalTypeId::Blob => StorageLogicalType::blob(),
         LogicalTypeId::Date => StorageLogicalType::date(),
+        LogicalTypeId::Time => StorageLogicalType::new(StorageTypeId::Time),
         LogicalTypeId::Timestamp => StorageLogicalType::new(StorageTypeId::Timestamp),
+        LogicalTypeId::Interval => StorageLogicalType::new(StorageTypeId::Interval),
+        LogicalTypeId::Validity => StorageLogicalType::validity(),
+        LogicalTypeId::List => {
+            let child = logical_type
+                .children
+                .first()
+                .map(|(_, child)| catalog_type_to_storage_type(child))
+                .unwrap_or_else(StorageLogicalType::new_invalid);
+            StorageLogicalType::list(child)
+        }
+        LogicalTypeId::Array => {
+            let child = logical_type
+                .children
+                .first()
+                .map(|(_, child)| catalog_type_to_storage_type(child))
+                .unwrap_or_else(StorageLogicalType::new_invalid);
+            StorageLogicalType::array(child, logical_type.array_size)
+        }
+        LogicalTypeId::Struct => {
+            let fields = logical_type
+                .children
+                .iter()
+                .map(|(name, child)| (name.clone(), catalog_type_to_storage_type(child)))
+                .collect();
+            StorageLogicalType::struct_type(fields)
+        }
         _ => StorageLogicalType::new(StorageTypeId::Invalid),
     }
 }

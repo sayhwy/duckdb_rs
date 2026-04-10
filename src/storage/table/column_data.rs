@@ -54,6 +54,7 @@ use crate::common::serializer::BinarySerializer;
 use crate::common::types::{LogicalTypeId, SelectionVector, Vector};
 use crate::planner::{TableFilter, TableFilterState, TableFilterType};
 use crate::storage::statistics::FilterPropagateResult;
+use crate::storage::statistics::BaseStatistics;
 use crate::storage::buffer::BlockManager;
 use crate::storage::serialization as storage_serialization;
 
@@ -953,6 +954,133 @@ impl ColumnData {
         }
     }
 
+    fn has_checkpointable_children(&self) -> bool {
+        match &self.kind {
+            ColumnKindData::Standard(standard) => standard.validity.is_some(),
+            ColumnKindData::List(_) | ColumnKindData::Array(_) | ColumnKindData::Struct(_) => true,
+            ColumnKindData::Variant(variant) => {
+                variant.validity.is_some() || !variant.sub_columns.is_empty()
+            }
+            ColumnKindData::Validity(_) => false,
+        }
+    }
+
+    fn copy_checkpoint_result_recursive(src: &Arc<ColumnData>, dst: &Arc<ColumnData>) {
+        {
+            let lock = src.base.data.lock();
+            for node in lock.0.iter() {
+                dst.base.append_existing_segment(node.arc(), node.row_start());
+            }
+        }
+        dst.base
+            .count
+            .store(src.count(), std::sync::atomic::Ordering::Relaxed);
+
+        match (&src.kind, &dst.kind) {
+            (ColumnKindData::Standard(src_standard), ColumnKindData::Standard(dst_standard)) => {
+                if let (Some(src_validity), Some(dst_validity)) =
+                    (&src_standard.validity, &dst_standard.validity)
+                {
+                    Self::copy_checkpoint_result_recursive(src_validity, dst_validity);
+                }
+            }
+            (ColumnKindData::List(src_list), ColumnKindData::List(dst_list)) => {
+                Self::copy_checkpoint_result_recursive(&src_list.validity, &dst_list.validity);
+                Self::copy_checkpoint_result_recursive(&src_list.child_column, &dst_list.child_column);
+            }
+            (ColumnKindData::Array(src_array), ColumnKindData::Array(dst_array)) => {
+                Self::copy_checkpoint_result_recursive(&src_array.validity, &dst_array.validity);
+                Self::copy_checkpoint_result_recursive(&src_array.child_column, &dst_array.child_column);
+            }
+            (ColumnKindData::Struct(src_struct), ColumnKindData::Struct(dst_struct)) => {
+                Self::copy_checkpoint_result_recursive(&src_struct.validity, &dst_struct.validity);
+                for (src_child, dst_child) in src_struct
+                    .sub_columns
+                    .iter()
+                    .zip(dst_struct.sub_columns.iter())
+                {
+                    Self::copy_checkpoint_result_recursive(src_child, dst_child);
+                }
+            }
+            (ColumnKindData::Variant(src_variant), ColumnKindData::Variant(dst_variant)) => {
+                if let (Some(src_validity), Some(dst_validity)) =
+                    (&src_variant.validity, &dst_variant.validity)
+                {
+                    Self::copy_checkpoint_result_recursive(src_validity, dst_validity);
+                }
+                for (src_child, dst_child) in src_variant
+                    .sub_columns
+                    .iter()
+                    .zip(dst_variant.sub_columns.iter())
+                {
+                    Self::copy_checkpoint_result_recursive(src_child, dst_child);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn checkpoint_children(
+        self: &Arc<Self>,
+        result_column: &Arc<ColumnData>,
+        row_group_id: u64,
+        compression_type: CompressionType,
+        partial_block_manager: Arc<PartialBlockManager>,
+    ) {
+        let checkpoint_and_copy = |src: &Arc<ColumnData>, dst: &Arc<ColumnData>| {
+            let child_state = src.checkpoint(
+                row_group_id,
+                compression_type,
+                Arc::clone(&partial_block_manager),
+            );
+            let child_result = child_state.lock().get_final_result();
+            Self::copy_checkpoint_result_recursive(&child_result, dst);
+        };
+
+        match (&self.kind, &result_column.kind) {
+            (ColumnKindData::Standard(src_standard), ColumnKindData::Standard(dst_standard)) => {
+                if let (Some(src_validity), Some(dst_validity)) =
+                    (&src_standard.validity, &dst_standard.validity)
+                {
+                    checkpoint_and_copy(src_validity, dst_validity);
+                }
+            }
+            (ColumnKindData::List(src_list), ColumnKindData::List(dst_list)) => {
+                checkpoint_and_copy(&src_list.validity, &dst_list.validity);
+                checkpoint_and_copy(&src_list.child_column, &dst_list.child_column);
+            }
+            (ColumnKindData::Array(src_array), ColumnKindData::Array(dst_array)) => {
+                checkpoint_and_copy(&src_array.validity, &dst_array.validity);
+                checkpoint_and_copy(&src_array.child_column, &dst_array.child_column);
+            }
+            (ColumnKindData::Struct(src_struct), ColumnKindData::Struct(dst_struct)) => {
+                checkpoint_and_copy(&src_struct.validity, &dst_struct.validity);
+                for (src_child, dst_child) in src_struct
+                    .sub_columns
+                    .iter()
+                    .zip(dst_struct.sub_columns.iter())
+                {
+                    checkpoint_and_copy(src_child, dst_child);
+                }
+            }
+            (ColumnKindData::Variant(src_variant), ColumnKindData::Variant(dst_variant)) => {
+                if let (Some(src_validity), Some(dst_validity)) =
+                    (&src_variant.validity, &dst_variant.validity)
+                {
+                    checkpoint_and_copy(src_validity, dst_validity);
+                }
+                for (src_child, dst_child) in src_variant
+                    .sub_columns
+                    .iter()
+                    .zip(dst_variant.sub_columns.iter())
+                {
+                    checkpoint_and_copy(src_child, dst_child);
+                }
+            }
+            _ => {}
+        }
+    }
+
     // ── Context delegation ────────────────────────────────────────────────────
 
     /// Access the shared base context.
@@ -996,20 +1124,34 @@ impl ColumnData {
         {
             let mut state = checkpoint_state.lock();
             state.set_original_column(Arc::clone(self));
-            state.set_partial_block_manager(partial_block_manager);
+            state.set_partial_block_manager(Arc::clone(&partial_block_manager));
         }
 
-        if self.base.data.lock().0.is_empty() {
+        let has_own_segments = !self.base.data.lock().0.is_empty();
+        let has_children = self.has_checkpointable_children();
+
+        if !has_own_segments && !has_children {
             return checkpoint_state;
         }
 
-        let mut checkpointer = ColumnDataCheckpointer::new(
-            vec![checkpoint_state.clone()],
-            row_group_id,
-            ColumnCheckpointInfo { compression_type },
-        );
-        checkpointer.checkpoint();
-        checkpointer.finalize_checkpoint();
+        if has_own_segments {
+            let mut checkpointer = ColumnDataCheckpointer::new(
+                vec![checkpoint_state.clone()],
+                row_group_id,
+                ColumnCheckpointInfo { compression_type },
+            );
+            checkpointer.checkpoint();
+            checkpointer.finalize_checkpoint();
+        }
+        if has_children {
+            let result_column = checkpoint_state.lock().get_result_column();
+            self.checkpoint_children(
+                &result_column,
+                row_group_id,
+                compression_type,
+                partial_block_manager,
+            );
+        }
         checkpoint_state
     }
 
@@ -1052,9 +1194,9 @@ impl ColumnData {
     ///
     /// Also initialises child-column append states (validity, children).
     pub fn initialize_append(&self, state: &mut ColumnAppendState) {
-        self.base.initialize_append(state);
         match &self.kind {
             ColumnKindData::Standard(standard) => {
+                self.base.initialize_append(state);
                 if let Some(v) = &standard.validity {
                     if state.child_appends.is_empty() {
                         state.child_appends.push(ColumnAppendState::default());
@@ -1062,11 +1204,17 @@ impl ColumnData {
                     v.initialize_append(&mut state.child_appends[0]);
                 }
             }
-            ColumnKindData::List(list) => list.initialize_append(state),
+            ColumnKindData::List(list) => {
+                self.base.initialize_append(state);
+                list.initialize_append(state)
+            }
             ColumnKindData::Array(array) => array.initialize_append(state),
             ColumnKindData::Struct(struct_data) => struct_data.initialize_append(state),
-            ColumnKindData::Variant(variant) => variant.initialize_append(state),
-            ColumnKindData::Validity(_) => {}
+            ColumnKindData::Variant(variant) => {
+                self.base.initialize_append(state);
+                variant.initialize_append(state)
+            }
+            ColumnKindData::Validity(_) => self.base.initialize_append(state),
         }
     }
 
@@ -1078,107 +1226,58 @@ impl ColumnData {
     ///           UnifiedVectorFormat&, idx_t)`
     pub fn append(
         &self,
-        append_stats: &mut SegmentStatistics,
+        append_stats: &mut BaseStatistics,
         state: &mut ColumnAppendState,
-        vdata: &UnifiedVectorFormat<'_>,
+        vector: &Vector,
         append_count: Idx,
     ) {
-        // Append to main column
-        self.base
-            .append_data(append_stats, state, vdata, append_count);
-
-        // Append to child columns (validity, etc.)
+        let vdata = UnifiedVectorFormat::from_flat_vector(vector);
         match &self.kind {
             ColumnKindData::Standard(standard) => {
+                let mut segment_stats = SegmentStatistics::from_stats(append_stats.clone());
+                self.base
+                    .append_data(&mut segment_stats, state, &vdata, append_count);
+                *append_stats = segment_stats.statistics().clone();
                 if let Some(v) = &standard.validity {
                     if !state.child_appends.is_empty() {
-                        v.append(
-                            append_stats,
-                            &mut state.child_appends[0],
-                            vdata,
-                            append_count,
-                        );
+                        v.append(append_stats, &mut state.child_appends[0], vector, append_count);
                     }
                 }
             }
             ColumnKindData::List(list) => {
-                if state.child_appends.len() >= 2 {
-                    list.validity.append(
-                        append_stats,
-                        &mut state.child_appends[0],
-                        vdata,
-                        append_count,
-                    );
-                    list.child_column.append(
-                        append_stats,
-                        &mut state.child_appends[1],
-                        vdata,
-                        append_count,
-                    );
-                }
+                list.append(&self.base, append_stats, state, vector, append_count);
             }
             ColumnKindData::Array(array) => {
-                if state.child_appends.len() >= 2 {
-                    array.validity.append(
-                        append_stats,
-                        &mut state.child_appends[0],
-                        vdata,
-                        append_count,
-                    );
-                    array.child_column.append(
-                        append_stats,
-                        &mut state.child_appends[1],
-                        vdata,
-                        append_count,
-                    );
-                }
+                array.append(&self.base, append_stats, state, vector, append_count);
             }
             ColumnKindData::Struct(struct_data) => {
-                if !state.child_appends.is_empty() {
-                    struct_data.validity.append(
-                        append_stats,
-                        &mut state.child_appends[0],
-                        vdata,
-                        append_count,
-                    );
-                    for (i, col) in struct_data.sub_columns.iter().enumerate() {
-                        if i + 1 < state.child_appends.len() {
-                            col.append(
-                                append_stats,
-                                &mut state.child_appends[i + 1],
-                                vdata,
-                                append_count,
-                            );
-                        }
-                    }
-                }
+                struct_data.append(&self.base, append_stats, state, vector, append_count);
             }
             ColumnKindData::Variant(variant) => {
                 let mut idx = 0;
+                let mut segment_stats = SegmentStatistics::from_stats(append_stats.clone());
+                self.base
+                    .append_data(&mut segment_stats, state, &vdata, append_count);
+                *append_stats = segment_stats.statistics().clone();
                 if let Some(v) = &variant.validity {
                     if idx < state.child_appends.len() {
-                        v.append(
-                            append_stats,
-                            &mut state.child_appends[idx],
-                            vdata,
-                            append_count,
-                        );
+                        v.append(append_stats, &mut state.child_appends[idx], vector, append_count);
                     }
                     idx += 1;
                 }
                 for col in &variant.sub_columns {
                     if idx < state.child_appends.len() {
-                        col.append(
-                            append_stats,
-                            &mut state.child_appends[idx],
-                            vdata,
-                            append_count,
-                        );
+                        col.append(append_stats, &mut state.child_appends[idx], vector, append_count);
                     }
                     idx += 1;
                 }
             }
-            ColumnKindData::Validity(_) => {}
+            ColumnKindData::Validity(_) => {
+                let mut segment_stats = SegmentStatistics::from_stats(append_stats.clone());
+                self.base
+                    .append_data(&mut segment_stats, state, &vdata, append_count);
+                *append_stats = segment_stats.statistics().clone();
+            }
         }
     }
 
@@ -1216,7 +1315,11 @@ impl ColumnData {
             ColumnKindData::Standard(standard) => {
                 return standard.scan(&self.base, transaction, vector_index, state, result)
             }
+            ColumnKindData::List(list) => return list.scan(&self.base, vector_index, state, result),
             ColumnKindData::Array(array) => return array.scan(&self.base, vector_index, state, result),
+            ColumnKindData::Struct(struct_data) => {
+                return struct_data.scan(&self.base, vector_index, state, result)
+            }
             _ => {}
         }
         // C++: auto target_count = GetVectorCount(vector_index)
@@ -1274,8 +1377,11 @@ impl ColumnData {
                 self.base
                     .scan_vector(state, result, count, ScanVectorType::ScanFlatVector, result_offset)
             }
-            ColumnKindData::Struct(_) | ColumnKindData::Variant(_) => {
-                unimplemented!("ColumnData::scan_count is not implemented for this nested column type")
+            ColumnKindData::Struct(struct_data) => {
+                struct_data.scan_count(state, result, count, result_offset)
+            }
+            ColumnKindData::Variant(_) => {
+                unimplemented!("ColumnData::scan_count is not implemented for VARIANT")
             }
         }
     }

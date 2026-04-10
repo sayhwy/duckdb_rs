@@ -536,6 +536,8 @@ pub struct Vector {
     // ── Dictionary 布局 ───────────────────────────────────────────────────
     /// 字典子向量（C++: `buffer = DictionaryBuffer { child_vector, sel_vector }`）。
     child: Option<Box<Vector>>,
+    /// STRUCT / VARIANT 子向量（C++: `StructVector::GetEntries()`）。
+    struct_children: Vec<Vector>,
     /// 字典选择向量。
     sel: Option<SelectionVector>,
 
@@ -555,12 +557,21 @@ impl Vector {
     /// 创建空的 Flat 向量，无缓冲区（C++: `Vector(LogicalType, nullptr)`）。
     pub fn new_empty(logical_type: LogicalType) -> Self {
         let validity = ValidityMask::new(0);
+        let struct_children = match logical_type.id {
+            LogicalTypeId::Struct | LogicalTypeId::Variant => logical_type
+                .get_struct_fields()
+                .iter()
+                .map(|(_, child_type)| Vector::new_empty(child_type.clone()))
+                .collect(),
+            _ => Vec::new(),
+        };
         Self {
             vector_type: VectorType::Flat,
             logical_type,
             data: Vec::new(),
             validity,
             child: None,
+            struct_children,
             sel: None,
             seq_start: 0,
             seq_increment: 0,
@@ -573,12 +584,21 @@ impl Vector {
         let elem_size = logical_type.physical_size();
         let data = vec![0u8; capacity * elem_size];
         let validity = ValidityMask::new(capacity);
+        let struct_children = match logical_type.id {
+            LogicalTypeId::Struct | LogicalTypeId::Variant => logical_type
+                .get_struct_fields()
+                .iter()
+                .map(|(_, child_type)| Vector::with_capacity(child_type.clone(), capacity))
+                .collect(),
+            _ => Vec::new(),
+        };
         Self {
             vector_type: VectorType::Flat,
             logical_type,
             data,
             validity,
             child: None,
+            struct_children,
             sel: None,
             seq_start: 0,
             seq_increment: 0,
@@ -590,12 +610,21 @@ impl Vector {
     pub fn new_constant(logical_type: LogicalType) -> Self {
         let elem_size = logical_type.physical_size();
         let data = vec![0u8; elem_size]; // 只存一个元素
+        let struct_children = match logical_type.id {
+            LogicalTypeId::Struct | LogicalTypeId::Variant => logical_type
+                .get_struct_fields()
+                .iter()
+                .map(|(_, child_type)| Vector::new_constant(child_type.clone()))
+                .collect(),
+            _ => Vec::new(),
+        };
         Self {
             vector_type: VectorType::Constant,
             logical_type,
             data,
             validity: ValidityMask::new(1),
             child: None,
+            struct_children,
             sel: None,
             seq_start: 0,
             seq_increment: 0,
@@ -611,6 +640,7 @@ impl Vector {
             data: Vec::new(),
             validity: ValidityMask::new(0),
             child: None,
+            struct_children: Vec::new(),
             sel: None,
             seq_start: start,
             seq_increment: increment,
@@ -642,6 +672,18 @@ impl Vector {
         self.child = Some(Box::new(child));
     }
 
+    pub fn get_children(&self) -> &[Vector] {
+        &self.struct_children
+    }
+
+    pub fn get_children_mut(&mut self) -> &mut [Vector] {
+        &mut self.struct_children
+    }
+
+    pub fn set_children(&mut self, children: Vec<Vector>) {
+        self.struct_children = children;
+    }
+
     /// Raw byte access to the data buffer (e.g. for reading `list_entry_t`).
     pub fn raw_data(&self) -> &[u8] {
         &self.data
@@ -653,6 +695,7 @@ impl Vector {
         self.logical_type = other.logical_type.clone();
         self.vector_type = VectorType::Dictionary;
         self.child = Some(Box::new(other.shallow_clone()));
+        self.struct_children.clear();
         self.sel = None; // 使用恒等映射
         self.validity = other.validity.clone();
     }
@@ -662,6 +705,7 @@ impl Vector {
         self.logical_type = child.logical_type.clone();
         self.vector_type = VectorType::Dictionary;
         self.child = Some(Box::new(child.shallow_clone()));
+        self.struct_children.clear();
         self.sel = Some(sel);
         self.validity = child.validity.clone();
         self.seq_start = 0;
@@ -681,6 +725,11 @@ impl Vector {
                 .child
                 .as_ref()
                 .map(|child| Box::new((**child).shallow_clone())),
+            struct_children: self
+                .struct_children
+                .iter()
+                .map(Vector::shallow_clone)
+                .collect(),
             sel: self.sel.clone(),
             seq_start: self.seq_start,
             seq_increment: self.seq_increment,
@@ -954,6 +1003,7 @@ impl Vector {
                     data: std::mem::take(&mut self.data),
                     validity: self.validity.clone(),
                     child: None,
+                    struct_children: std::mem::take(&mut self.struct_children),
                     sel: None,
                     seq_start: 0,
                     seq_increment: 0,
@@ -996,6 +1046,11 @@ impl Vector {
         self.data.capacity()
             + cardinality / 8 + 1   // validity bits
             + self.child.as_ref().map_or(0, |c| c.allocation_size(cardinality))
+            + self
+                .struct_children
+                .iter()
+                .map(|c| c.allocation_size(cardinality))
+                .sum::<usize>()
             + self.string_aux.iter().map(|v| v.len()).sum::<usize>()
     }
 

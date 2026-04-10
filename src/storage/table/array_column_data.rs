@@ -14,7 +14,7 @@ use super::data_table_info::DataTableInfo;
 use super::scan_state::ColumnScanState;
 use super::types::{Idx, LogicalType, TransactionData};
 use crate::common::types::{LogicalTypeId, SelectionVector, Vector};
-use crate::storage::statistics::FilterPropagateResult;
+use crate::storage::statistics::{ArrayStats, BaseStatistics, FilterPropagateResult};
 /// Fixed-length array column.
 ///
 /// Mirrors `class ArrayColumnData : public ColumnData`.
@@ -153,6 +153,36 @@ impl ArrayColumnData {
             child_offset,
         );
         scan_count
+    }
+
+    pub fn append(
+        &self,
+        base: &ColumnDataBase,
+        stats: &mut BaseStatistics,
+        state: &mut ColumnAppendState,
+        vector: &Vector,
+        count: Idx,
+    ) {
+        if vector.get_vector_type() != crate::common::types::VectorType::Flat {
+            unimplemented!("ArrayColumnData::append currently requires a flat vector");
+        }
+        if stats.child_stats.is_empty() {
+            ArrayStats::construct(stats);
+        }
+
+        self.validity
+            .append(stats, &mut state.child_appends[0], vector, count);
+        let child_vec = vector
+            .get_child()
+            .expect("ArrayColumnData::append requires array child vector");
+        self.child_column.append(
+            ArrayStats::get_child_stats_mut(stats),
+            &mut state.child_appends[1],
+            child_vec,
+            count * u64::from(self.array_size),
+        );
+        base.count
+            .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn select(

@@ -319,6 +319,7 @@ pub enum LogicalTypeId {
     Varchar,
     Blob,
     List,
+    Array,
     Struct,
     Map,
     Union,
@@ -362,6 +363,8 @@ pub struct LogicalType {
     pub scale: u8,
     /// 子类型（用于 LIST<T>, MAP<K,V>, STRUCT(...)）。
     pub children: Vec<(String, Box<LogicalType>)>,
+    /// ARRAY 固定长度（仅 ARRAY 有效）。
+    pub array_size: usize,
 }
 
 impl LogicalType {
@@ -371,6 +374,7 @@ impl LogicalType {
             width: 0,
             scale: 0,
             children: Vec::new(),
+            array_size: 0,
         }
     }
 
@@ -405,6 +409,7 @@ impl LogicalType {
             width,
             scale,
             children: Vec::new(),
+            array_size: 0,
         }
     }
 
@@ -414,6 +419,30 @@ impl LogicalType {
             width: 0,
             scale: 0,
             children: vec![("".to_string(), Box::new(child))],
+            array_size: 0,
+        }
+    }
+
+    pub fn array(child: LogicalType, array_size: usize) -> Self {
+        Self {
+            id: LogicalTypeId::Array,
+            width: 0,
+            scale: 0,
+            children: vec![("".to_string(), Box::new(child))],
+            array_size,
+        }
+    }
+
+    pub fn struct_type(children: Vec<(String, LogicalType)>) -> Self {
+        Self {
+            id: LogicalTypeId::Struct,
+            width: 0,
+            scale: 0,
+            children: children
+                .into_iter()
+                .map(|(name, ty)| (name, Box::new(ty)))
+                .collect(),
+            array_size: 0,
         }
     }
 
@@ -428,6 +457,23 @@ impl LogicalType {
                     .map(|(_, t)| t.to_sql())
                     .unwrap_or_else(|| "ANY".to_string());
                 format!("{}[]", inner)
+            }
+            LogicalTypeId::Array => {
+                let inner = self
+                    .children
+                    .first()
+                    .map(|(_, t)| t.to_sql())
+                    .unwrap_or_else(|| "ANY".to_string());
+                format!("{}[{}]", inner, self.array_size)
+            }
+            LogicalTypeId::Struct => {
+                let fields = self
+                    .children
+                    .iter()
+                    .map(|(name, ty)| format!("{} {}", name, ty.to_sql()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("STRUCT({})", fields)
             }
             other => other.to_string(),
         }
@@ -457,6 +503,7 @@ impl LogicalType {
             LogicalTypeId::Uuid => 17,
             LogicalTypeId::Json => 18,
             LogicalTypeId::UserType(_) => 19,
+            LogicalTypeId::Array => 20,
             _ => 255,
         };
         buf.push(tag);
@@ -470,7 +517,7 @@ impl LogicalType {
                 buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
                 buf.extend_from_slice(bytes);
             }
-            LogicalTypeId::List | LogicalTypeId::Struct | LogicalTypeId::Map => {
+            LogicalTypeId::List | LogicalTypeId::Struct | LogicalTypeId::Map | LogicalTypeId::Array => {
                 buf.extend_from_slice(&(self.children.len() as u32).to_le_bytes());
                 for (name, child) in &self.children {
                     let nb = name.as_bytes();
@@ -479,6 +526,9 @@ impl LogicalType {
                     let cb = child.serialize();
                     buf.extend_from_slice(&(cb.len() as u32).to_le_bytes());
                     buf.extend_from_slice(&cb);
+                }
+                if self.id == LogicalTypeId::Array {
+                    buf.extend_from_slice(&(self.array_size as u32).to_le_bytes());
                 }
             }
             _ => {}
@@ -532,11 +582,12 @@ impl LogicalType {
                 pos += len;
                 return Some((LogicalType::new(LogicalTypeId::UserType(name)), pos));
             }
-            14 | 15 | 16 => {
+            14 | 15 | 16 | 20 => {
                 let list_id = match tag {
                     14 => LogicalTypeId::List,
                     15 => LogicalTypeId::Struct,
-                    _ => LogicalTypeId::Map,
+                    16 => LogicalTypeId::Map,
+                    _ => LogicalTypeId::Array,
                 };
                 if data.len() < pos + 4 {
                     return None;
@@ -567,12 +618,21 @@ impl LogicalType {
                     pos += clen;
                     children.push((name, Box::new(child)));
                 }
+                let mut array_size = 0;
+                if list_id == LogicalTypeId::Array {
+                    if data.len() < pos + 4 {
+                        return None;
+                    }
+                    array_size = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+                    pos += 4;
+                }
                 return Some((
                     LogicalType {
                         id: list_id,
                         width: 0,
                         scale: 0,
                         children,
+                        array_size,
                     },
                     pos,
                 ));

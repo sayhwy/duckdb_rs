@@ -772,12 +772,15 @@ impl RowGroup {
                 let prev_alloc = col.allocation_size();
                 // Convert the flat Vector to a UnifiedVectorFormat view.
                 // C++: chunk.data[i].ToUnifiedFormat(append_count, vdata)
-                let vdata = UnifiedVectorFormat::from_flat_vector(&chunk.data[i]);
-
                 // Per-column segment statistics, updated by append.
                 // C++: column.Append(*collection.GetStats().GetStats(i).lock(), ...)
                 let mut seg_stats = SegmentStatistics::new(chunk.data[i].logical_type.clone());
-                col.append(&mut seg_stats, &mut state.states[i], &vdata, append_count);
+                col.append(
+                    seg_stats.statistics_mut(),
+                    &mut state.states[i],
+                    &chunk.data[i],
+                    append_count,
+                );
 
                 // Wire per-append SegmentStatistics into the collection-level TableStatistics.
                 // Mirrors C++: collection.GetStats().GetStats(i).lock() passed directly to Append.
@@ -1196,14 +1199,14 @@ fn serialize_column_to_persistent(
             // List<T>: [validity, child_data]
             vec![
                 serialize_column_to_persistent(&list.validity, &validity_type),
-                serialize_column_to_persistent(&list.child_column, logical_type),
+                serialize_column_to_persistent(&list.child_column, &list.child_column.base.logical_type),
             ]
         }
         ColumnKindData::Array(array) => {
             // Array<T, N>: [validity, child_data]
             vec![
                 serialize_column_to_persistent(&array.validity, &validity_type),
-                serialize_column_to_persistent(&array.child_column, logical_type),
+                serialize_column_to_persistent(&array.child_column, &array.child_column.base.logical_type),
             ]
         }
         ColumnKindData::Struct(struct_data) => {
@@ -1214,7 +1217,7 @@ fn serialize_column_to_persistent(
                 struct_data
                     .sub_columns
                     .iter()
-                    .map(|c| serialize_column_to_persistent(c, logical_type)),
+                    .map(|c| serialize_column_to_persistent(c, &c.base.logical_type)),
             );
             children
         }
@@ -1229,7 +1232,7 @@ fn serialize_column_to_persistent(
                 variant
                     .sub_columns
                     .iter()
-                    .map(|c| serialize_column_to_persistent(c, logical_type)),
+                    .map(|c| serialize_column_to_persistent(c, &c.base.logical_type)),
             );
             children
         }
@@ -1333,6 +1336,7 @@ fn initialize_column_from_persistent(
 ) {
     {
         let mut lock = column.base.data.lock();
+        lock.0.clear();
         let mut row_start = 0;
         for mut pointer in persistent.pointers.clone() {
             pointer.row_start = row_start;
@@ -1399,6 +1403,10 @@ fn initialize_column_from_persistent(
                 .get_child_type()
                 .expect("ARRAY logical type missing child type");
             initialize_column_from_persistent(&array.child_column, child_data, child_type, storage);
+            column
+                .base
+                .count
+                .store(array.validity.count(), Ordering::Relaxed);
         }
         (
             ColumnKindData::Struct(struct_data),
@@ -1418,6 +1426,10 @@ fn initialize_column_from_persistent(
                     initialize_column_from_persistent(child_column, child_data, child_type, storage);
                 }
             }
+            column
+                .base
+                .count
+                .store(struct_data.validity.count(), Ordering::Relaxed);
         }
         _ => {}
     }

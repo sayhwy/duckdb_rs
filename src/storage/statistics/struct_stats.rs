@@ -170,10 +170,13 @@ impl StructStats {
     }
 
     pub fn verify(stats: &BaseStatistics, vector: &Vector, sel: &SelectionVector, count: usize) {
-        for i in 0..stats.child_stats.len() {
-            if let Some(child_entry) = vector.get_child() {
-                let _ = stats.child_stats[i].verify(child_entry, sel, count);
-            }
+        for (i, child_entry) in vector
+            .get_children()
+            .iter()
+            .enumerate()
+            .take(stats.child_stats.len())
+        {
+            let _ = stats.child_stats[i].verify(child_entry, sel, count);
         }
     }
 }

@@ -1396,8 +1396,8 @@ fn build_table_handle(
     let mut catalog_columns = ColumnList::new();
     let mut storage_columns = Vec::new();
     for column in &entry.columns {
-        let catalog_ty = from_type_id_catalog(column);
-        let storage_ty = from_type_id_storage(column);
+        let catalog_ty = column.logical_type.clone();
+        let storage_ty = from_catalog_type_to_storage_type(&column.logical_type);
         catalog_columns.add_column(CatalogColumnDefinition::new(
             column.name.clone(),
             catalog_ty,
@@ -1438,35 +1438,53 @@ fn build_table_handle(
     }
 }
 
-fn from_type_id_storage(
-    column: &crate::storage::checkpoint::catalog_deserializer::ColumnInfo,
-) -> LogicalType {
-    match column.type_id {
-        10 => LogicalType::boolean(),
-        11 => LogicalType::tinyint(),
-        12 => LogicalType::smallint(),
-        13 | 30 => LogicalType::integer(),
-        14 | 31 => LogicalType::bigint(),
-        15 => LogicalType::date(),
-        21 => LogicalType::decimal(column.decimal_width, column.decimal_scale),
-        22 => LogicalType::float(),
-        23 => LogicalType::double(),
+fn from_catalog_type_to_storage_type(logical_type: &CatalogLogicalType) -> LogicalType {
+    match &logical_type.id {
+        crate::catalog::LogicalTypeId::Boolean => LogicalType::boolean(),
+        crate::catalog::LogicalTypeId::TinyInt => LogicalType::tinyint(),
+        crate::catalog::LogicalTypeId::SmallInt => LogicalType::smallint(),
+        crate::catalog::LogicalTypeId::Integer => LogicalType::integer(),
+        crate::catalog::LogicalTypeId::BigInt => LogicalType::bigint(),
+        crate::catalog::LogicalTypeId::HugeInt => LogicalType::hugeint(),
+        crate::catalog::LogicalTypeId::UTinyInt => LogicalType::utinyint(),
+        crate::catalog::LogicalTypeId::USmallInt => LogicalType::usmallint(),
+        crate::catalog::LogicalTypeId::UInteger => LogicalType::uinteger(),
+        crate::catalog::LogicalTypeId::UBigInt => LogicalType::ubigint(),
+        crate::catalog::LogicalTypeId::Decimal => LogicalType::decimal(logical_type.width, logical_type.scale),
+        crate::catalog::LogicalTypeId::Float => LogicalType::float(),
+        crate::catalog::LogicalTypeId::Double => LogicalType::double(),
+        crate::catalog::LogicalTypeId::Date => LogicalType::date(),
+        crate::catalog::LogicalTypeId::Time => LogicalType::new(crate::common::types::LogicalTypeId::Time),
+        crate::catalog::LogicalTypeId::Timestamp => LogicalType::new(crate::common::types::LogicalTypeId::Timestamp),
+        crate::catalog::LogicalTypeId::Interval => LogicalType::new(crate::common::types::LogicalTypeId::Interval),
+        crate::catalog::LogicalTypeId::Varchar => LogicalType::varchar(),
+        crate::catalog::LogicalTypeId::Blob => LogicalType::blob(),
+        crate::catalog::LogicalTypeId::Validity => LogicalType::validity(),
+        crate::catalog::LogicalTypeId::List => {
+            let child = logical_type
+                .children
+                .first()
+                .map(|(_, child)| from_catalog_type_to_storage_type(child))
+                .unwrap_or_else(LogicalType::new_invalid);
+            LogicalType::list(child)
+        }
+        crate::catalog::LogicalTypeId::Array => {
+            let child = logical_type
+                .children
+                .first()
+                .map(|(_, child)| from_catalog_type_to_storage_type(child))
+                .unwrap_or_else(LogicalType::new_invalid);
+            LogicalType::array(child, logical_type.array_size)
+        }
+        crate::catalog::LogicalTypeId::Struct => {
+            let fields = logical_type
+                .children
+                .iter()
+                .map(|(name, child)| (name.clone(), from_catalog_type_to_storage_type(child)))
+                .collect();
+            LogicalType::struct_type(fields)
+        }
         _ => LogicalType::varchar(),
-    }
-}
-
-fn from_type_id_catalog(
-    column: &crate::storage::checkpoint::catalog_deserializer::ColumnInfo,
-) -> CatalogLogicalType {
-    match column.type_id {
-        10 => CatalogLogicalType::boolean(),
-        11 | 12 => CatalogLogicalType::integer(),
-        13 | 30 => CatalogLogicalType::integer(),
-        14 | 31 => CatalogLogicalType::bigint(),
-        15 => CatalogLogicalType::date(),
-        21 => CatalogLogicalType::decimal(column.decimal_width, column.decimal_scale),
-        22 | 23 => CatalogLogicalType::double(),
-        _ => CatalogLogicalType::varchar(),
     }
 }
 
@@ -1483,6 +1501,32 @@ fn to_catalog_type(ty: &LogicalType) -> CatalogLogicalType {
         crate::common::types::LogicalTypeId::Float => CatalogLogicalType::double(),
         crate::common::types::LogicalTypeId::Double => CatalogLogicalType::double(),
         crate::common::types::LogicalTypeId::Date => CatalogLogicalType::date(),
+        crate::common::types::LogicalTypeId::Time => CatalogLogicalType::new(crate::catalog::LogicalTypeId::Time),
+        crate::common::types::LogicalTypeId::Timestamp => CatalogLogicalType::timestamp(),
+        crate::common::types::LogicalTypeId::Varchar => CatalogLogicalType::varchar(),
+        crate::common::types::LogicalTypeId::Blob => CatalogLogicalType::blob(),
+        crate::common::types::LogicalTypeId::List => {
+            let child = ty
+                .get_child_type()
+                .map(to_catalog_type)
+                .unwrap_or_else(|| CatalogLogicalType::new(crate::catalog::LogicalTypeId::Invalid));
+            CatalogLogicalType::list(child)
+        }
+        crate::common::types::LogicalTypeId::Array => {
+            let child = ty
+                .get_child_type()
+                .map(to_catalog_type)
+                .unwrap_or_else(|| CatalogLogicalType::new(crate::catalog::LogicalTypeId::Invalid));
+            CatalogLogicalType::array(child, ty.array_size)
+        }
+        crate::common::types::LogicalTypeId::Struct => {
+            let fields = ty
+                .struct_fields
+                .iter()
+                .map(|(name, child)| (name.clone(), to_catalog_type(child)))
+                .collect();
+            CatalogLogicalType::struct_type(fields)
+        }
         _ => CatalogLogicalType::varchar(),
     }
 }
@@ -1564,7 +1608,7 @@ fn read_table_data(
     for column in &entry.columns {
         cols.add_column(CatalogColumnDefinition::new(
             column.name.clone(),
-            from_type_id_catalog(column),
+            column.logical_type.clone(),
         ));
     }
     create_info.columns = cols;

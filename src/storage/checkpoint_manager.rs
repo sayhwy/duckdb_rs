@@ -191,18 +191,21 @@ impl CheckpointManager {
     ) -> PersistentColumnData {
         let mut result = PersistentColumnData::new(&column.base.logical_type);
         result.has_updates = column.has_updates();
-        result.pointers = column.base.get_data_pointers();
 
         match &column.kind {
             ColumnKindData::Standard(standard) => {
+                result.pointers = column.base.get_data_pointers();
                 if let Some(validity) = &standard.validity {
                     result
                         .child_columns
                         .push(self.create_validity_persistent_column(column.count(), validity));
                 }
             }
-            ColumnKindData::Validity(_) => {}
+            ColumnKindData::Validity(_) => {
+                result.pointers = column.base.get_data_pointers();
+            }
             ColumnKindData::List(list) => {
+                result.pointers = column.base.get_data_pointers();
                 result
                     .child_columns
                     .push(self.create_validity_persistent_column(column.count(), &list.validity));
@@ -227,6 +230,7 @@ impl CheckpointManager {
                 }
             }
             ColumnKindData::Variant(variant) => {
+                result.pointers = column.base.get_data_pointers();
                 if let Some(validity) = &variant.validity {
                     result
                         .child_columns
@@ -246,7 +250,7 @@ impl CheckpointManager {
         tuple_count: Idx,
         validity: &std::sync::Arc<ColumnData>,
     ) -> PersistentColumnData {
-        if validity.count() == 0 {
+        if validity.count() == 0 || validity.base.get_data_pointers().is_empty() {
             return create_empty_validity_persistent_column(tuple_count);
         }
         self.create_persistent_column_data(validity)
@@ -292,6 +296,16 @@ mod logical_type_tag {
     pub const DOUBLE: u8 = 23;
     pub const VARCHAR: u8 = 25;
     pub const BLOB: u8 = 26;
+    pub const LIST: u8 = 36;
+    pub const STRUCT: u8 = 37;
+    pub const ARRAY: u8 = 46;
+}
+
+mod extra_type_info_tag {
+    pub const DECIMAL: u8 = 2;
+    pub const LIST: u8 = 4;
+    pub const STRUCT: u8 = 5;
+    pub const ARRAY: u8 = 9;
 }
 
 mod table_column_type {
@@ -429,13 +443,56 @@ fn write_column_definition(serializer: &mut BinarySerializer<'_>, column: &Colum
 fn write_logical_type(serializer: &mut BinarySerializer<'_>, logical_type: &LogicalType) {
     serializer.begin_root_object();
     serializer.write_u8(100, logical_type_id_from(logical_type));
-    if logical_type.id == crate::catalog::LogicalTypeId::Decimal {
-        serializer.begin_nullable_object(101);
-        serializer.write_u8(100, 2);
-        serializer.write_u8(200, logical_type.width);
-        serializer.write_u8(201, logical_type.scale);
-        serializer.end_object();
-        serializer.end_nullable_object();
+    match logical_type.id {
+        crate::catalog::LogicalTypeId::Decimal => {
+            serializer.begin_nullable_object(101);
+            serializer.write_u8(100, extra_type_info_tag::DECIMAL);
+            serializer.write_u8(200, logical_type.width);
+            serializer.write_u8(201, logical_type.scale);
+            serializer.end_object();
+            serializer.end_nullable_object();
+        }
+        crate::catalog::LogicalTypeId::List => {
+            serializer.begin_nullable_object(101);
+            serializer.write_u8(100, extra_type_info_tag::LIST);
+            serializer.write_field_id(200);
+            if let Some((_, child_type)) = logical_type.children.first() {
+                write_logical_type(serializer, child_type);
+            } else {
+                write_logical_type(serializer, &LogicalType::new(crate::catalog::LogicalTypeId::Invalid));
+            }
+            serializer.end_object();
+            serializer.end_nullable_object();
+        }
+        crate::catalog::LogicalTypeId::Struct => {
+            serializer.begin_nullable_object(101);
+            serializer.write_u8(100, extra_type_info_tag::STRUCT);
+            serializer.begin_list(200, logical_type.children.len());
+            for (name, child_type) in &logical_type.children {
+                serializer.list_write_object(|s| {
+                    s.write_string(100, name);
+                    s.write_field_id(101);
+                    write_logical_type(s, child_type);
+                });
+            }
+            serializer.end_list();
+            serializer.end_object();
+            serializer.end_nullable_object();
+        }
+        crate::catalog::LogicalTypeId::Array => {
+            serializer.begin_nullable_object(101);
+            serializer.write_u8(100, extra_type_info_tag::ARRAY);
+            serializer.write_field_id(200);
+            if let Some((_, child_type)) = logical_type.children.first() {
+                write_logical_type(serializer, child_type);
+            } else {
+                write_logical_type(serializer, &LogicalType::new(crate::catalog::LogicalTypeId::Invalid));
+            }
+            serializer.write_varint(201, logical_type.array_size as u64);
+            serializer.end_object();
+            serializer.end_nullable_object();
+        }
+        _ => {}
     }
     serializer.end_object();
 }
@@ -457,6 +514,9 @@ fn logical_type_id_from(logical_type: &LogicalType) -> u8 {
         LogicalTypeId::Timestamp => logical_type_tag::TIMESTAMP,
         LogicalTypeId::Blob => logical_type_tag::BLOB,
         LogicalTypeId::Decimal => logical_type_tag::DECIMAL,
+        LogicalTypeId::List => logical_type_tag::LIST,
+        LogicalTypeId::Struct => logical_type_tag::STRUCT,
+        LogicalTypeId::Array => logical_type_tag::ARRAY,
         _ => 0,
     }
 }

@@ -14,6 +14,8 @@ use super::data_table_info::DataTableInfo;
 use super::scan_state::ColumnScanState;
 use super::types::Idx;
 use super::types::LogicalType;
+use crate::common::types::Vector;
+use crate::storage::statistics::{BaseStatistics, StructStats};
 /// Nested struct column.
 ///
 /// Mirrors `class StructColumnData : public ColumnData`.
@@ -98,6 +100,82 @@ impl StructColumnData {
             sub_column.revert_append(new_count);
         }
         base.count.store(new_count, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn scan(
+        &self,
+        base: &ColumnDataBase,
+        vector_index: Idx,
+        state: &mut ColumnScanState,
+        result: &mut Vector,
+    ) -> Idx {
+        self.scan_count(state, result, base.get_vector_count(vector_index), 0)
+    }
+
+    pub fn scan_count(
+        &self,
+        state: &mut ColumnScanState,
+        result: &mut Vector,
+        count: Idx,
+        result_offset: Idx,
+    ) -> Idx {
+        let scan_count = self
+            .validity
+            .scan_count(&mut state.child_states[0], result, count, result_offset);
+        if result.get_children().len() != self.sub_columns.len() {
+            let children = result
+                .logical_type
+                .get_struct_fields()
+                .iter()
+                .map(|(_, child_type)| Vector::with_capacity(child_type.clone(), (result_offset + count) as usize))
+                .collect();
+            result.set_children(children);
+        }
+        for (idx, sub_column) in self.sub_columns.iter().enumerate() {
+            let child_result = &mut result.get_children_mut()[idx];
+            let _ = sub_column.scan_count(
+                &mut state.child_states[idx + 1],
+                child_result,
+                count,
+                result_offset,
+            );
+        }
+        scan_count
+    }
+
+    pub fn append(
+        &self,
+        base: &ColumnDataBase,
+        stats: &mut BaseStatistics,
+        state: &mut ColumnAppendState,
+        vector: &Vector,
+        count: Idx,
+    ) {
+        if vector.get_vector_type() != crate::common::types::VectorType::Flat {
+            unimplemented!("StructColumnData::append currently requires a flat vector");
+        }
+        if stats.child_stats.is_empty() {
+            StructStats::construct(stats);
+        }
+
+        self.validity
+            .append(stats, &mut state.child_appends[0], vector, count);
+        let child_entries = vector.get_children();
+        assert_eq!(
+            child_entries.len(),
+            self.sub_columns.len(),
+            "StructColumnData::append child count mismatch"
+        );
+        for (idx, child_entry) in child_entries.iter().enumerate() {
+            self.sub_columns[idx].append(
+                StructStats::get_child_stats_mut(stats, idx),
+                &mut state.child_appends[idx + 1],
+                child_entry,
+                count,
+            );
+        }
+        base.count
+            .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn skip(&self, state: &mut ColumnScanState, count: Idx) {

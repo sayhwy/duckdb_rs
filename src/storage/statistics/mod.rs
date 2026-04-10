@@ -16,6 +16,7 @@ mod variant_stats;
 pub use base_statistics::{
     BaseStatistics, FilterPropagateResult, StatisticsType, StatsData, StatsInfo,
 };
+pub use array_stats::ArrayStats;
 pub use column_statistics::ColumnStatistics;
 pub use distinct_statistics::DistinctStatistics;
 pub use list_stats::ListStats;
