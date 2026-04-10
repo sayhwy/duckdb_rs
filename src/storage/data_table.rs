@@ -33,6 +33,7 @@
 use crate::catalog::{PhysicalIndex, TableCatalogEntry};
 use crate::common::errors::StorageResult;
 use crate::common::types::{DataChunk, LogicalType, Vector};
+use crate::db::conn::ClientContext;
 use crate::storage::local_storage::LocalStorage;
 use crate::storage::storage_info::StorageError;
 use crate::storage::local_storage::MAX_ROW_ID;
@@ -58,25 +59,6 @@ use std::sync::{
 // 以下占位类型在相应子系统实现后应替换为真实导入。
 
 // ── 执行层占位 ──────────────────────────────────────────────────────────────
-
-/// 客户端上下文（C++: `ClientContext`）。
-///
-/// 在 C++ 中 `ClientContext` 持有每个连接的全部运行时状态（事务、优化器、
-/// 执行器、LocalStorage 等）。此处提供最小占位，仅暴露存储层所需的
-/// `LocalStorage` 引用。
-///
-/// 完整实现在执行引擎层；存储层方法仅通过 `context.local_storage` 访问它。
-///
-/// # C++ 对应
-/// `duckdb/main/client_context.hpp`
-/// `LocalStorage::Get(context, db)` → `context.local_storage`
-#[derive(Clone)]
-pub struct ClientContext {
-    /// 当前事务的本地写入缓冲区（C++: 通过 `LocalStorage::Get(context, db)` 访问）。
-    pub local_storage: LocalStorage,
-    pub transaction: Option<Arc<DuckTxnHandle>>,
-    pub transaction_data: TransactionData,
-}
 
 /// 列定义（C++: `ColumnDefinition`）。
 #[derive(Debug, Clone)]
@@ -147,7 +129,6 @@ pub struct LegacyTableAppendState {
 }
 
 pub use crate::storage::table::update_state::TableUpdateState;
-use crate::transaction::duck_transaction_manager::DuckTxnHandle;
 // ConstraintState 现在从 storage::table::append_state 导入，此处不再重复定义。
 
 /// 表数据写入器（C++: `TableDataWriter`）。
@@ -443,9 +424,7 @@ impl DataTable {
         state.initialize(storage_column_ids.clone());
         self.row_groups
             .initialize_scan(&mut state.table_state, &storage_column_ids);
-        context
-            .local_storage
-            .initialize_scan(self, &mut state.local_state, table_filters);
+        LocalStorage::get(context).initialize_scan(self, &mut state.local_state, table_filters);
     }
 
     /// 推进顺序扫描，填充一批结果（C++: `DataTable::Scan()`）。
@@ -461,26 +440,22 @@ impl DataTable {
     ///   }
     /// ```
     ///
-    /// # 参数顺序
-    /// 与 C++ 一致：transaction → result → state。
-    ///
     /// # 设计说明
-    /// - C++ `LocalStorage::Get(transaction)` 对应 `transaction.storage.as_deref()`；
-    ///   若事务无本地数据（`None`），本地段直接跳过。
+    /// - 这里直接接收由上层从事务中提取出的 `ClientContext`，其内容正对应
+    ///   DuckDB 在 `DataTable::Scan` 内部实际使用的 `TransactionData(transaction)`
+    ///   与 `LocalStorage::Get(transaction)`。
     /// - `LocalStorage::scan` 目前返回 `false`（存根），待 `RowGroupCollection` 完整实现后填充。
     pub fn scan(
         &self,
-        transaction: &DuckTransaction,
+        context: &ClientContext,
         result: &mut DataChunk,
         state: &mut TableScanState,
     ) {
+        let transaction = DuckTransaction::get(context);
+        let transaction_data = transaction.storage_transaction_data();
         // 1. 扫描持久化行组
         //    C++: if (state.table_state.Scan(transaction, result)) { D_ASSERT(...); return; }
-        let tx_data = TransactionData {
-            start_time: transaction.start_time,
-            transaction_id: transaction.transaction_id,
-        };
-        if state.table_state.scan(tx_data, result) {
+        if state.table_state.scan(transaction_data, result) {
             debug_assert!(result.size() > 0, "scan returned true but result is empty");
             return;
         }
@@ -489,13 +464,13 @@ impl DataTable {
         //    C++: auto &local_storage = LocalStorage::Get(transaction);
         //         local_storage.Scan(state.local_state, state.GetColumnIds(), result);
         {
-            let local_storage: &LocalStorage = &transaction.storage;
             let local_column_ids: Vec<StorageIndex> = state
                 .column_ids()
                 .into_iter()
                 .map(StorageIndex)
                 .collect();
-            local_storage.scan(&mut state.local_state, &local_column_ids, result);
+            LocalStorage::get_from_transaction(&transaction)
+                .scan(&mut state.local_state, &local_column_ids, result);
         }
     }
 
@@ -545,9 +520,7 @@ impl DataTable {
     ) {
         self.row_groups
             .initialize_parallel_scan(&mut state.scan_state);
-        context
-            .local_storage
-            .initialize_parallel_scan(self, &mut state.local_state);
+        LocalStorage::get(context).initialize_parallel_scan(self, &mut state.local_state);
     }
 
     /// 推进并行扫描（C++: `DataTable::NextParallelScan()`）。
@@ -580,7 +553,7 @@ impl DataTable {
                 .map(|current_row_group| current_row_group.row_group.count() as usize)
                 .unwrap_or(0);
         }
-        if context.local_storage.next_parallel_scan(
+        if LocalStorage::get(context).next_parallel_scan(
             context,
             self,
             &mut parallel_state.local_state,
@@ -952,6 +925,8 @@ impl DataTable {
         row_identifiers.flatten(count as usize);
         let flat_row_ids = extract_row_ids(row_identifiers, count as usize)?;
 
+        let transaction = DuckTransaction::get(context);
+        let transaction_data = transaction.storage_transaction_data();
         let mut pos = 0usize;
         let mut delete_count = 0;
         while pos < count as usize {
@@ -969,7 +944,7 @@ impl DataTable {
             let mut offset_ids = flat_row_ids[start..pos].to_vec();
 
             if is_transaction_delete {
-                delete_count += context.local_storage.delete(
+                delete_count += LocalStorage::get_from_transaction(&transaction).delete(
                     self.info.table_id(),
                     &mut offset_ids,
                     current_count,
@@ -979,12 +954,10 @@ impl DataTable {
                     },
                 );
             } else {
-                if let Some(txn) = &context.transaction {
-                    txn.lock_inner().modify_table(self.info.table_id());
-                }
+                transaction.modify_table(self.info.table_id());
                 delete_count += self.row_groups.delete(
-                    context.transaction.as_ref(),
-                    context.transaction_data,
+                    Some(&transaction),
+                    transaction_data,
                     Some(self),
                     &mut offset_ids,
                     current_count,
@@ -1061,6 +1034,8 @@ impl DataTable {
             )));
         }
 
+        let transaction = DuckTransaction::get(context);
+        let transaction_data = transaction.storage_transaction_data();
         let mut local_sel = crate::common::types::SelectionVector::default();
         let mut global_sel = crate::common::types::SelectionVector::default();
         for (idx, row_id) in flat_row_ids.iter().copied().enumerate() {
@@ -1074,7 +1049,7 @@ impl DataTable {
         if !local_sel.indices.is_empty() {
             let row_ids_slice = slice_row_ids(&flat_row_ids, &local_sel);
             let updates_slice = slice_updates(updates, &local_sel.indices)?;
-            context.local_storage.update(
+            LocalStorage::get_from_transaction(&transaction).update(
                 self.info.table_id(),
                 &row_ids_slice,
                 column_ids,
@@ -1087,15 +1062,13 @@ impl DataTable {
         }
 
         if !global_sel.indices.is_empty() {
-            if let Some(txn) = &context.transaction {
-                txn.lock_inner().modify_table(self.info.table_id());
-            }
+            transaction.modify_table(self.info.table_id());
 
             let row_ids_slice = slice_row_ids(&flat_row_ids, &global_sel);
             let updates_slice = slice_updates(updates, &global_sel.indices)?;
             self.row_groups.update(
-                context.transaction.as_ref(),
-                context.transaction_data,
+                Some(&transaction),
+                transaction_data,
                 Some(self),
                 &row_ids_slice,
                 column_ids,
@@ -1171,7 +1144,7 @@ impl DataTable {
         &self,
         state: &mut LocalAppendState,
         table: &TableCatalogEntry,
-        context: &ClientContext,
+        context: &Arc<ClientContext>,
         bound_constraints: &[BoundConstraint],
     ) -> StorageResult<()> {
         // 1. 事务冲突检查（C++: `if (!IsMainTable()) throw`）
@@ -1189,7 +1162,8 @@ impl DataTable {
         // 2. 初始化 state.storage（C++: `local_storage.InitializeAppend(state, *this)`）
         //    table_id = db_id * 2^32 + table_io_manager_id 作为唯一键（临时方案）
         let table_id = self.info.table_id();
-        context.local_storage.initialize_append_state(
+        LocalStorage::get(context.as_ref()).initialize_append_state(
+            context,
             state,
             table_id,
             Arc::clone(&self.info),
@@ -1237,7 +1211,7 @@ impl DataTable {
     pub fn local_append_chunk(
         &self,
         state: &mut LocalAppendState,
-        _context: &ClientContext,
+        _context: &Arc<ClientContext>,
         chunk: &mut DataChunk,
         skip_constraints: bool,
     ) -> StorageResult<()> {
@@ -1313,7 +1287,7 @@ impl DataTable {
     pub fn local_append(
         &self,
         table: &TableCatalogEntry,
-        context: &ClientContext,
+        context: &Arc<ClientContext>,
         chunk: &mut DataChunk,
         bound_constraints: &[BoundConstraint],
     ) -> StorageResult<()> {

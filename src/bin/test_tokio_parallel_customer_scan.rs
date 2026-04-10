@@ -1,7 +1,5 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::thread::sleep;
-use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use duckdb_rs::common::types::{DataChunk, STANDARD_VECTOR_SIZE};
 use duckdb_rs::db::{DuckEngine, TableScanRequest};
@@ -16,11 +14,19 @@ struct WorkerStats {
     rows_read: usize,
 }
 
+#[derive(Debug, Default)]
+struct WorkerResult {
+    stats: WorkerStats,
+    sample_chunk: Option<String>,
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
+    let display_task_count = 15usize;
+
     println!();
     println!("╔════════════════════════════════════════════════════════════════════╗");
-    println!("║   DuckDB Rust — tokio 并行扫描 mock 执行器 (lineitem / 4 tasks)  ║");
+    println!("║    DuckDB Rust — tokio 并行扫描 mock 执行器 (lineitem scan)     ║");
     println!("╚════════════════════════════════════════════════════════════════════╝");
     println!();
 
@@ -42,20 +48,20 @@ async fn main() -> Result<()> {
             .context("duck_table_scan_init_global 失败")?,
     );
     let result_types = global_scan.result_types().to_vec();
-    let task_count = 15;
     println!("  已调用 DuckConnection::duck_table_scan_init_global");
     println!("  内部链路: DuckTableScanInitGlobal -> DataTable::InitializeParallelScan -> DataTable::MaxThreads");
     println!("  输出列数: {}", result_types.len());
-    println!("  建议任务数: {}", task_count);
+    println!("  source max_threads: {}", global_scan.max_threads());
+    println!("  本次用于打印演示的 task 数: {}", display_task_count);
     println!();
 
     println!("步骤 3：按建议任务数启动 tokio worker task");
-    let mut handles = Vec::with_capacity(task_count);
-    for worker_id in 0..task_count {
+    let mut handles = Vec::with_capacity(display_task_count);
+    for worker_id in 0..display_task_count {
         let global_scan = Arc::clone(&global_scan);
         let result_types = result_types.clone();
         handles.push(tokio::spawn(async move {
-            let mut stats = WorkerStats::default();
+            let mut result = WorkerResult::default();
             let mut local_state = global_scan.init_local_state();
             loop {
                 let mut chunk = DataChunk::new();
@@ -66,12 +72,10 @@ async fn main() -> Result<()> {
                 if !has_data {
                     break;
                 }
-                // chunk.pretty_print();
-                // sleep(Duration::from_secs(10));
-                stats.chunks_read += 1;
-                stats.rows_read += chunk.size();
+                result.stats.chunks_read += 1;
+                result.stats.rows_read += chunk.size();
             }
-            Ok::<(usize, WorkerStats), anyhow::Error>((worker_id, stats))
+            Ok::<(usize, WorkerResult), anyhow::Error>((worker_id, result))
         }));
     }
 
@@ -85,9 +89,14 @@ async fn main() -> Result<()> {
     let mut total_rows = 0usize;
 
     for handle in handles {
-        let (worker_id, stats) = handle
+        let (worker_id, result) = handle
             .await
             .map_err(|e| anyhow!("tokio worker join 失败: {}", e))??;
+        if let Some(sample_chunk) = result.sample_chunk.as_ref() {
+            println!("worker {:>2} sample chunk:", worker_id);
+            print!("{sample_chunk}");
+        }
+        let stats = result.stats;
         total_chunks += stats.chunks_read;
         total_rows += stats.rows_read;
         println!(

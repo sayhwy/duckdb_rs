@@ -156,6 +156,22 @@ impl DuckTxnHandle {
         super::duck_transaction::TransactionData::from_transaction(&txn)
     }
 
+    pub fn storage_transaction_data(&self) -> crate::storage::table::types::TransactionData {
+        let txn = self.inner.lock();
+        crate::storage::table::types::TransactionData {
+            start_time: txn.start_time,
+            transaction_id: txn.transaction_id,
+        }
+    }
+
+    pub fn local_storage(&self) -> crate::storage::local_storage::LocalStorage {
+        self.inner.lock().storage.as_ref().clone()
+    }
+
+    pub fn modify_table(&self, table_id: u64) {
+        self.inner.lock().modify_table(table_id);
+    }
+
     /// 获取事务 ID（不进行完整锁定的快速路径）。
     ///
     /// `transaction_id` 在创建后不再修改，因此可以通过锁读取。

@@ -23,10 +23,10 @@
 //! to determine when to flush. When the number of unflushed complete row groups
 //! exceeds this threshold, they are written to disk using the partial block manager.
 
-use parking_lot::Mutex;
 use std::sync::Arc;
 
-use crate::storage::data_table::{ClientContext, ColumnDefinition, DataTable};
+use crate::db::conn::ClientContext;
+use crate::storage::data_table::{ColumnDefinition, DataTable};
 use crate::storage::table::column_checkpoint_state::PartialBlockManager;
 use crate::storage::table::data_table_info::DataTableInfo;
 use crate::storage::table::row_group::RowGroup;
@@ -90,7 +90,7 @@ impl OptimisticWriteCollection {
 /// Mirrors `class OptimisticDataWriter`.
 pub struct OptimisticDataWriter {
     /// The client context (holds transaction state, settings, etc.).
-    context: Arc<Mutex<ClientContext>>,
+    context: Arc<ClientContext>,
 
     /// The table being written to.
     table: Arc<DataTable>,
@@ -105,7 +105,7 @@ impl OptimisticDataWriter {
     /// Create a new optimistic writer for the given table.
     ///
     /// Mirrors `OptimisticDataWriter(ClientContext &context, DataTable &table)`.
-    pub fn new(context: Arc<Mutex<ClientContext>>, table: Arc<DataTable>) -> Self {
+    pub fn new(context: Arc<ClientContext>, table: Arc<DataTable>) -> Self {
         Self {
             context,
             table,
@@ -290,7 +290,7 @@ impl OptimisticDataWriter {
     /// Get the client context.
     ///
     /// Mirrors `GetClientContext()`.
-    pub fn get_client_context(&self) -> Arc<Mutex<ClientContext>> {
+    pub fn get_client_context(&self) -> Arc<ClientContext> {
         Arc::clone(&self.context)
     }
 

@@ -271,6 +271,17 @@ pub struct DuckTransaction {
 }
 
 impl DuckTransaction {
+    /// 从客户端上下文取得当前事务（对应 DuckDB `DuckTransaction::Get(context, ...)` 的单库版本）。
+    pub fn get(
+        context: &crate::db::conn::ClientContext,
+    ) -> Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle> {
+        if let Some(txn) = context.active_transaction() {
+            txn
+        } else {
+            context.transaction.get_or_create_transaction()
+        }
+    }
+
     /// 构造新事务（C++: `DuckTransaction::DuckTransaction(…)`）。
     ///
     /// C++ 还接受 `DuckTransactionManager&` 和 `ClientContext&`；

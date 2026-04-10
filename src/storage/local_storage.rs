@@ -30,7 +30,8 @@ use parking_lot::Mutex;
 use crate::catalog::table_catalog_entry::PhysicalIndex;
 use crate::common::errors::StorageResult;
 use crate::common::types::DataChunk;
-use crate::storage::data_table::{ClientContext, ColumnDefinition, DataTable, StorageIndex};
+use crate::db::conn::ClientContext;
+use crate::storage::data_table::{ColumnDefinition, DataTable, StorageIndex};
 use crate::storage::optimistic_data_writer::{
     OptimisticDataWriter, OptimisticWriteCollection, OptimisticWritePartialManagers,
 };
@@ -136,6 +137,7 @@ impl LocalTableStorage {
     /// 创建一个最小虚拟 `DataTable`（用于乐观写入器），
     /// 初始化空行组集合，并扫描已有唯一约束索引。
     pub fn new(
+        context: Arc<ClientContext>,
         table_id: u64,
         info: Arc<DataTableInfo>,
         types: Vec<LogicalType>,
@@ -154,19 +156,8 @@ impl LocalTableStorage {
             virtual_table.info.set_persistent_storage(runtime);
         }
 
-        // 创建最小上下文供乐观写入器持有。
-        // 写入器仅用该上下文读取写缓冲阈值（默认 2），无副作用。
-        let ctx = Arc::new(Mutex::new(ClientContext {
-            local_storage: LocalStorage::new(),
-            transaction: None,
-            transaction_data: TransactionData {
-                start_time: 0,
-                transaction_id: 0,
-            },
-        }));
-
         // C++: optimistic_writer(context, table)
-        let mut optimistic_writer = OptimisticDataWriter::new(ctx, Arc::clone(&virtual_table));
+        let mut optimistic_writer = OptimisticDataWriter::new(context, Arc::clone(&virtual_table));
 
         // C++: row_groups = optimistic_writer.CreateCollection(table, types, GLOBAL)
         let row_groups = Box::new(optimistic_writer.create_collection(
@@ -736,6 +727,7 @@ impl LocalTableManager {
     /// 若不存在则创建本地存储并返回（C++: `GetOrCreateStorage`）。
     pub fn get_or_create_storage(
         &self,
+        context: &Arc<ClientContext>,
         table_id: u64,
         info: &Arc<DataTableInfo>,
         types: &[LogicalType],
@@ -751,7 +743,8 @@ impl LocalTableManager {
         if let Some(existing) = lock.get(&table_id) {
             return Arc::clone(existing);
         }
-        let new_storage = LocalTableStorage::new(table_id, Arc::clone(info), types.to_vec());
+        let new_storage =
+            LocalTableStorage::new(Arc::clone(context), table_id, Arc::clone(info), types.to_vec());
         lock.insert(table_id, Arc::clone(&new_storage));
         new_storage
     }
@@ -872,6 +865,19 @@ impl LocalStorage {
         }
     }
 
+    /// 从事务句柄取得本地存储（对应 C++ `LocalStorage::Get(DuckTransaction &transaction)`）。
+    pub fn get_from_transaction(
+        transaction: &Arc<crate::transaction::duck_transaction_manager::DuckTxnHandle>,
+    ) -> Self {
+        transaction.local_storage()
+    }
+
+    /// 从客户端上下文取得本地存储（对应 C++ `LocalStorage::Get(ClientContext &context, ...)` 的单库版本）。
+    pub fn get(context: &ClientContext) -> Self {
+        let transaction = crate::transaction::duck_transaction::DuckTransaction::get(context);
+        Self::get_from_transaction(&transaction)
+    }
+
     // ── 扫描接口 ──────────────────────────────────────────────────────────────
 
     /// 初始化对本地存储的顺序扫描（C++: `InitializeScan`）。
@@ -953,6 +959,7 @@ impl LocalStorage {
     /// `context.local_storage.initialize_append_state(state, table_id, info, types)`
     pub fn initialize_append_state(
         &self,
+        context: &Arc<ClientContext>,
         state: &mut LocalAppendState,
         table_id: u64,
         info: Arc<DataTableInfo>,
@@ -962,7 +969,7 @@ impl LocalStorage {
         //      state.storage->GetCollection().InitializeAppend(TransactionData(transaction), state.append_state);
         let storage = self
             .table_manager
-            .get_or_create_storage(table_id, &info, &types);
+            .get_or_create_storage(context, table_id, &info, &types);
         let collection = storage.lock().get_collection();
         collection.initialize_append(&mut state.append_state);
         state.storage = Some(Arc::clone(&storage));
@@ -971,6 +978,7 @@ impl LocalStorage {
     /// 仅初始化存储，不初始化行组（C++: `InitializeStorage`）。
     pub fn initialize_storage(
         &self,
+        context: &Arc<ClientContext>,
         state: &mut LocalAppendState,
         table_id: u64,
         info: Arc<DataTableInfo>,
@@ -979,7 +987,7 @@ impl LocalStorage {
         // C++: state.storage = &table_manager.GetOrCreateStorage(context, table);
         let storage = self
             .table_manager
-            .get_or_create_storage(table_id, &info, &types);
+            .get_or_create_storage(context, table_id, &info, &types);
         state.storage = Some(storage);
     }
 
@@ -1043,6 +1051,7 @@ impl LocalStorage {
     /// 将乐观写入集合合并到本地存储（C++: `LocalMerge`）。
     pub fn local_merge(
         &self,
+        context: &Arc<ClientContext>,
         table_id: u64,
         info: &Arc<DataTableInfo>,
         types: &[LogicalType],
@@ -1052,7 +1061,7 @@ impl LocalStorage {
         // C++: auto &storage = table_manager.GetOrCreateStorage(context, table);
         let storage_arc = self
             .table_manager
-            .get_or_create_storage(table_id, info, types);
+            .get_or_create_storage(context, table_id, info, types);
         let mut storage = storage_arc.lock();
 
         // C++: if (!storage.append_indexes.Empty()) {
@@ -1085,6 +1094,7 @@ impl LocalStorage {
     /// 为表创建乐观写入集合（C++: `CreateOptimisticCollection`）。
     pub fn create_optimistic_collection(
         &self,
+        context: &Arc<ClientContext>,
         table_id: u64,
         info: &Arc<DataTableInfo>,
         types: &[LogicalType],
@@ -1094,7 +1104,7 @@ impl LocalStorage {
         //      return storage.CreateOptimisticCollection(std::move(collection));
         let storage_arc = self
             .table_manager
-            .get_or_create_storage(table_id, info, types);
+            .get_or_create_storage(context, table_id, info, types);
         storage_arc.lock().create_optimistic_collection(collection)
     }
 

@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! Connection
-//!   └── Arc<Mutex<ClientContext>>
+//!   └── Arc<ClientContext>
 //!         ├── db: Arc<DatabaseInstance>     — 共享数据库状态
 //!         └── transaction: TransactionContext
 //!               ├── Arc<DuckTransactionManager>
@@ -17,7 +17,7 @@
 //! # 设计说明
 //!
 //! - `Connection` 不再持有独立的 `Arc<DatabaseInstance>`；
-//!   所有数据库访问均通过 `context.lock().db` 进行。
+//!   所有数据库访问均通过 `context.db` 进行。
 //!   这消除了原有的双重引用（`Connection.db` 与 `ClientContext.db` 指向同一对象）。
 //!
 //! - DML 操作（insert/update/delete/scan）不持有 `ClientContext` 锁跨越 I/O；
@@ -197,12 +197,12 @@ impl ClientContext {
 /// # 设计
 ///
 /// `Connection` 不再持有独立的 `Arc<DatabaseInstance>`。
-/// 所有数据库访问通过 `context.lock().db` 进行。
+/// 所有数据库访问通过 `context.db` 进行。
 /// DML 操作先短暂锁 context 取得所需句柄，再释放锁执行 I/O，
 /// 避免在 I/O 路径上持有粗粒度锁。
 pub struct Connection {
     /// 客户端上下文（含 db 引用和事务状态）。
-    pub(crate) context: Arc<Mutex<ClientContext>>,
+    pub(crate) context: Arc<ClientContext>,
 
     /// 连接 ID（缓存，避免每次锁 context）。
     connection_id: ConnectionId,
@@ -210,8 +210,8 @@ pub struct Connection {
 
 impl Connection {
     pub fn new(db: Arc<DatabaseInstance>) -> Self {
-        let context = Arc::new(Mutex::new(ClientContext::new(db)));
-        let connection_id = context.lock().connection_id;
+        let context = Arc::new(ClientContext::new(db));
+        let connection_id = context.connection_id;
         Self {
             context,
             connection_id,
@@ -225,49 +225,49 @@ impl Connection {
     // ── 事务控制 ──────────────────────────────────────────────────────────────
 
     pub fn begin_transaction(&self) -> Result<()> {
-        self.context.lock().begin_transaction()
+        self.context.begin_transaction()
     }
 
     pub fn commit(&self) -> Result<()> {
-        self.context.lock().commit()
+        self.context.commit()
     }
 
     pub fn rollback(&self) -> Result<()> {
-        self.context.lock().rollback()
+        self.context.rollback()
     }
 
     pub fn set_auto_commit(&self, value: bool) {
-        self.context.lock().set_auto_commit(value);
+        self.context.set_auto_commit(value);
     }
 
     pub fn is_auto_commit(&self) -> bool {
-        self.context.lock().is_auto_commit()
+        self.context.is_auto_commit()
     }
 
     pub fn has_active_transaction(&self) -> bool {
-        self.context.lock().has_active_transaction()
+        self.context.has_active_transaction()
     }
 
     pub fn get_transaction(&self) -> Option<Arc<DuckTxnHandle>> {
-        self.context.lock().transaction.try_get_transaction()
+        self.context.transaction.try_get_transaction()
     }
 
     pub fn interrupt(&self) {
-        self.context.lock().interrupt();
+        self.context.interrupt();
     }
 
     // ── 数据库访问辅助 ────────────────────────────────────────────────────────
 
     /// 获取数据库实例引用（克隆 Arc，短暂锁 context）。
     pub fn database(&self) -> Arc<DatabaseInstance> {
-        self.context.lock().db.clone()
+        self.context.db.clone()
     }
 
     /// 获取存储管理器引用。
     pub fn storage_manager(
         &self,
     ) -> Arc<crate::storage::storage_manager::SingleFileStorageManager> {
-        self.context.lock().db.storage_manager.clone()
+        self.context.db.storage_manager.clone()
     }
 
     /// 查找表句柄（短暂锁 context + tables）。
@@ -277,8 +277,8 @@ impl Connection {
     /// - 限定：  `"main.users"` → 在指定 schema 下查找
     pub(crate) fn get_table(&self, table_name: &str) -> Result<TableHandle> {
         let key = parse_table_name(table_name);
-        let ctx = self.context.lock();
-        ctx.db
+        self.context
+            .db
             .tables
             .lock()
             .get(&key)
@@ -301,10 +301,7 @@ impl Connection {
 
     /// 获取写事务句柄（短暂锁 context 后释放）。
     fn acquire_write_transaction(&self) -> Arc<DuckTxnHandle> {
-        self.context
-            .lock()
-            .transaction
-            .get_or_create_write_transaction()
+        self.context.transaction.get_or_create_write_transaction()
     }
 
     /// 获取读事务句柄（短暂锁 context 后释放）。
@@ -312,34 +309,16 @@ impl Connection {
         if let Some(txn) = self.get_transaction() {
             txn
         } else {
-            self.context.lock().transaction.get_or_create_transaction()
+            self.context.transaction.get_or_create_transaction()
         }
     }
 
     /// 若 `auto_commit` 为 true 则提交。
     fn commit_if_auto_commit(&self, auto_commit: bool) -> Result<()> {
         if auto_commit {
-            self.context.lock().commit()?;
+            self.context.commit()?;
         }
         Ok(())
-    }
-
-    // ── storage::data_table::ClientContext 构建 ───────────────────────────────
-
-    pub(crate) fn build_storage_context(
-        txn: &Arc<DuckTxnHandle>,
-    ) -> crate::storage::data_table::ClientContext {
-        let txn_guard = txn.lock_inner();
-        crate::storage::data_table::ClientContext {
-            // LocalStorage 内部通过 Arc<Mutex<HashMap<...>>> 共享数据；
-            // 此处的 clone 是浅拷贝（Arc 引用计数 +1），不深拷贝实际存储内容。
-            local_storage: *txn_guard.storage.clone(),
-            transaction: Some(Arc::clone(txn)),
-            transaction_data: crate::storage::table::types::TransactionData {
-                start_time: txn_guard.start_time,
-                transaction_id: txn_guard.transaction_id,
-            },
-        }
     }
 
     fn build_row_id_vector(row_ids: &[i64]) -> crate::common::types::Vector {
@@ -373,12 +352,11 @@ impl Connection {
         let auto_commit = self.ensure_write_transaction()?;
 
         // 获取事务句柄后立即释放 context 锁，避免后续 commit 时死锁
-        let txn = self.acquire_write_transaction();
-        let storage_context = Self::build_storage_context(&txn);
+        let _txn = self.acquire_write_transaction();
 
         table
             .storage
-            .local_append(&table.catalog_entry, &storage_context, chunk, &[])
+            .local_append(&table.catalog_entry, &self.context, chunk, &[])
             .map_err(|e| anyhow!("append failed: {e:?}"))?;
 
         self.commit_if_auto_commit(auto_commit)
@@ -409,7 +387,6 @@ impl Connection {
 
         // 获取事务句柄（不持有 context 锁）
         let txn = self.acquire_read_transaction();
-        let storage_context = Self::build_storage_context(&txn);
         let storage_column_ids: Vec<StorageIndex> =
             column_ids.iter().copied().map(StorageIndex).collect();
 
@@ -417,7 +394,7 @@ impl Connection {
         {
             let txn_guard = txn.lock_inner();
             table.storage.initialize_scan(
-                &storage_context,
+                self.context.as_ref(),
                 &*txn_guard,
                 &mut state,
                 &storage_column_ids,
@@ -429,10 +406,7 @@ impl Connection {
         loop {
             let mut chunk = DataChunk::new();
             chunk.initialize(&result_types, STANDARD_VECTOR_SIZE);
-            {
-                let txn_guard = txn.lock_inner();
-                table.storage.scan(&*txn_guard, &mut chunk, &mut state);
-            }
+            table.storage.scan(self.context.as_ref(), &mut chunk, &mut state);
             if chunk.size() == 0 {
                 break;
             }
@@ -454,8 +428,7 @@ impl Connection {
         let table = self.get_table(table_name)?;
         let auto_commit = self.ensure_write_transaction()?;
 
-        let txn = self.acquire_write_transaction();
-        let storage_context = Self::build_storage_context(&txn);
+        let _txn = self.acquire_write_transaction();
 
         let mut row_id_vector = Self::build_row_id_vector(row_ids);
         let physical_column_ids = Self::build_physical_column_ids(column_ids);
@@ -468,7 +441,7 @@ impl Connection {
             .storage
             .update(
                 state.as_mut(),
-                &storage_context,
+                self.context.as_ref(),
                 &mut row_id_vector,
                 &physical_column_ids,
                 updates,
@@ -483,8 +456,7 @@ impl Connection {
         let table = self.get_table(table_name)?;
         let auto_commit = self.ensure_write_transaction()?;
 
-        let txn = self.acquire_write_transaction();
-        let storage_context = Self::build_storage_context(&txn);
+        let _txn = self.acquire_write_transaction();
 
         let mut row_id_vector = Self::build_row_id_vector(row_ids);
 
@@ -493,7 +465,7 @@ impl Connection {
             .storage
             .delete(
                 state.as_mut(),
-                &storage_context,
+                self.context.as_ref(),
                 &mut row_id_vector,
                 row_ids.len() as u64,
             )

@@ -37,6 +37,7 @@
 //!   当前实现通过公开 `raw_data()` 接口将此决策推迟给调用方。
 
 use crate::common::errors::{Result, anyhow, bail};
+use chrono::{Duration, NaiveDate};
 use std::fmt::Write as _;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1054,14 +1055,29 @@ impl Vector {
             LogicalTypeId::UBigInt => u64::from_le_bytes(bytes.try_into().unwrap()).to_string(),
             LogicalTypeId::Float => f32::from_le_bytes(bytes.try_into().unwrap()).to_string(),
             LogicalTypeId::Double => f64::from_le_bytes(bytes.try_into().unwrap()).to_string(),
+            LogicalTypeId::Decimal => {
+                let scaled = match self.logical_type.physical_size() {
+                    2 => i16::from_le_bytes(bytes.try_into().unwrap()) as i128,
+                    4 => i32::from_le_bytes(bytes.try_into().unwrap()) as i128,
+                    8 => i64::from_le_bytes(bytes.try_into().unwrap()) as i128,
+                    16 => i128::from_le_bytes(bytes.try_into().unwrap()),
+                    _ => {
+                        return format!(
+                            "<DECIMAL({}, {})>",
+                            self.logical_type.width, self.logical_type.scale
+                        )
+                    }
+                };
+                format_decimal_scaled_display(scaled, self.logical_type.scale)
+            }
             LogicalTypeId::Varchar => {
                 String::from_utf8_lossy(&self.read_varchar_bytes(row)).into_owned()
             }
             LogicalTypeId::Date => {
                 let days = i32::from_le_bytes(bytes.try_into().unwrap());
-                format!("DATE({days})")
+                format_date_days_display(days)
             }
-            LogicalTypeId::Blob => format!("BLOB({} bytes)", bytes.len()),
+            LogicalTypeId::Blob => format!("<blob:{} bytes>", self.read_varchar_bytes(row).len()),
             _ => format!("<{}>", self.logical_type.name()),
         }
     }
@@ -1464,24 +1480,34 @@ impl DataChunk {
 
     /// 以表格形式返回 chunk 内容，便于调试查看。
     pub fn to_pretty_string(&self) -> String {
+        const MAX_DISPLAY_ROWS: usize = 12;
+        const MAX_COLUMN_WIDTH: usize = 40;
+
         let mut headers = Vec::with_capacity(self.column_count());
-        let mut rows = Vec::with_capacity(self.size());
+        let display_rows = display_row_indexes(self.size(), MAX_DISPLAY_ROWS);
+        let mut rows = Vec::with_capacity(display_rows.len());
         let mut widths = Vec::with_capacity(self.column_count());
+        let mut align_right = Vec::with_capacity(self.column_count());
 
         for (idx, vector) in self.data.iter().enumerate() {
             let header = format!("c{idx}:{}", vector.logical_type.name());
             widths.push(header.chars().count());
             headers.push(header);
+            align_right.push(should_right_align_display(&vector.logical_type));
         }
 
-        for row_idx in 0..self.size() {
+        for row_idx in display_rows {
             let mut row = Vec::with_capacity(self.column_count());
             for (col_idx, vector) in self.data.iter().enumerate() {
-                let value = vector.format_value_at(row_idx);
+                let value = truncate_display_value(&vector.format_value_at(row_idx), MAX_COLUMN_WIDTH);
                 widths[col_idx] = widths[col_idx].max(value.chars().count());
                 row.push(value);
             }
             rows.push(row);
+        }
+
+        for width in &mut widths {
+            *width = (*width).clamp(3, MAX_COLUMN_WIDTH);
         }
 
         let mut out = String::new();
@@ -1518,12 +1544,19 @@ impl DataChunk {
         for row in rows {
             out.push('|');
             for (idx, cell) in row.iter().enumerate() {
-                let _ = write!(out, " {:width$} |", cell, width = widths[idx]);
+                if align_right[idx] {
+                    let _ = write!(out, " {:>width$} |", cell, width = widths[idx]);
+                } else {
+                    let _ = write!(out, " {:width$} |", cell, width = widths[idx]);
+                }
             }
             out.push('\n');
         }
 
         let _ = writeln!(out, "{border}");
+        if self.size() > MAX_DISPLAY_ROWS {
+            let _ = writeln!(out, "... {} rows omitted in this chunk ...", self.size() - MAX_DISPLAY_ROWS);
+        }
         out
     }
 
@@ -1575,6 +1608,66 @@ impl Default for DataChunk {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn format_decimal_scaled_display(value: i128, scale: u8) -> String {
+    let negative = value < 0;
+    let digits = value.abs().to_string();
+    let scale = scale as usize;
+    let body = if scale == 0 {
+        digits
+    } else if digits.len() <= scale {
+        format!("0.{}{}", "0".repeat(scale - digits.len()), digits)
+    } else {
+        let split = digits.len() - scale;
+        format!("{}.{}", &digits[..split], &digits[split..])
+    };
+    if negative {
+        format!("-{}", body)
+    } else {
+        body
+    }
+}
+
+fn format_date_days_display(days: i32) -> String {
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid unix epoch");
+    (epoch + Duration::days(days as i64)).format("%Y-%m-%d").to_string()
+}
+
+fn display_row_indexes(num_rows: usize, max_display_rows: usize) -> Vec<usize> {
+    if num_rows <= max_display_rows {
+        return (0..num_rows).collect();
+    }
+    let head = max_display_rows / 2;
+    let tail = max_display_rows - head;
+    (0..head).chain((num_rows - tail)..num_rows).collect()
+}
+
+fn truncate_display_value(value: &str, max_width: usize) -> String {
+    if value.chars().count() <= max_width {
+        return value.to_string();
+    }
+    let keep = max_width.saturating_sub(1);
+    let prefix: String = value.chars().take(keep).collect();
+    format!("{prefix}…")
+}
+
+fn should_right_align_display(logical_type: &LogicalType) -> bool {
+    matches!(
+        logical_type.id,
+        LogicalTypeId::Boolean
+            | LogicalTypeId::TinyInt
+            | LogicalTypeId::UTinyInt
+            | LogicalTypeId::SmallInt
+            | LogicalTypeId::USmallInt
+            | LogicalTypeId::Integer
+            | LogicalTypeId::UInteger
+            | LogicalTypeId::BigInt
+            | LogicalTypeId::UBigInt
+            | LogicalTypeId::Float
+            | LogicalTypeId::Double
+            | LogicalTypeId::Decimal
+    )
 }
 
 /// `DataChunk` 的便捷构造器。
@@ -2033,6 +2126,34 @@ mod tests {
         assert!(pretty.contains("10"));
         assert!(pretty.contains("12"));
         assert!(pretty.contains("14"));
+    }
+
+    #[test]
+    fn data_chunk_to_pretty_string_formats_decimal_and_date() {
+        let types = vec![LogicalType::decimal(18, 2), LogicalType::date()];
+        let mut builder = DataChunkBuilder::new(&types, 1);
+        builder.set_i32(1, 0, 9568).unwrap();
+        let mut chunk = builder.finish();
+        chunk.data[0].raw_data_mut()[..8].copy_from_slice(&12345i64.to_le_bytes());
+
+        let pretty = chunk.to_pretty_string();
+        assert!(pretty.contains("123.45"));
+        assert!(pretty.contains("1996-03-13"));
+    }
+
+    #[test]
+    fn data_chunk_to_pretty_string_omits_middle_rows_for_large_chunks() {
+        let types = vec![LogicalType::integer()];
+        let mut builder = DataChunkBuilder::new(&types, 16);
+        for row in 0..16 {
+            builder.set_i32(0, row, row as i32).unwrap();
+        }
+        let chunk = builder.finish();
+
+        let pretty = chunk.to_pretty_string();
+        assert!(pretty.contains("... 4 rows omitted in this chunk ..."));
+        assert!(pretty.contains("|          0 |"));
+        assert!(pretty.contains("|         15 |"));
     }
 
     #[test]

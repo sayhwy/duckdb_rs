@@ -4,11 +4,10 @@ use std::sync::Arc;
 use super::engine::{EngineError, SchemaInfo, SchemaTableInfo, TableScanBindData, TableScanRequest};
 use crate::common::errors::{Result, anyhow};
 use crate::common::types::{DataChunk, LogicalType};
-use crate::db::conn::{Connection, DatabaseInstance, TableHandle};
+use crate::db::conn::{ClientContext, Connection, DatabaseInstance, TableHandle};
 use crate::storage::data_table::StorageIndex;
 use crate::storage::table::scan_state::{ParallelCollectionScanState, ParallelTableScanState, TableScanState};
 use crate::storage::table::segment_base::SegmentBase;
-use crate::transaction::duck_transaction_manager::DuckTxnHandle;
 use parking_lot::Mutex;
 
 // ─── DuckdbEngine ──────────────────────────────────────────────────────────────
@@ -106,13 +105,11 @@ impl DuckConnection {
             })
             .collect();
 
-        let txn = self.conn.acquire_read_transaction();
-        let storage_context = Connection::build_storage_context(&txn);
+        let _txn = self.conn.acquire_read_transaction();
 
         Ok(ResolvedScan {
             table,
-            txn,
-            storage_context,
+            storage_context: Arc::clone(&self.conn.context),
             bind_data: TableScanBindData {
                 request,
                 result_types,
@@ -176,7 +173,7 @@ impl DuckConnection {
         request: TableScanRequest,
     ) -> Result<DuckTableScanState, EngineError> {
         let resolved = self.resolve_scan(table_name, request)?;
-        let max_threads = resolved.table.storage.max_threads(&resolved.storage_context) as usize;
+        let max_threads = resolved.table.storage.max_threads(resolved.storage_context.as_ref()) as usize;
         let mut parallel_state = ParallelTableScanState {
             scan_state: ParallelCollectionScanState {
                 row_groups: None,
@@ -200,14 +197,13 @@ impl DuckConnection {
             },
         };
         resolved.table.storage.initialize_parallel_scan(
-            &resolved.storage_context,
+            resolved.storage_context.as_ref(),
             &mut parallel_state,
             &[],
         );
 
         Ok(DuckTableScanState {
             table: resolved.table,
-            txn: resolved.txn,
             storage_context: resolved.storage_context,
             bind_data: resolved.bind_data,
             parallel_state: Mutex::new(parallel_state),
@@ -308,16 +304,14 @@ impl DuckConnection {
 
 struct ResolvedScan {
     table: TableHandle,
-    txn: Arc<DuckTxnHandle>,
-    storage_context: crate::storage::data_table::ClientContext,
+    storage_context: Arc<ClientContext>,
     bind_data: TableScanBindData,
 }
 
 /// 对齐 DuckDB 的 `class DuckTableScanState`。
 pub struct DuckTableScanState {
     table: TableHandle,
-    txn: Arc<DuckTxnHandle>,
-    storage_context: crate::storage::data_table::ClientContext,
+    storage_context: Arc<ClientContext>,
     bind_data: TableScanBindData,
     parallel_state: Mutex<ParallelTableScanState>,
     max_threads: usize,
@@ -354,7 +348,7 @@ impl DuckTableScanState {
 
         let mut parallel_state = self.parallel_state.lock();
         local_state.rows_in_current_row_group = self.table.storage.next_parallel_scan(
-            &self.storage_context,
+            self.storage_context.as_ref(),
             &mut parallel_state,
             &mut local_state.scan_state,
         );
@@ -372,10 +366,9 @@ impl DuckTableScanState {
                 return Ok(false);
             }
 
-            let txn_guard = self.txn.lock_inner();
             self.table
                 .storage
-                .scan(&*txn_guard, result, &mut local_state.scan_state);
+                .scan(self.storage_context.as_ref(), result, &mut local_state.scan_state);
             if result.size() > 0 {
                 return Ok(true);
             }
@@ -383,7 +376,7 @@ impl DuckTableScanState {
             local_state.rows_scanned += local_state.rows_in_current_row_group;
             let mut parallel_state = self.parallel_state.lock();
             local_state.rows_in_current_row_group = self.table.storage.next_parallel_scan(
-                &self.storage_context,
+                self.storage_context.as_ref(),
                 &mut parallel_state,
                 &mut local_state.scan_state,
             );

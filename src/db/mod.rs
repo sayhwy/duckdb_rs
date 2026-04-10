@@ -14,6 +14,8 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
+use chrono::{Duration, NaiveDate};
+
 use crate::catalog::{
     ColumnDefinition as CatalogColumnDefinition, ColumnList, CreateTableInfo,
     LogicalType as CatalogLogicalType, TableCatalogEntry,
@@ -260,7 +262,7 @@ impl DatabaseInstance {
         let conn = self.connect();
         let txn = conn
             .get_transaction()
-            .unwrap_or_else(|| conn.context.lock().transaction.get_or_create_transaction());
+            .unwrap_or_else(|| conn.context.transaction.get_or_create_transaction());
 
         {
             let txn_guard = txn.lock_inner();
@@ -282,10 +284,7 @@ impl DatabaseInstance {
         loop {
             let mut chunk = DataChunk::new();
             chunk.initialize(&result_types, STANDARD_VECTOR_SIZE);
-            {
-                let txn_guard = txn.lock_inner();
-                table.storage.scan(&*txn_guard, &mut chunk, &mut state);
-            }
+            table.storage.scan(conn.context.as_ref(), &mut chunk, &mut state);
 
             if chunk.size() == 0 {
                 break;
@@ -319,46 +318,50 @@ impl DatabaseInstance {
             return;
         }
 
-        // 计算每列宽度
-        let mut col_widths: Vec<usize> = column_names.iter().map(|n| n.len()).collect();
+        const MAX_DISPLAY_ROWS: usize = 12;
+        const MAX_COLUMN_WIDTH: usize = 40;
 
-        // 收集所有行的值并计算最大宽度
-        let mut row_values: Vec<Vec<String>> = Vec::with_capacity(num_rows);
-        for row_idx in 0..num_rows {
+        let display_rows = Self::display_row_indexes(num_rows, MAX_DISPLAY_ROWS);
+        let mut col_widths: Vec<usize> = column_names.iter().map(|n| n.chars().count()).collect();
+        let align_right: Vec<bool> = column_types
+            .iter()
+            .map(Self::should_right_align)
+            .collect();
+
+        let mut row_values: Vec<Vec<String>> = Vec::with_capacity(display_rows.len());
+        for row_idx in display_rows {
             let mut row = Vec::with_capacity(column_names.len());
             for (col_idx, _) in column_names.iter().enumerate() {
-                let value_str =
-                    Self::extract_value_string(chunk, col_idx, row_idx, &column_types[col_idx]);
-                col_widths[col_idx] = col_widths[col_idx].max(value_str.len());
+                let value_str = Self::format_display_cell(
+                    &Self::extract_value_string(chunk, col_idx, row_idx, &column_types[col_idx]),
+                    MAX_COLUMN_WIDTH,
+                );
+                col_widths[col_idx] = col_widths[col_idx].max(value_str.chars().count());
                 row.push(value_str);
             }
             row_values.push(row);
         }
 
-        // 确保最小宽度为 3
         for w in &mut col_widths {
-            *w = (*w).max(3);
+            *w = (*w).clamp(3, MAX_COLUMN_WIDTH);
         }
 
-        // 打印分隔线
         Self::print_separator(&col_widths);
-
-        // 打印表头
         Self::print_row(
             &column_names.iter().cloned().collect::<Vec<_>>(),
             &col_widths,
+            &vec![false; column_names.len()],
         );
-
-        // 打印分隔线
         Self::print_separator(&col_widths);
-
-        // 打印数据行
         for row in &row_values {
-            Self::print_row(row, &col_widths);
+            Self::print_row(row, &col_widths, &align_right);
         }
-
-        // 打印底部分隔线
         Self::print_separator(&col_widths);
+
+        if num_rows > MAX_DISPLAY_ROWS {
+            let omitted = num_rows - MAX_DISPLAY_ROWS;
+            println!("... {} rows omitted in this chunk ...", omitted);
+        }
     }
 
     /// 从 DataChunk 中提取单个值的字符串表示
@@ -374,6 +377,7 @@ impl DatabaseInstance {
         }
 
         let raw = chunk.data[col_idx].raw_data();
+        let vector = &chunk.data[col_idx];
 
         match col_type.id {
             crate::common::types::LogicalTypeId::Boolean => {
@@ -433,6 +437,55 @@ impl DatabaseInstance {
                     "NULL".to_string()
                 }
             }
+            crate::common::types::LogicalTypeId::UTinyInt => {
+                let offset = row_idx;
+                if offset < raw.len() {
+                    format!("{}", raw[offset])
+                } else {
+                    "NULL".to_string()
+                }
+            }
+            crate::common::types::LogicalTypeId::USmallInt => {
+                let offset = row_idx * 2;
+                if offset + 1 < raw.len() {
+                    let val = u16::from_le_bytes([raw[offset], raw[offset + 1]]);
+                    format!("{}", val)
+                } else {
+                    "NULL".to_string()
+                }
+            }
+            crate::common::types::LogicalTypeId::UInteger => {
+                let offset = row_idx * 4;
+                if offset + 3 < raw.len() {
+                    let val = u32::from_le_bytes([
+                        raw[offset],
+                        raw[offset + 1],
+                        raw[offset + 2],
+                        raw[offset + 3],
+                    ]);
+                    format!("{}", val)
+                } else {
+                    "NULL".to_string()
+                }
+            }
+            crate::common::types::LogicalTypeId::UBigInt => {
+                let offset = row_idx * 8;
+                if offset + 7 < raw.len() {
+                    let val = u64::from_le_bytes([
+                        raw[offset],
+                        raw[offset + 1],
+                        raw[offset + 2],
+                        raw[offset + 3],
+                        raw[offset + 4],
+                        raw[offset + 5],
+                        raw[offset + 6],
+                        raw[offset + 7],
+                    ]);
+                    format!("{}", val)
+                } else {
+                    "NULL".to_string()
+                }
+            }
             crate::common::types::LogicalTypeId::Decimal => {
                 Self::extract_decimal_string(raw, row_idx, col_type)
             }
@@ -468,9 +521,14 @@ impl DatabaseInstance {
                     "NULL".to_string()
                 }
             }
+            crate::common::types::LogicalTypeId::Date => {
+                Self::extract_date_string(raw, row_idx)
+            }
             crate::common::types::LogicalTypeId::Varchar => {
-                // VARCHAR 在 flat vector 中存储为 string_t 指针，暂不支持直接读取
-                "<varchar>".to_string()
+                String::from_utf8_lossy(&vector.read_varchar_bytes(row_idx)).into_owned()
+            }
+            crate::common::types::LogicalTypeId::Blob => {
+                format!("<blob:{} bytes>", vector.read_varchar_bytes(row_idx).len())
             }
             _ => {
                 format!("<{:?}>", col_type.id)
@@ -544,6 +602,60 @@ impl DatabaseInstance {
         format_decimal_scaled(scaled, col_type.scale)
     }
 
+    fn extract_date_string(raw: &[u8], row_idx: usize) -> String {
+        let offset = row_idx * 4;
+        if offset + 3 >= raw.len() {
+            return "NULL".to_string();
+        }
+        let days = i32::from_le_bytes([
+            raw[offset],
+            raw[offset + 1],
+            raw[offset + 2],
+            raw[offset + 3],
+        ]);
+        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid unix epoch date");
+        (epoch + Duration::days(days as i64)).format("%Y-%m-%d").to_string()
+    }
+
+    fn display_row_indexes(num_rows: usize, max_display_rows: usize) -> Vec<usize> {
+        if num_rows <= max_display_rows {
+            return (0..num_rows).collect();
+        }
+        let head = max_display_rows / 2;
+        let tail = max_display_rows - head;
+        (0..head)
+            .chain((num_rows - tail)..num_rows)
+            .collect()
+    }
+
+    fn format_display_cell(value: &str, max_width: usize) -> String {
+        let char_count = value.chars().count();
+        if char_count <= max_width {
+            return value.to_string();
+        }
+        let keep = max_width.saturating_sub(1);
+        let truncated: String = value.chars().take(keep).collect();
+        format!("{truncated}…")
+    }
+
+    fn should_right_align(logical_type: &LogicalType) -> bool {
+        matches!(
+            logical_type.id,
+            crate::common::types::LogicalTypeId::Boolean
+                | crate::common::types::LogicalTypeId::TinyInt
+                | crate::common::types::LogicalTypeId::UTinyInt
+                | crate::common::types::LogicalTypeId::SmallInt
+                | crate::common::types::LogicalTypeId::USmallInt
+                | crate::common::types::LogicalTypeId::Integer
+                | crate::common::types::LogicalTypeId::UInteger
+                | crate::common::types::LogicalTypeId::BigInt
+                | crate::common::types::LogicalTypeId::UBigInt
+                | crate::common::types::LogicalTypeId::Float
+                | crate::common::types::LogicalTypeId::Double
+                | crate::common::types::LogicalTypeId::Decimal
+        )
+    }
+
     fn print_separator(col_widths: &[usize]) {
         print!("+");
         for width in col_widths {
@@ -553,10 +665,14 @@ impl DatabaseInstance {
         println!();
     }
 
-    fn print_row(values: &[String], col_widths: &[usize]) {
+    fn print_row(values: &[String], col_widths: &[usize], align_right: &[bool]) {
         print!("|");
-        for (value, width) in values.iter().zip(col_widths.iter()) {
-            print!(" {:width$} |", value, width = width);
+        for ((value, width), right_align) in values.iter().zip(col_widths.iter()).zip(align_right.iter()) {
+            if *right_align {
+                print!(" {:>width$} |", value, width = width);
+            } else {
+                print!(" {:width$} |", value, width = width);
+            }
         }
         println!();
     }
@@ -597,7 +713,7 @@ impl DatabaseInstance {
         let conn = self.connect();
         let txn = conn
             .get_transaction()
-            .unwrap_or_else(|| conn.context.lock().transaction.get_or_create_transaction());
+            .unwrap_or_else(|| conn.context.transaction.get_or_create_transaction());
 
         {
             let txn_guard = txn.lock_inner();
@@ -612,10 +728,7 @@ impl DatabaseInstance {
         loop {
             let mut chunk = DataChunk::new();
             chunk.initialize(&result_types, STANDARD_VECTOR_SIZE);
-            {
-                let txn_guard = txn.lock_inner();
-                table.storage.scan(&*txn_guard, &mut chunk, &mut state);
-            }
+            table.storage.scan(conn.context.as_ref(), &mut chunk, &mut state);
             if chunk.size() == 0 {
                 break;
             }
