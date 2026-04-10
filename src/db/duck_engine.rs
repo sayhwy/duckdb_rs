@@ -5,6 +5,7 @@ use super::engine::{EngineError, SchemaInfo, SchemaTableInfo, TableScanBindData,
 use crate::common::errors::{Result, anyhow};
 use crate::common::types::{DataChunk, LogicalType};
 use crate::db::conn::{ClientContext, Connection, DatabaseInstance, TableHandle};
+use crate::planner::TableFilterSet;
 use crate::storage::data_table::StorageIndex;
 use crate::storage::table::scan_state::{ParallelCollectionScanState, ParallelTableScanState, TableScanState};
 use crate::storage::table::segment_base::SegmentBase;
@@ -89,13 +90,44 @@ impl DuckConnection {
         mut request: TableScanRequest,
     ) -> Result<ResolvedScan, EngineError> {
         let table = self.conn.get_table(table_name)?;
-        if request.column_ids.is_empty() {
-            request.column_ids = (0..table.storage.column_count())
+        let requested_column_ids = if request.column_ids.is_empty() {
+            (0..table.storage.column_count())
                 .map(|idx| StorageIndex(idx as u64))
-                .collect();
+                .collect()
+        } else {
+            request.column_ids.clone()
+        };
+
+        let mut scan_column_ids = requested_column_ids.clone();
+        let projection_ids: Vec<usize> = (0..requested_column_ids.len()).collect();
+
+        let mut filters = request.filters.take().unwrap_or_default();
+        if !request.table_column_filters.is_empty() {
+            for entry in &request.table_column_filters {
+                let scan_idx = match scan_column_ids.iter().position(|col| *col == entry.column_id) {
+                    Some(idx) => idx,
+                    None => {
+                        scan_column_ids.push(entry.column_id);
+                        scan_column_ids.len() - 1
+                    }
+                };
+                filters.push_filter(scan_idx, entry.filter.copy());
+            }
         }
+        request.column_ids = scan_column_ids.clone();
+        request.filters = filters.has_filters().then_some(filters);
 
         let result_types: Vec<LogicalType> = request
+            .column_ids
+            .iter()
+            .take(requested_column_ids.len())
+            .map(|idx| {
+                table.storage.column_definitions[idx.0 as usize]
+                    .logical_type
+                    .clone()
+            })
+            .collect();
+        let scanned_types: Vec<LogicalType> = request
             .column_ids
             .iter()
             .map(|idx| {
@@ -113,6 +145,8 @@ impl DuckConnection {
             bind_data: TableScanBindData {
                 request,
                 result_types,
+                scanned_types,
+                projection_ids,
             },
         })
     }
@@ -336,15 +370,26 @@ impl DuckTableScanState {
             scan_state: TableScanState::new(),
             rows_scanned: 0,
             rows_in_current_row_group: 0,
+            all_columns: None,
         };
-        local_state.scan_state.initialize(
+        local_state.scan_state.initialize_with_context(
             self.bind_data
                 .request
                 .column_ids
                 .iter()
                 .map(|idx| idx.0)
                 .collect(),
+            self.storage_context.as_ref(),
+            self.bind_data.request.filters.as_ref(),
         );
+        if self.bind_data.projection_ids.len() != self.bind_data.request.column_ids.len() {
+            let mut all_columns = DataChunk::new();
+            all_columns.initialize(
+                &self.bind_data.scanned_types,
+                crate::common::types::STANDARD_VECTOR_SIZE,
+            );
+            local_state.all_columns = Some(all_columns);
+        }
 
         let mut parallel_state = self.parallel_state.lock();
         local_state.rows_in_current_row_group = self.table.storage.next_parallel_scan(
@@ -366,11 +411,24 @@ impl DuckTableScanState {
                 return Ok(false);
             }
 
-            self.table
-                .storage
-                .scan(self.storage_context.as_ref(), result, &mut local_state.scan_state);
-            if result.size() > 0 {
-                return Ok(true);
+            if let Some(all_columns) = local_state.all_columns.as_mut() {
+                all_columns.reset();
+                self.table.storage.scan(
+                    self.storage_context.as_ref(),
+                    all_columns,
+                    &mut local_state.scan_state,
+                );
+                if all_columns.size() > 0 {
+                    result.reference_columns(all_columns, &self.bind_data.projection_ids);
+                    return Ok(true);
+                }
+            } else {
+                self.table
+                    .storage
+                    .scan(self.storage_context.as_ref(), result, &mut local_state.scan_state);
+                if result.size() > 0 {
+                    return Ok(true);
+                }
             }
 
             local_state.rows_scanned += local_state.rows_in_current_row_group;
@@ -392,4 +450,5 @@ pub struct TableScanLocalState {
     pub scan_state: TableScanState,
     pub rows_scanned: usize,
     pub rows_in_current_row_group: usize,
+    pub all_columns: Option<DataChunk>,
 }

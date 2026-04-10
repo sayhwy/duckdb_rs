@@ -638,6 +638,10 @@ impl Vector {
         self.child.as_deref_mut()
     }
 
+    pub fn set_child(&mut self, child: Vector) {
+        self.child = Some(Box::new(child));
+    }
+
     /// Raw byte access to the data buffer (e.g. for reading `list_entry_t`).
     pub fn raw_data(&self) -> &[u8] {
         &self.data
@@ -673,7 +677,10 @@ impl Vector {
             logical_type: self.logical_type.clone(),
             data: self.data.clone(),
             validity: self.validity.clone(),
-            child: None,
+            child: self
+                .child
+                .as_ref()
+                .map(|child| Box::new((**child).shallow_clone())),
             sel: self.sel.clone(),
             seq_start: self.seq_start,
             seq_increment: self.seq_increment,
@@ -736,7 +743,13 @@ impl Vector {
 
     pub fn read_varchar_bytes(&self, row: usize) -> Vec<u8> {
         debug_assert_eq!(self.logical_type.id, LogicalTypeId::Varchar);
-        let offset = row * 16;
+        if self.vector_type == VectorType::Dictionary {
+            if let Some(child) = self.child.as_ref() {
+                return child.read_varchar_bytes(self.resolved_row_index(row));
+            }
+            return Vec::new();
+        }
+        let offset = self.resolved_row_index(row) * 16;
         let len = u32::from_le_bytes(self.data[offset..offset + 4].try_into().unwrap()) as usize;
         if len <= 12 {
             self.data[offset + 4..offset + 4 + len].to_vec()
@@ -986,7 +999,7 @@ impl Vector {
             + self.string_aux.iter().map(|v| v.len()).sum::<usize>()
     }
 
-    fn resolved_row_index(&self, row: usize) -> usize {
+    pub fn resolved_row_index(&self, row: usize) -> usize {
         match self.vector_type {
             VectorType::Constant => 0,
             VectorType::Dictionary => self
@@ -998,16 +1011,20 @@ impl Vector {
         }
     }
 
-    fn row_is_valid_for_display(&self, row: usize) -> bool {
+    pub fn row_is_valid(&self, row: usize) -> bool {
         match self.vector_type {
             VectorType::Dictionary => self
                 .child
                 .as_ref()
-                .map(|child| child.row_is_valid_for_display(self.resolved_row_index(row)))
+                .map(|child| child.row_is_valid(self.resolved_row_index(row)))
                 .unwrap_or(true),
             VectorType::Sequence => true,
             _ => self.validity.row_is_valid(self.resolved_row_index(row)),
         }
+    }
+
+    fn row_is_valid_for_display(&self, row: usize) -> bool {
+        self.row_is_valid(row)
     }
 
     fn format_value_at(&self, row: usize) -> String {

@@ -7,19 +7,19 @@
 //! | C++ | Rust |
 //! |-----|------|
 //! | `class ColumnData` (virtual base) | `ColumnDataBase` + `ColumnData` struct |
-//! | `class StandardColumnData : public ColumnData` | `ColumnKindData::Standard` variant |
-//! | `class ValidityColumnData : public ColumnData` | `ColumnKindData::Validity` variant |
-//! | `class ListColumnData : public ColumnData` | `ColumnKindData::List` variant |
-//! | `class ArrayColumnData : public ColumnData` | `ColumnKindData::Array` variant |
-//! | `class StructColumnData : public ColumnData` | `ColumnKindData::Struct` variant |
-//! | `class VariantColumnData : public ColumnData` | `ColumnKindData::Variant` variant |
+//! | `class StandardColumnData : public ColumnData` | `ColumnKindData::Standard(StandardColumnData)` |
+//! | `class ValidityColumnData : public ColumnData` | `ColumnKindData::Validity(ValidityColumnData)` |
+//! | `class ListColumnData : public ColumnData` | `ColumnKindData::List(ListColumnData)` |
+//! | `class ArrayColumnData : public ColumnData` | `ColumnKindData::Array(ArrayColumnData)` |
+//! | `class StructColumnData : public ColumnData` | `ColumnKindData::Struct(StructColumnData)` |
+//! | `class VariantColumnData : public ColumnData` | `ColumnKindData::Variant(VariantColumnData)` |
 //! | `PersistentColumnData` | `PersistentColumnData` |
 //! | `PersistentRowGroupData` | `PersistentRowGroupData` |
 //! | `PersistentCollectionData` | `PersistentCollectionData` |
 //!
-//! The auxiliary per-variant structs (`StandardColumnData`, `ValidityColumnData`,
-//! etc.) in their own files still exist for compatibility; they wrap
-//! `ColumnDataBase` but are separate from the `ColumnData` enum-like wrapper.
+//! The migration target remains the DuckDB class split. The Rust code is still
+//! mid-transition, but `Standard`/`Validity` behavior is now carried by their
+//! named structs rather than anonymous enum fields.
 
 use std::sync::{
     Arc,
@@ -36,16 +36,24 @@ use super::column_segment::{
 };
 use super::column_segment_tree::ColumnSegmentTree;
 use super::data_table_info::DataTableInfo;
+use super::list_column_data::ListColumnData;
 use super::scan_state::ColumnScanState;
 use super::segment_base::SegmentBase;
+use super::standard_column_data::StandardColumnData;
+use super::struct_column_data::StructColumnData;
 use super::table_statistics::TableStatistics;
 use super::types::{
     CompressionType, DataPointer, Idx, LogicalType, PhysicalType, STANDARD_VECTOR_SIZE,
     TransactionData,
 };
 use super::update_segment::UpdateSegment;
+use super::validity_column_data::ValidityColumnData;
+use super::variant_column_data::VariantColumnData;
+use super::array_column_data::ArrayColumnData;
 use crate::common::serializer::BinarySerializer;
-use crate::common::types::{LogicalTypeId, Vector};
+use crate::common::types::{LogicalTypeId, SelectionVector, Vector};
+use crate::planner::{TableFilter, TableFilterState, TableFilterType};
+use crate::storage::statistics::FilterPropagateResult;
 use crate::storage::buffer::BlockManager;
 use crate::storage::serialization as storage_serialization;
 
@@ -85,16 +93,6 @@ pub enum ScanVectorMode {
     ScanCommitted,
     /// Committed data only; uncommitted updates are forbidden.
     ScanCommittedNoUpdates,
-}
-
-/// Result of evaluating a zone-map filter against a column segment.
-///
-/// Mirrors `enum class FilterPropagateResult`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FilterPropagateResult {
-    NoPruningPossible,
-    FilterAlwaysTrue,
-    FilterAlwaysFalse,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -517,8 +515,8 @@ impl ColumnDataBase {
     /// Mirrors `ColumnData::Skip(ColumnScanState&, idx_t)` which calls
     /// `state.Next(count)`.  In Rust we also update `current_segment_index`
     /// when the skip crosses a segment boundary.
-    pub fn skip(&self, state: &mut ColumnScanState) {
-        state.offset_in_column += STANDARD_VECTOR_SIZE;
+    pub fn skip_n(&self, state: &mut ColumnScanState, count: Idx) {
+        state.offset_in_column += count;
         state.internal_index = state.offset_in_column;
 
         // If we've advanced past the current segment, find the new one.
@@ -549,6 +547,10 @@ impl ColumnDataBase {
             // by initialize_scan() when the next scan starts.
             state.pinned_buffer = None;
         }
+    }
+
+    pub fn skip(&self, state: &mut ColumnScanState) {
+        self.skip_n(state, STANDARD_VECTOR_SIZE);
     }
 
     // ── Append ────────────────────────────────────────────────────────────────
@@ -831,42 +833,17 @@ impl ColumnDataBase {
 /// Mirrors the per-subclass fields in C++.
 pub enum ColumnKindData {
     /// Flat scalar column (`INTEGER`, `FLOAT`, `VARCHAR`, …).
-    Standard {
-        /// NULL bitmask child; absent for `NOT NULL` columns.
-        validity: Option<Arc<ColumnData>>,
-    },
+    Standard(StandardColumnData),
     /// NULL bitmask column (always a child of another column).
-    Validity,
+    Validity(ValidityColumnData),
     /// Variable-length list column (`LIST(T)`).
-    List {
-        /// Offset + element data child.
-        child_column: Arc<ColumnData>,
-        /// Top-level null bitmask.
-        validity: Arc<ColumnData>,
-    },
+    List(ListColumnData),
     /// Fixed-length array column (`ARRAY(T, N)`).
-    Array {
-        /// Flat element data (length = `row_count * array_size`).
-        child_column: Arc<ColumnData>,
-        /// Top-level null bitmask.
-        validity: Arc<ColumnData>,
-        /// Fixed element count per row (the `N` in `ARRAY(T, N)`).
-        array_size: u32,
-    },
+    Array(ArrayColumnData),
     /// Nested struct column (`STRUCT(a T1, b T2, …)`).
-    Struct {
-        /// One sub-column per field, in schema order.
-        sub_columns: Vec<Arc<ColumnData>>,
-        /// Top-level null bitmask.
-        validity: Arc<ColumnData>,
-    },
+    Struct(StructColumnData),
     /// JSON / Variant semi-structured column.
-    Variant {
-        /// Sub-columns: `[unshredded]` or `[unshredded, shredded]`.
-        sub_columns: Vec<Arc<ColumnData>>,
-        /// Top-level null bitmask (optional).
-        validity: Option<Arc<ColumnData>>,
-    },
+    Variant(VariantColumnData),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -902,9 +879,7 @@ impl ColumnData {
 
         Arc::new(ColumnData {
             base: ColumnDataBase::new(info, column_index, logical_type, data_type, has_parent),
-            kind: ColumnKindData::Standard {
-                validity: Some(validity),
-            },
+            kind: ColumnKindData::Standard(StandardColumnData::with_validity(validity)),
         })
     }
 
@@ -922,7 +897,7 @@ impl ColumnData {
                 data_type,
                 true, // validity columns always have a parent
             ),
-            kind: ColumnKindData::Validity,
+            kind: ColumnKindData::Validity(ValidityColumnData::new()),
         })
     }
 
@@ -936,9 +911,46 @@ impl ColumnData {
         data_type: ColumnDataType,
         has_parent: bool,
     ) -> Arc<Self> {
-        // TODO: dispatch to Variant / Struct / List / Array / Validity based on
-        // logical_type.id and InternalType.
-        Self::standard(info, column_index, logical_type, data_type, has_parent)
+        match logical_type.id {
+            LogicalTypeId::Validity => Arc::new(ColumnData {
+                base: ColumnDataBase::new(info, column_index, logical_type, data_type, has_parent),
+                kind: ColumnKindData::Validity(ValidityColumnData::new()),
+            }),
+            LogicalTypeId::List => Arc::new(ColumnData {
+                base: ColumnDataBase::new(
+                    Arc::clone(&info),
+                    column_index,
+                    logical_type.clone(),
+                    data_type,
+                    has_parent,
+                ),
+                kind: ColumnKindData::List(ListColumnData::create(info, &logical_type, data_type)),
+            }),
+            LogicalTypeId::Array => Arc::new(ColumnData {
+                base: ColumnDataBase::new(
+                    Arc::clone(&info),
+                    column_index,
+                    logical_type.clone(),
+                    data_type,
+                    has_parent,
+                ),
+                kind: ColumnKindData::Array(ArrayColumnData::create(info, &logical_type, data_type)),
+            }),
+            LogicalTypeId::Struct => Arc::new(ColumnData {
+                base: ColumnDataBase::new(
+                    Arc::clone(&info),
+                    column_index,
+                    logical_type.clone(),
+                    data_type,
+                    has_parent,
+                ),
+                kind: ColumnKindData::Struct(StructColumnData::create(info, &logical_type, data_type)),
+            }),
+            LogicalTypeId::Variant => {
+                unimplemented!("VariantColumnData::Create is not implemented yet")
+            }
+            _ => Self::standard(info, column_index, logical_type, data_type, has_parent),
+        }
     }
 
     // ── Context delegation ────────────────────────────────────────────────────
@@ -1005,12 +1017,28 @@ impl ColumnData {
 
     /// Set up `state` for a forward scan from row 0.
     pub fn initialize_scan(&self, state: &mut ColumnScanState) {
-        self.base.initialize_scan(state);
+        match &self.kind {
+            ColumnKindData::Standard(standard) => standard.initialize_scan(&self.base, state),
+            ColumnKindData::List(list) => list.initialize_scan(&self.base, state),
+            ColumnKindData::Array(array) => array.initialize_scan(state),
+            ColumnKindData::Struct(struct_data) => struct_data.initialize_scan(state),
+            _ => self.base.initialize_scan(state),
+        }
     }
 
     /// Set up `state` for a forward scan from `row_idx`.
     pub fn initialize_scan_with_offset(&self, state: &mut ColumnScanState, row_idx: Idx) {
-        self.base.initialize_scan_with_offset(state, row_idx);
+        match &self.kind {
+            ColumnKindData::Standard(standard) => {
+                standard.initialize_scan_with_offset(&self.base, state, row_idx)
+            }
+            ColumnKindData::List(list) => list.initialize_scan_with_offset(&self.base, state, row_idx),
+            ColumnKindData::Array(array) => array.initialize_scan_with_offset(state, row_idx),
+            ColumnKindData::Struct(struct_data) => {
+                struct_data.initialize_scan_with_offset(state, row_idx)
+            }
+            _ => self.base.initialize_scan_with_offset(state, row_idx),
+        }
     }
 
     /// Number of rows to scan for the given vector-index window.
@@ -1026,67 +1054,19 @@ impl ColumnData {
     pub fn initialize_append(&self, state: &mut ColumnAppendState) {
         self.base.initialize_append(state);
         match &self.kind {
-            ColumnKindData::Standard { validity } => {
-                if let Some(v) = validity {
+            ColumnKindData::Standard(standard) => {
+                if let Some(v) = &standard.validity {
                     if state.child_appends.is_empty() {
                         state.child_appends.push(ColumnAppendState::default());
                     }
                     v.initialize_append(&mut state.child_appends[0]);
                 }
             }
-            ColumnKindData::List {
-                child_column,
-                validity,
-            } => {
-                while state.child_appends.len() < 2 {
-                    state.child_appends.push(ColumnAppendState::default());
-                }
-                validity.initialize_append(&mut state.child_appends[0]);
-                child_column.initialize_append(&mut state.child_appends[1]);
-            }
-            ColumnKindData::Array {
-                child_column,
-                validity,
-                ..
-            } => {
-                while state.child_appends.len() < 2 {
-                    state.child_appends.push(ColumnAppendState::default());
-                }
-                validity.initialize_append(&mut state.child_appends[0]);
-                child_column.initialize_append(&mut state.child_appends[1]);
-            }
-            ColumnKindData::Struct {
-                sub_columns,
-                validity,
-            } => {
-                let n = sub_columns.len() + 1;
-                while state.child_appends.len() < n {
-                    state.child_appends.push(ColumnAppendState::default());
-                }
-                validity.initialize_append(&mut state.child_appends[0]);
-                for (i, col) in sub_columns.iter().enumerate() {
-                    col.initialize_append(&mut state.child_appends[i + 1]);
-                }
-            }
-            ColumnKindData::Variant {
-                sub_columns,
-                validity,
-            } => {
-                let n = sub_columns.len() + validity.is_some() as usize;
-                while state.child_appends.len() < n {
-                    state.child_appends.push(ColumnAppendState::default());
-                }
-                let mut idx = 0;
-                if let Some(v) = validity {
-                    v.initialize_append(&mut state.child_appends[idx]);
-                    idx += 1;
-                }
-                for col in sub_columns {
-                    col.initialize_append(&mut state.child_appends[idx]);
-                    idx += 1;
-                }
-            }
-            ColumnKindData::Validity => {}
+            ColumnKindData::List(list) => list.initialize_append(state),
+            ColumnKindData::Array(array) => array.initialize_append(state),
+            ColumnKindData::Struct(struct_data) => struct_data.initialize_append(state),
+            ColumnKindData::Variant(variant) => variant.initialize_append(state),
+            ColumnKindData::Validity(_) => {}
         }
     }
 
@@ -1109,8 +1089,8 @@ impl ColumnData {
 
         // Append to child columns (validity, etc.)
         match &self.kind {
-            ColumnKindData::Standard { validity } => {
-                if let Some(v) = validity {
+            ColumnKindData::Standard(standard) => {
+                if let Some(v) = &standard.validity {
                     if !state.child_appends.is_empty() {
                         v.append(
                             append_stats,
@@ -1121,18 +1101,15 @@ impl ColumnData {
                     }
                 }
             }
-            ColumnKindData::List {
-                child_column,
-                validity,
-            } => {
+            ColumnKindData::List(list) => {
                 if state.child_appends.len() >= 2 {
-                    validity.append(
+                    list.validity.append(
                         append_stats,
                         &mut state.child_appends[0],
                         vdata,
                         append_count,
                     );
-                    child_column.append(
+                    list.child_column.append(
                         append_stats,
                         &mut state.child_appends[1],
                         vdata,
@@ -1140,19 +1117,15 @@ impl ColumnData {
                     );
                 }
             }
-            ColumnKindData::Array {
-                child_column,
-                validity,
-                ..
-            } => {
+            ColumnKindData::Array(array) => {
                 if state.child_appends.len() >= 2 {
-                    validity.append(
+                    array.validity.append(
                         append_stats,
                         &mut state.child_appends[0],
                         vdata,
                         append_count,
                     );
-                    child_column.append(
+                    array.child_column.append(
                         append_stats,
                         &mut state.child_appends[1],
                         vdata,
@@ -1160,18 +1133,15 @@ impl ColumnData {
                     );
                 }
             }
-            ColumnKindData::Struct {
-                sub_columns,
-                validity,
-            } => {
+            ColumnKindData::Struct(struct_data) => {
                 if !state.child_appends.is_empty() {
-                    validity.append(
+                    struct_data.validity.append(
                         append_stats,
                         &mut state.child_appends[0],
                         vdata,
                         append_count,
                     );
-                    for (i, col) in sub_columns.iter().enumerate() {
+                    for (i, col) in struct_data.sub_columns.iter().enumerate() {
                         if i + 1 < state.child_appends.len() {
                             col.append(
                                 append_stats,
@@ -1183,12 +1153,9 @@ impl ColumnData {
                     }
                 }
             }
-            ColumnKindData::Variant {
-                sub_columns,
-                validity,
-            } => {
+            ColumnKindData::Variant(variant) => {
                 let mut idx = 0;
-                if let Some(v) = validity {
+                if let Some(v) = &variant.validity {
                     if idx < state.child_appends.len() {
                         v.append(
                             append_stats,
@@ -1199,7 +1166,7 @@ impl ColumnData {
                     }
                     idx += 1;
                 }
-                for col in sub_columns {
+                for col in &variant.sub_columns {
                     if idx < state.child_appends.len() {
                         col.append(
                             append_stats,
@@ -1211,13 +1178,19 @@ impl ColumnData {
                     idx += 1;
                 }
             }
-            ColumnKindData::Validity => {}
+            ColumnKindData::Validity(_) => {}
         }
     }
 
     /// Undo rows beyond `new_count`.
     pub fn revert_append(&self, new_count: Idx) {
         self.base.revert_append(new_count);
+        match &self.kind {
+            ColumnKindData::Array(array) => array.revert_append(&self.base, new_count),
+            ColumnKindData::Struct(struct_data) => struct_data.revert_append(&self.base, new_count),
+            ColumnKindData::List(list) => list.revert_append(&self.base, new_count),
+            _ => {}
+        }
     }
 
     // ── Scan operations ───────────────────────────────────────────────────────
@@ -1239,6 +1212,13 @@ impl ColumnData {
         state: &mut ColumnScanState,
         result: &mut Vector,
     ) -> Idx {
+        match &self.kind {
+            ColumnKindData::Standard(standard) => {
+                return standard.scan(&self.base, transaction, vector_index, state, result)
+            }
+            ColumnKindData::Array(array) => return array.scan(&self.base, vector_index, state, result),
+            _ => {}
+        }
         // C++: auto target_count = GetVectorCount(vector_index)
         let target_count = self.base.get_vector_count(vector_index);
         // Determine scan type based on whether we need to scan across segments
@@ -1259,12 +1239,164 @@ impl ColumnData {
         scanned
     }
 
+    pub fn scan_count(
+        &self,
+        state: &mut ColumnScanState,
+        result: &mut Vector,
+        count: Idx,
+        result_offset: Idx,
+    ) -> Idx {
+        match &self.kind {
+            ColumnKindData::Standard(standard) => {
+                let scan_type = if result_offset > 0 {
+                    ScanVectorType::ScanFlatVector
+                } else {
+                    self.base.get_vector_scan_type(state, count)
+                };
+                let scanned = self
+                    .base
+                    .scan_vector(state, result, count, scan_type, result_offset);
+                if let Some(validity) = &standard.validity {
+                    let validity_scan_type = ScanVectorType::ScanFlatVector;
+                    let _ = validity.base().scan_vector(
+                        &mut state.child_states[0],
+                        result,
+                        count,
+                        validity_scan_type,
+                        result_offset,
+                    );
+                }
+                scanned
+            }
+            ColumnKindData::List(list) => list.scan_count(&self.base, state, result, count, result_offset),
+            ColumnKindData::Array(array) => array.scan_count(state, result, count, result_offset),
+            ColumnKindData::Validity(_) => {
+                self.base
+                    .scan_vector(state, result, count, ScanVectorType::ScanFlatVector, result_offset)
+            }
+            ColumnKindData::Struct(_) | ColumnKindData::Variant(_) => {
+                unimplemented!("ColumnData::scan_count is not implemented for this nested column type")
+            }
+        }
+    }
+
+    /// Apply a pushed-down table filter to this column and refine `sel`.
+    ///
+    /// Mirrors `ColumnData::Filter`.
+    pub fn filter(
+        &self,
+        transaction: TransactionData,
+        vector_index: Idx,
+        state: &mut ColumnScanState,
+        result: &mut Vector,
+        sel: &mut SelectionVector,
+        sel_count: &mut Idx,
+        filter: &dyn TableFilter,
+        filter_state: &dyn TableFilterState,
+    ) {
+        if let ColumnKindData::Standard(standard) = &self.kind {
+            standard.filter(
+                &self.base,
+                transaction,
+                vector_index,
+                state,
+                result,
+                sel,
+                sel_count,
+                filter,
+                filter_state,
+            );
+            return;
+        }
+        let scan_count = self.scan(transaction, vector_index, state, result);
+        result.flatten(scan_count as usize);
+        ColumnSegment::filter_selection(sel, result, filter, filter_state, scan_count, sel_count);
+    }
+
+    /// Scan this column and select rows identified by `sel`.
+    ///
+    /// Mirrors `ColumnData::Select`.
+    pub fn select(
+        &self,
+        transaction: TransactionData,
+        vector_index: Idx,
+        state: &mut ColumnScanState,
+        result: &mut Vector,
+        sel: &SelectionVector,
+        sel_count: Idx,
+    ) {
+        match &self.kind {
+            ColumnKindData::Standard(standard) => {
+                standard.select(
+                    &self.base,
+                    transaction,
+                    vector_index,
+                    state,
+                    result,
+                    sel,
+                    sel_count,
+                );
+                return;
+            }
+            ColumnKindData::Array(array) => {
+                array.select(
+                    &self.base,
+                    transaction,
+                    vector_index,
+                    state,
+                    result,
+                    sel,
+                    sel_count,
+                );
+                return;
+            }
+            _ => {}
+        }
+        self.scan(transaction, vector_index, state, result);
+        result.slice(sel, sel_count as usize);
+    }
+
+    /// Check the current segment zonemap for this filter.
+    ///
+    /// Mirrors `ColumnData::CheckZonemap(ColumnScanState&, TableFilter&)`.
+    pub fn check_zonemap(&self, state: &mut ColumnScanState, filter: &dyn TableFilter) -> FilterPropagateResult {
+        match &self.kind {
+            ColumnKindData::Validity(validity) => return validity.check_zonemap(state),
+            ColumnKindData::List(list) => return list.check_zonemap(state),
+            ColumnKindData::Array(array) => return array.check_zonemap(state),
+            _ => {}
+        }
+        if state.segment_checked {
+            return FilterPropagateResult::NoPruningPossible;
+        }
+        let Some(current_segment_index) = state.current_segment_index else {
+            return FilterPropagateResult::NoPruningPossible;
+        };
+
+        state.segment_checked = filter.filter_type() != TableFilterType::DynamicFilter;
+        let lock = self.base.data.lock();
+        let Some(node) = lock.0.get(current_segment_index) else {
+            return FilterPropagateResult::NoPruningPossible;
+        };
+        let mut stats = node.node().stats.lock().statistics().clone();
+        filter.check_statistics(&mut stats)
+    }
+
     /// Advance the scan cursor by one vector without producing output.
     ///
     /// Mirrors `ColumnData::Skip(ColumnScanState&, idx_t count)` which calls
     /// `state.Next(STANDARD_VECTOR_SIZE)` and follows segment boundaries.
+    pub fn skip_n(&self, state: &mut ColumnScanState, count: Idx) {
+        match &self.kind {
+            ColumnKindData::List(list) => list.skip(&self.base, state, count),
+            ColumnKindData::Array(array) => array.skip(state, count),
+            ColumnKindData::Struct(struct_data) => struct_data.skip(state, count),
+            _ => self.base.skip_n(state, count),
+        }
+    }
+
     pub fn skip(&self, state: &mut ColumnScanState) {
-        self.base.skip(state);
+        self.skip_n(state, STANDARD_VECTOR_SIZE);
     }
 
     // ── Statistics ────────────────────────────────────────────────────────────
@@ -1329,7 +1461,8 @@ impl ColumnData {
 
 pub(crate) fn logical_type_to_physical(logical_type: &LogicalType) -> PhysicalType {
     match logical_type.id {
-        LogicalTypeId::Boolean | LogicalTypeId::Validity => PhysicalType::Bool,
+        LogicalTypeId::Boolean => PhysicalType::Bool,
+        LogicalTypeId::Validity => PhysicalType::Bit,
         LogicalTypeId::TinyInt => PhysicalType::Int8,
         LogicalTypeId::SmallInt => PhysicalType::Int16,
         LogicalTypeId::Integer | LogicalTypeId::Date => PhysicalType::Int32,
@@ -1353,6 +1486,89 @@ pub(crate) fn logical_type_to_physical(logical_type: &LogicalType) -> PhysicalTy
             }
         }
         _ => PhysicalType::Invalid,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::Value;
+    use crate::common::enums::ExpressionType;
+    use crate::common::types::{LogicalType, SelectionVector, Vector};
+    use crate::db::conn::{ClientContext, DatabaseInstance};
+    use crate::planner::{ConstantFilter, ConjunctionAndFilter, TableFilterState};
+
+    fn put_i32(vector: &mut Vector, row: usize, value: i32) {
+        let offset = row * std::mem::size_of::<i32>();
+        vector.raw_data_mut()[offset..offset + std::mem::size_of::<i32>()]
+            .copy_from_slice(&value.to_le_bytes());
+        vector.validity.set_valid(row);
+    }
+
+    #[test]
+    fn apply_constant_filter_selection_respects_existing_sel() {
+        let mut vector = Vector::with_capacity(LogicalType::integer(), 4);
+        put_i32(&mut vector, 0, 10);
+        put_i32(&mut vector, 1, 20);
+        put_i32(&mut vector, 2, 30);
+        put_i32(&mut vector, 3, 40);
+
+        let filter = ConstantFilter::new(ExpressionType::CompareGreaterThan, Value::Integer(15));
+        let context =
+            ClientContext::new(DatabaseInstance::open(":memory:").expect("open in-memory db"));
+        let filter_state = <dyn TableFilterState>::initialize(&context, &filter);
+
+        let mut sel = SelectionVector {
+            indices: vec![0, 1, 2],
+        };
+        let mut sel_count = 3;
+        ColumnSegment::filter_selection(
+            &mut sel,
+            &vector,
+            &filter,
+            filter_state.as_ref(),
+            4,
+            &mut sel_count,
+        );
+
+        assert_eq!(sel_count, 2);
+        assert_eq!(sel.indices, vec![1, 2]);
+    }
+
+    #[test]
+    fn apply_conjunction_and_filter_selection() {
+        let mut vector = Vector::with_capacity(LogicalType::integer(), 5);
+        for (row, value) in [5, 10, 15, 20, 25].into_iter().enumerate() {
+            put_i32(&mut vector, row, value);
+        }
+
+        let mut filter = ConjunctionAndFilter::new();
+        filter.child_filters.push(Arc::new(ConstantFilter::new(
+            ExpressionType::CompareGreaterThan,
+            Value::Integer(8),
+        )));
+        filter.child_filters.push(Arc::new(ConstantFilter::new(
+            ExpressionType::CompareLessThan,
+            Value::Integer(22),
+        )));
+
+        let context =
+            ClientContext::new(DatabaseInstance::open(":memory:").expect("open in-memory db"));
+        let filter_state = <dyn TableFilterState>::initialize(&context, &filter);
+
+        let mut sel = SelectionVector::identity(5);
+        let mut sel_count = 5;
+        ColumnSegment::filter_selection(
+            &mut sel,
+            &vector,
+            &filter,
+            filter_state.as_ref(),
+            5,
+            &mut sel_count,
+        );
+
+        assert_eq!(sel_count, 3);
+        assert_eq!(sel.indices, vec![1, 2, 3]);
     }
 }
 

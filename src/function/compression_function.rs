@@ -160,7 +160,7 @@ pub struct CompressionFunctionSet {
 }
 
 impl CompressionFunctionSet {
-    pub const PHYSICAL_TYPE_COUNT: usize = 16;
+    pub const PHYSICAL_TYPE_COUNT: usize = 17;
 
     pub fn new() -> Self {
         Self {
@@ -191,21 +191,22 @@ impl CompressionFunctionSet {
     fn get_physical_index(physical_type: PhysicalType) -> usize {
         match physical_type {
             PhysicalType::Bool => 0,
-            PhysicalType::Int8 => 1,
-            PhysicalType::Int16 => 2,
-            PhysicalType::Int32 => 3,
-            PhysicalType::Int64 => 4,
-            PhysicalType::Int128 => 5,
-            PhysicalType::Uint8 => 6,
-            PhysicalType::Uint16 => 7,
-            PhysicalType::Uint32 => 8,
-            PhysicalType::Uint64 => 9,
-            PhysicalType::Float => 10,
-            PhysicalType::Double => 11,
-            PhysicalType::VarChar => 12,
-            PhysicalType::List => 13,
-            PhysicalType::Struct => 14,
-            PhysicalType::Array | PhysicalType::Invalid => 15,
+            PhysicalType::Bit => 1,
+            PhysicalType::Int8 => 2,
+            PhysicalType::Int16 => 3,
+            PhysicalType::Int32 => 4,
+            PhysicalType::Int64 => 5,
+            PhysicalType::Int128 => 6,
+            PhysicalType::Uint8 => 7,
+            PhysicalType::Uint16 => 8,
+            PhysicalType::Uint32 => 9,
+            PhysicalType::Uint64 => 10,
+            PhysicalType::Float => 11,
+            PhysicalType::Double => 12,
+            PhysicalType::VarChar => 13,
+            PhysicalType::List => 14,
+            PhysicalType::Struct => 15,
+            PhysicalType::Array | PhysicalType::Invalid => 16,
         }
     }
 }

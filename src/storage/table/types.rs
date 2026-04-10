@@ -67,6 +67,7 @@ pub use crate::common::types::LogicalType;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhysicalType {
     Bool,
+    Bit,
     Int8,
     Int16,
     Int32,

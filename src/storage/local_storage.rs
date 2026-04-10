@@ -31,6 +31,7 @@ use crate::catalog::table_catalog_entry::PhysicalIndex;
 use crate::common::errors::StorageResult;
 use crate::common::types::DataChunk;
 use crate::db::conn::ClientContext;
+use crate::planner::TableFilterSet;
 use crate::storage::data_table::{ColumnDefinition, DataTable, StorageIndex};
 use crate::storage::optimistic_data_writer::{
     OptimisticDataWriter, OptimisticWriteCollection, OptimisticWritePartialManagers,
@@ -430,7 +431,7 @@ impl LocalTableStorage {
     pub fn initialize_scan(
         &self,
         state: &mut CollectionScanState,
-        _table_filters: Option<&crate::storage::data_table::TableFilterSet>,
+        _table_filters: Option<&TableFilterSet>,
     ) {
         // C++: if (collection.GetTotalRows() == 0)
         //          throw InternalException("No rows in LocalTableStorage row group for scan");
@@ -885,7 +886,7 @@ impl LocalStorage {
         &self,
         table: &DataTable,
         state: &mut CollectionScanState,
-        table_filters: Option<&crate::storage::data_table::TableFilterSet>,
+        table_filters: Option<&TableFilterSet>,
     ) {
         // C++: auto storage = table_manager.GetStorage(table);
         //      if (!storage || storage->GetCollection().GetTotalRows() == 0) return;

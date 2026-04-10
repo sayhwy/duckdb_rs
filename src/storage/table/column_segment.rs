@@ -18,8 +18,15 @@ use super::append_state::ColumnAppendState;
 use super::scan_state::ColumnScanState;
 use super::segment_base::SegmentBase;
 use super::types::{BlockId, CompressionType, Idx, LogicalType};
+use crate::catalog::Value;
+use crate::common::enums::ExpressionType;
 use crate::common::types::{SelectionVector, ValidityMask, Vector, VectorType};
 use crate::function::compression_config::get_compression_function;
+use crate::planner::{
+    compare_value, ConjunctionAndFilter, ConjunctionAndFilterState, ConjunctionOrFilter,
+    ConjunctionOrFilterState, ConstantFilter, InFilter, StructFilter, TableFilter, TableFilterState,
+    TableFilterType,
+};
 use crate::storage::buffer::BlockHandle;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -377,6 +384,38 @@ impl ColumnSegment {
                 scan_partial(self, state, scan_count, result, result_offset);
             }
         }
+    }
+
+    pub fn select(
+        &self,
+        state: &ColumnScanState,
+        result: &mut Vector,
+        sel: &SelectionVector,
+        sel_count: Idx,
+    ) {
+        let function = self.get_compression_function();
+        let select = function.select.unwrap_or_else(|| {
+            panic!("compression {:?} does not implement select", self.compression)
+        });
+        select(
+            self,
+            state,
+            sel.indices.len() as Idx,
+            result,
+            sel,
+            sel_count,
+        );
+    }
+
+    pub fn fetch_row(&self, row_id: Idx, result: &mut Vector, result_idx: Idx) {
+        let function = self.get_compression_function();
+        let fetch_row = function.fetch_row.unwrap_or_else(|| {
+            panic!(
+                "compression {:?} does not implement fetch_row",
+                self.compression
+            )
+        });
+        fetch_row(self, row_id, result, result_idx);
     }
 
     /// Full-vector uncompressed scan.
@@ -740,12 +779,42 @@ impl ColumnSegment {
         get_compression_function(self.compression, self.physical_type())
     }
 
+    pub fn filter_selection(
+        sel: &mut SelectionVector,
+        vector: &Vector,
+        filter: &dyn TableFilter,
+        filter_state: &dyn TableFilterState,
+        scan_count: Idx,
+        approved_tuple_count: &mut Idx,
+    ) -> Idx {
+        if *approved_tuple_count == 0 {
+            return 0;
+        }
+
+        if sel.indices.len() < *approved_tuple_count as usize {
+            sel.indices = (0..scan_count as u32).collect();
+            *approved_tuple_count = scan_count;
+        }
+
+        let mut new_sel = Vec::with_capacity(*approved_tuple_count as usize);
+        for i in 0..*approved_tuple_count as usize {
+            let row_idx = sel.get_index(i);
+            if matches_filter_row(vector, row_idx, filter, filter_state) {
+                new_sel.push(row_idx as u32);
+            }
+        }
+        *approved_tuple_count = new_sel.len() as Idx;
+        sel.indices = new_sel;
+        *approved_tuple_count
+    }
+
     fn physical_type(&self) -> super::types::PhysicalType {
         use crate::common::types::LogicalTypeId;
         use super::types::PhysicalType;
 
         match self.logical_type.id {
-            LogicalTypeId::Boolean | LogicalTypeId::Validity => PhysicalType::Bool,
+            LogicalTypeId::Boolean => PhysicalType::Bool,
+            LogicalTypeId::Validity => PhysicalType::Bit,
             LogicalTypeId::TinyInt => PhysicalType::Int8,
             LogicalTypeId::SmallInt => PhysicalType::Int16,
             LogicalTypeId::Integer | LogicalTypeId::Date => PhysicalType::Int32,
@@ -773,6 +842,160 @@ impl ColumnSegment {
             _ => PhysicalType::Invalid,
         }
     }
+}
+
+fn matches_filter_row(
+    vector: &Vector,
+    row_idx: usize,
+    filter: &dyn TableFilter,
+    filter_state: &dyn TableFilterState,
+) -> bool {
+    match filter.filter_type() {
+        TableFilterType::ConstantComparison => {
+            let filter = filter
+                .as_any()
+                .downcast_ref::<ConstantFilter>()
+                .expect("constant comparison filter type mismatch");
+            let Some(value) = read_vector_value(vector, row_idx) else {
+                return false;
+            };
+            compare_value(&value, filter.comparison_type, &filter.constant)
+        }
+        TableFilterType::IsNull => !vector.validity.row_is_valid(row_idx),
+        TableFilterType::IsNotNull => vector.validity.row_is_valid(row_idx),
+        TableFilterType::ConjunctionAnd => {
+            let filter = filter
+                .as_any()
+                .downcast_ref::<ConjunctionAndFilter>()
+                .expect("conjunction and filter type mismatch");
+            let filter_state = filter_state
+                .as_any()
+                .downcast_ref::<ConjunctionAndFilterState>()
+                .expect("conjunction and filter state type mismatch");
+            filter
+                .child_filters
+                .iter()
+                .zip(&filter_state.child_states)
+                .all(|(child_filter, child_state)| {
+                    matches_filter_row(vector, row_idx, child_filter.as_ref(), child_state.as_ref())
+                })
+        }
+        TableFilterType::ConjunctionOr => {
+            let filter = filter
+                .as_any()
+                .downcast_ref::<ConjunctionOrFilter>()
+                .expect("conjunction or filter type mismatch");
+            let filter_state = filter_state
+                .as_any()
+                .downcast_ref::<ConjunctionOrFilterState>()
+                .expect("conjunction or filter state type mismatch");
+            filter
+                .child_filters
+                .iter()
+                .zip(&filter_state.child_states)
+                .any(|(child_filter, child_state)| {
+                    matches_filter_row(vector, row_idx, child_filter.as_ref(), child_state.as_ref())
+                })
+        }
+        TableFilterType::InFilter => {
+            let filter = filter
+                .as_any()
+                .downcast_ref::<InFilter>()
+                .expect("in filter type mismatch");
+            let Some(value) = read_vector_value(vector, row_idx) else {
+                return false;
+            };
+            filter
+                .values
+                .iter()
+                .any(|candidate| compare_value(&value, ExpressionType::CompareEqual, candidate))
+        }
+        TableFilterType::StructExtract => {
+            let _filter = filter
+                .as_any()
+                .downcast_ref::<StructFilter>()
+                .expect("struct filter type mismatch");
+            unimplemented!("StructFilter execution is not implemented")
+        }
+        TableFilterType::OptionalFilter => unimplemented!("OptionalFilter execution is not implemented"),
+        TableFilterType::DynamicFilter => unimplemented!("DynamicFilter execution is not implemented"),
+        TableFilterType::ExpressionFilter => unimplemented!("ExpressionFilter execution is not implemented"),
+        TableFilterType::BloomFilter => unimplemented!("BloomFilter execution is not implemented"),
+        TableFilterType::PerfectHashJoinFilter => {
+            unimplemented!("PerfectHashJoinFilter execution is not implemented")
+        }
+        TableFilterType::PrefixRangeFilter => {
+            unimplemented!("PrefixRangeFilter execution is not implemented")
+        }
+    }
+}
+
+fn read_vector_value(vector: &Vector, row_idx: usize) -> Option<Value> {
+    if !vector.row_is_valid(row_idx) {
+        return None;
+    }
+
+    match vector.get_vector_type() {
+        VectorType::Dictionary => {
+            let child = vector.get_child().expect("dictionary vector missing child");
+            return read_vector_value(child, vector.resolved_row_index(row_idx));
+        }
+        VectorType::Constant => {
+            return read_vector_value_flat(vector, 0);
+        }
+        VectorType::Sequence => {
+            let (start, increment) = vector.get_sequence().expect("sequence vector missing sequence");
+            let value = start + row_idx as i64 * increment;
+            return Some(Value::Integer(value));
+        }
+        VectorType::Flat => {
+            return read_vector_value_flat(vector, row_idx);
+        }
+    }
+}
+
+fn read_vector_value_flat(vector: &Vector, row_idx: usize) -> Option<Value> {
+    if !vector.validity.row_is_valid(row_idx) {
+        return None;
+    }
+
+    let elem_size = vector.logical_type.physical_size();
+    let offset = row_idx * elem_size;
+    let data = vector.raw_data();
+    if offset + elem_size > data.len() {
+        return None;
+    }
+    let bytes = &data[offset..offset + elem_size];
+
+    let value = match vector.logical_type.id {
+        crate::common::types::LogicalTypeId::Boolean => Value::Boolean(bytes[0] != 0),
+        crate::common::types::LogicalTypeId::TinyInt => Value::Integer(i8::from_le_bytes([bytes[0]]) as i64),
+        crate::common::types::LogicalTypeId::UTinyInt => Value::Integer(bytes[0] as i64),
+        crate::common::types::LogicalTypeId::SmallInt => {
+            Value::Integer(i16::from_le_bytes(bytes.try_into().unwrap()) as i64)
+        }
+        crate::common::types::LogicalTypeId::USmallInt => {
+            Value::Integer(u16::from_le_bytes(bytes.try_into().unwrap()) as i64)
+        }
+        crate::common::types::LogicalTypeId::Integer
+        | crate::common::types::LogicalTypeId::Date => {
+            Value::Integer(i32::from_le_bytes(bytes.try_into().unwrap()) as i64)
+        }
+        crate::common::types::LogicalTypeId::UInteger => {
+            Value::Integer(u32::from_le_bytes(bytes.try_into().unwrap()) as i64)
+        }
+        crate::common::types::LogicalTypeId::BigInt => Value::Integer(i64::from_le_bytes(bytes.try_into().unwrap())),
+        crate::common::types::LogicalTypeId::Float => Value::Float(f32::from_le_bytes(bytes.try_into().unwrap()) as f64),
+        crate::common::types::LogicalTypeId::Double => Value::Float(f64::from_le_bytes(bytes.try_into().unwrap())),
+        crate::common::types::LogicalTypeId::Varchar => {
+            Value::Text(String::from_utf8_lossy(&vector.read_varchar_bytes(row_idx)).into_owned())
+        }
+        _ => unimplemented!(
+            "table filter execution is not implemented for logical type {:?}",
+            vector.logical_type.id
+        ),
+    };
+    Some(value)
 }
 
 impl SegmentBase for ColumnSegment {

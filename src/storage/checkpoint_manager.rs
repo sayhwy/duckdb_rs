@@ -194,51 +194,45 @@ impl CheckpointManager {
         result.pointers = column.base.get_data_pointers();
 
         match &column.kind {
-            ColumnKindData::Standard { validity } => {
-                if let Some(validity) = validity {
+            ColumnKindData::Standard(standard) => {
+                if let Some(validity) = &standard.validity {
                     result
                         .child_columns
                         .push(self.create_validity_persistent_column(column.count(), validity));
                 }
             }
-            ColumnKindData::Validity => {}
-            ColumnKindData::List {
-                validity,
-                child_column,
+            ColumnKindData::Validity(_) => {}
+            ColumnKindData::List(list) => {
+                result
+                    .child_columns
+                    .push(self.create_validity_persistent_column(column.count(), &list.validity));
+                result
+                    .child_columns
+                    .push(self.create_persistent_column_data(&list.child_column));
             }
-            | ColumnKindData::Array {
-                validity,
-                child_column,
-                ..
-            } => {
+            ColumnKindData::Array(array) => {
                 result
                     .child_columns
-                    .push(self.create_validity_persistent_column(column.count(), validity));
+                    .push(self.create_validity_persistent_column(column.count(), &array.validity));
                 result
                     .child_columns
-                    .push(self.create_persistent_column_data(child_column));
+                    .push(self.create_persistent_column_data(&array.child_column));
             }
-            ColumnKindData::Struct {
-                validity,
-                sub_columns,
-            } => {
-                result
-                    .child_columns
-                    .push(self.create_validity_persistent_column(column.count(), validity));
-                for child in sub_columns {
+            ColumnKindData::Struct(struct_data) => {
+                result.child_columns.push(
+                    self.create_validity_persistent_column(column.count(), &struct_data.validity),
+                );
+                for child in &struct_data.sub_columns {
                     result.child_columns.push(self.create_persistent_column_data(child));
                 }
             }
-            ColumnKindData::Variant {
-                validity,
-                sub_columns,
-            } => {
-                if let Some(validity) = validity {
+            ColumnKindData::Variant(variant) => {
+                if let Some(validity) = &variant.validity {
                     result
                         .child_columns
                         .push(self.create_validity_persistent_column(column.count(), validity));
                 }
-                for child in sub_columns {
+                for child in &variant.sub_columns {
                     result.child_columns.push(self.create_persistent_column_data(child));
                 }
             }

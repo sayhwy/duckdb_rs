@@ -44,9 +44,10 @@ use super::types::{
     TransactionData, TransactionId,
 };
 use crate::common::serializer::{BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID};
-use crate::common::types::{DataChunk, Vector};
+use crate::common::types::{DataChunk, SelectionVector as DuckSelectionVector, Vector};
 use crate::storage::buffer::BlockManager as _;
 use crate::storage::buffer::BlockManager;
+use crate::storage::statistics::FilterPropagateResult;
 use crate::storage::table::column_segment::ColumnSegment;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -236,7 +237,7 @@ impl RowGroup {
             crate::storage::metadata::BlockReaderType::RegisterBlocks,
         );
         let mut de = BinaryMetadataDeserializer::new(&mut reader);
-        let pointers = read_persistent_column_pointers(&mut de, &logical_type)
+        let persistent_column = read_persistent_column_data(&mut de, &logical_type)
             .expect("failed to deserialize persistent column");
 
         let column = ColumnData::create(
@@ -246,35 +247,7 @@ impl RowGroup {
             super::column_data::ColumnDataType::MainTable,
             false,
         );
-        {
-            let mut lock = column.base.data.lock();
-            let mut row_start = 0;
-            for pointer in pointers {
-                // Register the block with the BufferPool (idempotent: returns
-                // the existing handle if already registered).  Data is NOT read
-                // here; it will be loaded lazily on the first pin inside
-                // ColumnSegment::initialize_scan → BlockHandle::load().
-                let block_handle = storage.block_manager.register_block(pointer.block_id);
-
-                let segment = ColumnSegment::create_persistent_with_handle(
-                    logical_type.clone(),
-                    pointer.block_id,
-                    pointer.offset as Idx, // byte offset into block payload
-                    pointer.tuple_count,
-                    storage.block_manager.get_block_size() as Idx,
-                    pointer.compression_type,
-                    super::column_segment::SegmentStatistics::from_stats(pointer.statistics.clone()),
-                    block_handle.clone(),
-                );
-                let segment = Arc::new(segment);
-                column
-                    .base
-                    .data
-                    .append_segment(&mut lock, segment, row_start);
-                row_start += pointer.tuple_count;
-            }
-            column.base.count.store(row_start, Ordering::Relaxed);
-        }
+        initialize_column_from_persistent(&column, &persistent_column, &logical_type, storage.as_ref());
         self.columns.lock()[col] = Some(column);
         self.is_loaded[col].store(true, Ordering::Release);
     }
@@ -342,7 +315,8 @@ impl RowGroup {
     /// when a row group was merged from local storage via `merge_storage`).
     pub fn initialize_scan(&self, state: &mut CollectionScanState, node_row_start: Idx) -> bool {
         // Zone-map check — prune the whole row group if possible.
-        if !self.check_zonemap(&state.get_filter_info()) {
+        let row_group_visible = state.with_filter_info_mut(|filters| self.check_zonemap(filters));
+        if !row_group_visible {
             return false;
         }
 
@@ -385,7 +359,8 @@ impl RowGroup {
         node_row_start: Idx,
         vector_offset: Idx,
     ) -> bool {
-        if !self.check_zonemap(&state.get_filter_info()) {
+        let row_group_visible = state.with_filter_info_mut(|filters| self.check_zonemap(filters));
+        if !row_group_visible {
             return false;
         }
 
@@ -424,28 +399,91 @@ impl RowGroup {
     /// compares the filter predicate against the column's min/max segment statistics.
     /// If any filter is `FILTER_ALWAYS_FALSE` the row group is pruned.
     ///
-    /// The column-level `CheckZonemap` API is not yet implemented in Rust
-    /// (`ColumnData` does not expose a `check_zonemap` method).  Until it is,
-    /// this conservatively returns `true` (never prunes).
-    pub fn check_zonemap(&self, filters: &ScanFilterInfo) -> bool {
+    pub fn check_zonemap(&self, filters: &mut ScanFilterInfo) -> bool {
         if !filters.has_filters() {
             // No filters at all — trivially include this row group.
             return true;
         }
 
-        // When ColumnData::check_zonemap(filter, col_stats) is available, iterate
-        // each filter entry here and return false if the filter is always false
-        // for this row group's min/max statistics.
-        //
-        //   for each (col_idx, filter) in filters.entries() {
-        //       let col = self.get_column(col_idx);
-        //       if col.check_zonemap(&filter) == FilterPropagateResult::FilterAlwaysFalse {
-        //           return false;
-        //       }
-        //   }
-        //
-        // Conservative fallback: include all row groups.
+        filters.check_all_filters();
+        for filter_idx in 0..filters.filter_list.len() {
+            let entry = &filters.filter_list[filter_idx];
+            if entry.always_true {
+                continue;
+            }
+            let col = self.get_column(entry.table_column_index as usize);
+            let Some(stats) = col.base.stats.as_ref() else {
+                continue;
+            };
+            let mut base_stats = stats.lock().statistics().clone();
+            let prune_result = entry.filter.check_statistics(&mut base_stats);
+            if prune_result == FilterPropagateResult::FilterAlwaysFalse {
+                return false;
+            }
+            if entry.filter.is_only_for_zone_map_filtering()
+                || prune_result == FilterPropagateResult::FilterAlwaysTrue
+            {
+                filters.set_filter_always_true(filter_idx);
+            }
+        }
         true
+    }
+
+    fn check_zonemap_segments(&self, state: &mut CollectionScanState) -> bool {
+        let filter_info = state.with_filter_info(Clone::clone);
+        if !filter_info.has_filters() {
+            return true;
+        }
+
+        let mut target_vector_index_max: Option<Idx> = None;
+        for entry in &filter_info.filter_list {
+            if entry.always_true {
+                continue;
+            }
+
+            let column_idx = entry.scan_column_index as usize;
+            let base_column_idx = entry.table_column_index as usize;
+            let Some(column_scan_state) = state.column_scans.get_mut(column_idx) else {
+                continue;
+            };
+            let prune_result =
+                self.get_column(base_column_idx)
+                    .check_zonemap(column_scan_state, entry.filter.as_ref());
+            if prune_result != FilterPropagateResult::FilterAlwaysFalse {
+                continue;
+            }
+
+            let Some(current_segment_index) = column_scan_state.current_segment_index else {
+                continue;
+            };
+            let col = self.get_column(base_column_idx);
+            let lock = col.base.data.lock();
+            let Some(node) = lock.0.get(current_segment_index) else {
+                continue;
+            };
+            let row_start = node.row_start();
+            let mut target_row = row_start + node.node().count();
+            if target_row >= state.max_row {
+                target_row = state.max_row;
+            }
+            let target_vector_index = (target_row - row_start) / STANDARD_VECTOR_SIZE;
+            target_vector_index_max = Some(
+                target_vector_index_max
+                    .map(|current| current.max(target_vector_index))
+                    .unwrap_or(target_vector_index),
+            );
+        }
+
+        let Some(target_vector_index_max) = target_vector_index_max else {
+            return true;
+        };
+        if state.vector_index == target_vector_index_max {
+            return true;
+        }
+        while state.vector_index < target_vector_index_max {
+            self.next_vector(state);
+        }
+        false
     }
 
     /// Advance past the current vector in `state` without producing output.
@@ -496,6 +534,10 @@ impl RowGroup {
 
             let max_count = STANDARD_VECTOR_SIZE.min(state.max_row_group_row - current_row);
 
+            if !self.check_zonemap_segments(state) {
+                continue;
+            }
+
             // ── MVCC visibility: build selection vector ───────────────────────
             let count = match self.get_version_info() {
                 Some(vi) => {
@@ -523,7 +565,8 @@ impl RowGroup {
             }
 
             // ── Column scan ───────────────────────────────────────────────────
-            let has_filters = state.get_filter_info().has_filters();
+            let filter_info = state.with_filter_info(Clone::clone);
+            let has_filters = filter_info.has_filters();
             let column_ids = state.get_column_ids();
 
             if count == max_count && !has_filters {
@@ -538,31 +581,102 @@ impl RowGroup {
                 }
             } else {
                 // Slow path: MVCC deletions or predicate filters.
-                //
-                // 1. Scan the full vector for each column.
-                // 2. If some rows are invisible (count < max_count), apply the MVCC
-                //    selection vector via Vector::slice so the output contains only
-                //    visible rows.
-                // 3. Per-column predicate filtering (ColumnData::Filter / Select)
-                //    is not yet implemented; a full implementation would push each
-                //    TableFilter down into the column scan here.
+                let mut approved_tuple_count = count;
+                let mut sel = if count != max_count {
+                    DuckSelectionVector {
+                        indices: state.valid_sel.sel[..count as usize].to_vec(),
+                    }
+                } else {
+                    DuckSelectionVector::identity(max_count as usize)
+                };
+
+                if has_filters {
+                    let filter_permutation = state.with_filter_info_mut(|filters| {
+                        let permutation = filters
+                            .get_adaptive_filter()
+                            .map(|adaptive_filter| adaptive_filter.permutation.clone())
+                            .unwrap_or_else(|| (0..filters.filter_list.len()).collect());
+                        let filter_state = filters.begin_filter();
+                        (permutation, filter_state)
+                    });
+                    for filter_idx in &filter_permutation.0 {
+                        let entry = &filter_info.filter_list[*filter_idx];
+                        if entry.always_true {
+                            continue;
+                        }
+
+                        let scan_idx = entry.scan_column_index as usize;
+                        let column_idx = entry.table_column_index as usize;
+                        if approved_tuple_count == 0 {
+                            let col = self.get_column(column_idx);
+                            if let Some(scan) = state.column_scans.get_mut(scan_idx) {
+                                col.skip(scan);
+                            }
+                            continue;
+                        }
+
+                        let col = self.get_column(column_idx);
+                        if let (Some(scan), Some(vec)) =
+                            (state.column_scans.get_mut(scan_idx), result.data.get_mut(scan_idx))
+                        {
+                            col.filter(
+                                transaction,
+                                state.vector_index,
+                                scan,
+                                vec,
+                                &mut sel,
+                                &mut approved_tuple_count,
+                                entry.filter.as_ref(),
+                                entry.filter_state.as_ref(),
+                            );
+                        }
+                    }
+                    for entry in &filter_info.filter_list {
+                        if entry.always_true {
+                            continue;
+                        }
+                        result.data[entry.scan_column_index as usize]
+                            .slice(&sel, approved_tuple_count as usize);
+                    }
+                    state.with_filter_info_mut(|filters| filters.end_filter(filter_permutation.1));
+                }
+
+                if approved_tuple_count == 0 {
+                    result.reset();
+                    for (i, &col_id) in column_ids.iter().enumerate() {
+                        if has_filters && filter_info.column_has_filters(i) {
+                            continue;
+                        }
+                        let col = self.get_column(col_id as usize);
+                        if let Some(scan) = state.column_scans.get_mut(i) {
+                            col.skip(scan);
+                        }
+                    }
+                    state.vector_index += 1;
+                    continue;
+                }
+
                 for (i, &col_id) in column_ids.iter().enumerate() {
+                    if has_filters && filter_info.column_has_filters(i) {
+                        continue;
+                    }
                     let col = self.get_column(col_id as usize);
                     if let (Some(scan), Some(vec)) =
                         (state.column_scans.get_mut(i), result.data.get_mut(i))
                     {
-                        col.scan(transaction, state.vector_index, scan, vec);
-
-                        // Apply the MVCC visibility selection: compact out invisible rows.
-                        if count < max_count {
-                            // Convert chunk_info::SelectionVector → common::types::SelectionVector
-                            let sel = crate::common::types::SelectionVector {
-                                indices: state.valid_sel.sel[..count as usize].to_vec(),
-                            };
-                            vec.slice(&sel, count as usize);
-                        }
+                        col.select(
+                            transaction,
+                            state.vector_index,
+                            scan,
+                            vec,
+                            &sel,
+                            approved_tuple_count,
+                        );
                     }
                 }
+                result.set_cardinality(approved_tuple_count as usize);
+                state.vector_index += 1;
+                return;
             }
 
             result.set_cardinality(count as usize);
@@ -1061,67 +1175,59 @@ fn serialize_column_to_persistent(
     let pointers = col.base.get_data_pointers();
 
     // Build validity-column logical type for child serialisation.
-    let validity_type = LogicalType::boolean(); // validity columns stored as bool bitmask
+    let validity_type = LogicalType::validity();
 
     // Recursively serialise child columns.
     // C++ `ColumnData::Serialize()` recurses into `sub_columns` / children.
     let child_columns: Vec<PersistentColumnData> = match &col.kind {
-        ColumnKindData::Standard { validity } => {
+        ColumnKindData::Standard(standard) => {
             // Standard scalar column: one validity child.
-            validity
+            standard
+                .validity
                 .as_ref()
                 .map(|v| vec![serialize_column_to_persistent(v, &validity_type)])
                 .unwrap_or_default()
         }
-        ColumnKindData::Validity => {
+        ColumnKindData::Validity(_) => {
             // Validity columns are leaf nodes — no children.
             vec![]
         }
-        ColumnKindData::List {
-            validity,
-            child_column,
-        } => {
+        ColumnKindData::List(list) => {
             // List<T>: [validity, child_data]
             vec![
-                serialize_column_to_persistent(validity, &validity_type),
-                serialize_column_to_persistent(child_column, logical_type),
+                serialize_column_to_persistent(&list.validity, &validity_type),
+                serialize_column_to_persistent(&list.child_column, logical_type),
             ]
         }
-        ColumnKindData::Array {
-            validity,
-            child_column,
-            ..
-        } => {
+        ColumnKindData::Array(array) => {
             // Array<T, N>: [validity, child_data]
             vec![
-                serialize_column_to_persistent(validity, &validity_type),
-                serialize_column_to_persistent(child_column, logical_type),
+                serialize_column_to_persistent(&array.validity, &validity_type),
+                serialize_column_to_persistent(&array.child_column, logical_type),
             ]
         }
-        ColumnKindData::Struct {
-            validity,
-            sub_columns,
-        } => {
+        ColumnKindData::Struct(struct_data) => {
             // Struct(a T1, b T2, …): [validity, field_0, field_1, …]
-            let mut children = vec![serialize_column_to_persistent(validity, &validity_type)];
+            let mut children =
+                vec![serialize_column_to_persistent(&struct_data.validity, &validity_type)];
             children.extend(
-                sub_columns
+                struct_data
+                    .sub_columns
                     .iter()
                     .map(|c| serialize_column_to_persistent(c, logical_type)),
             );
             children
         }
-        ColumnKindData::Variant {
-            validity,
-            sub_columns,
-        } => {
+        ColumnKindData::Variant(variant) => {
             // Variant / semi-structured: [validity?, unshredded, shredded?]
-            let mut children = validity
+            let mut children = variant
+                .validity
                 .as_ref()
                 .map(|v| vec![serialize_column_to_persistent(v, &validity_type)])
                 .unwrap_or_default();
             children.extend(
-                sub_columns
+                variant
+                    .sub_columns
                     .iter()
                     .map(|c| serialize_column_to_persistent(c, logical_type)),
             );
@@ -1143,25 +1249,55 @@ fn serialize_column_to_persistent(
 // Metadata deserialisation (disk → RowGroup)
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn read_persistent_column_pointers(
+fn read_persistent_column_data(
     de: &mut BinaryMetadataDeserializer<'_>,
     logical_type: &super::types::LogicalType,
-) -> std::io::Result<Vec<super::types::DataPointer>> {
-    let mut pointers = Vec::new();
+) -> std::io::Result<PersistentColumnData> {
+    let mut result = PersistentColumnData::new(logical_type);
     loop {
         match de.next_field()? {
             100 => {
                 let count = de.read_list_len()?;
-                pointers.reserve(count);
+                result.pointers.reserve(count);
                 for _ in 0..count {
-                    pointers.push(de.read_data_pointer(logical_type)?);
+                    result.pointers.push(de.read_data_pointer(logical_type)?);
                 }
             }
-            101 => skip_persistent_column(de, &super::types::LogicalType::boolean())?,
-            102 => skip_nested_object(de)?,
+            101 => {
+                result
+                    .child_columns
+                    .push(read_persistent_column_data(de, &super::types::LogicalType::validity())?);
+            }
+            102 => match logical_type_to_physical(logical_type) {
+                super::types::PhysicalType::List | super::types::PhysicalType::Array => {
+                    let child_type = logical_type
+                        .get_child_type()
+                        .expect("LIST/ARRAY logical type missing child type");
+                    result
+                        .child_columns
+                        .push(read_persistent_column_data(de, child_type)?);
+                }
+                super::types::PhysicalType::Struct => {
+                    let count = de.read_list_len()?;
+                    result.child_columns.reserve(count + result.child_columns.len());
+                    for child_idx in 0..count {
+                        let child_type = logical_type
+                            .get_struct_child_type(child_idx)
+                            .expect("STRUCT logical type missing child type");
+                        result
+                            .child_columns
+                            .push(read_persistent_column_data(de, child_type)?);
+                    }
+                }
+                _ => skip_nested_object(de)?,
+            },
             115 => skip_nested_object(de)?,
-            120 => skip_persistent_column(de, &super::types::LogicalType::boolean())?,
-            MESSAGE_TERMINATOR_FIELD_ID => return Ok(pointers),
+            120 => {
+                result
+                    .child_columns
+                    .push(read_persistent_column_data(de, &super::types::LogicalType::validity())?);
+            }
+            MESSAGE_TERMINATOR_FIELD_ID => return Ok(result),
             _ => skip_nested_object(de)?,
         }
     }
@@ -1179,13 +1315,111 @@ fn skip_persistent_column(
                     let _ = de.read_data_pointer(logical_type)?;
                 }
             }
-            101 => skip_persistent_column(de, &super::types::LogicalType::boolean())?,
+            101 => skip_persistent_column(de, &super::types::LogicalType::validity())?,
             102 => skip_nested_object(de)?,
             115 => skip_nested_object(de)?,
-            120 => skip_persistent_column(de, &super::types::LogicalType::boolean())?,
+            120 => skip_persistent_column(de, &super::types::LogicalType::validity())?,
             MESSAGE_TERMINATOR_FIELD_ID => return Ok(()),
             _ => skip_nested_object(de)?,
         }
+    }
+}
+
+fn initialize_column_from_persistent(
+    column: &Arc<ColumnData>,
+    persistent: &PersistentColumnData,
+    logical_type: &LogicalType,
+    storage: &crate::storage::table::persistent_table_data::PersistentStorageRuntime,
+) {
+    {
+        let mut lock = column.base.data.lock();
+        let mut row_start = 0;
+        for mut pointer in persistent.pointers.clone() {
+            pointer.row_start = row_start;
+            if let Some(stats) = column.base.stats.as_ref() {
+                stats.lock().statistics_mut().merge(&pointer.statistics);
+            }
+            let block_handle = storage.block_manager.register_block(pointer.block_id);
+            let segment = ColumnSegment::create_persistent_with_handle(
+                logical_type.clone(),
+                pointer.block_id,
+                pointer.offset as Idx,
+                pointer.tuple_count,
+                storage.block_manager.get_block_size() as Idx,
+                pointer.compression_type,
+                super::column_segment::SegmentStatistics::from_stats(pointer.statistics.clone()),
+                block_handle,
+            );
+            column
+                .base
+                .data
+                .append_segment(&mut lock, Arc::new(segment), row_start);
+            row_start += pointer.tuple_count;
+        }
+        column.base.count.store(row_start, Ordering::Relaxed);
+    }
+
+    match (&column.kind, persistent.child_columns.as_slice()) {
+        (ColumnKindData::Standard(standard), [validity_data, ..]) => {
+            if let Some(validity) = &standard.validity {
+            initialize_column_from_persistent(
+                validity,
+                validity_data,
+                &LogicalType::validity(),
+                storage,
+            );
+        }
+        }
+        (
+            ColumnKindData::List(list),
+            [validity_data, child_data, ..],
+        ) => {
+            initialize_column_from_persistent(
+                &list.validity,
+                validity_data,
+                &LogicalType::validity(),
+                storage,
+            );
+            let child_type = logical_type
+                .get_child_type()
+                .expect("LIST logical type missing child type");
+            initialize_column_from_persistent(&list.child_column, child_data, child_type, storage);
+        }
+        (
+            ColumnKindData::Array(array),
+            [validity_data, child_data, ..],
+        ) => {
+            initialize_column_from_persistent(
+                &array.validity,
+                validity_data,
+                &LogicalType::validity(),
+                storage,
+            );
+            let child_type = logical_type
+                .get_child_type()
+                .expect("ARRAY logical type missing child type");
+            initialize_column_from_persistent(&array.child_column, child_data, child_type, storage);
+        }
+        (
+            ColumnKindData::Struct(struct_data),
+            child_columns,
+        ) if !child_columns.is_empty() => {
+            initialize_column_from_persistent(
+                &struct_data.validity,
+                &child_columns[0],
+                &LogicalType::validity(),
+                storage,
+            );
+            for (idx, child_column) in struct_data.sub_columns.iter().enumerate() {
+                if let Some(child_data) = child_columns.get(idx + 1) {
+                    let child_type = logical_type
+                        .get_struct_child_type(idx)
+                        .expect("STRUCT logical type missing child type");
+                    initialize_column_from_persistent(child_column, child_data, child_type, storage);
+                }
+            }
+        }
+        _ => {}
     }
 }
 

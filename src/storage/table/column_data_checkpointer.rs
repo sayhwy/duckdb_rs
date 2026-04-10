@@ -391,7 +391,8 @@ impl ColumnDataCheckpointer {
 
 fn logical_type_to_physical(logical_type: &LogicalType) -> PhysicalType {
     match logical_type.id {
-        LogicalTypeId::Boolean | LogicalTypeId::Validity => PhysicalType::Bool,
+        LogicalTypeId::Boolean => PhysicalType::Bool,
+        LogicalTypeId::Validity => PhysicalType::Bit,
         LogicalTypeId::TinyInt => PhysicalType::Int8,
         LogicalTypeId::SmallInt => PhysicalType::Int16,
         LogicalTypeId::Integer | LogicalTypeId::Date => PhysicalType::Int32,

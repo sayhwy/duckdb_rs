@@ -25,6 +25,10 @@ use std::any::Any;
 
 use parking_lot::Mutex;
 
+use crate::db::conn::ClientContext;
+use crate::execution::adaptive_filter::{AdaptiveFilter, AdaptiveFilterState};
+use crate::planner::{TableFilter, TableFilterState};
+use crate::planner::TableFilterSet;
 use super::chunk_info::SelectionVector;
 use super::row_group::RowGroup;
 use super::row_group_collection::RowGroupSegmentTree;
@@ -167,9 +171,12 @@ pub struct ScanFilter {
     pub scan_column_index: Idx,
     /// Column index in the *table schema*.
     pub table_column_index: Idx,
+    /// Pushed-down table filter.
+    pub filter: Arc<dyn TableFilter>,
+    /// Thread-local filter state.
+    pub filter_state: Arc<dyn TableFilterState>,
     /// Whether the filter is always true and can be skipped.
     pub always_true: bool,
-    // TODO: TableFilter + TableFilterState
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -181,16 +188,53 @@ pub struct ScanFilter {
 /// Mirrors `class ScanFilterInfo`.
 #[derive(Debug, Default, Clone)]
 pub struct ScanFilterInfo {
+    pub table_filters: Option<TableFilterSet>,
+    pub adaptive_filter: Option<AdaptiveFilter>,
     pub filter_list: Vec<ScanFilter>,
     /// Per-column: is any filter currently active?
     pub column_has_filter: Vec<bool>,
+    pub base_column_has_filter: Vec<bool>,
     /// Count of filters that are currently always-true.
     pub always_true_filters: usize,
 }
 
 impl ScanFilterInfo {
+    pub fn initialize(
+        &mut self,
+        context: &ClientContext,
+        filters: &TableFilterSet,
+        column_ids: &[u64],
+    ) {
+        self.table_filters = Some(filters.copy());
+        self.adaptive_filter = Some(AdaptiveFilter::new(filters));
+        self.filter_list.clear();
+        self.column_has_filter.clear();
+        self.base_column_has_filter.clear();
+        self.always_true_filters = 0;
+
+        self.filter_list.reserve(filters.filter_count());
+        for (scan_column_index, filter) in filters.iter() {
+            self.filter_list.push(ScanFilter {
+                scan_column_index: scan_column_index as Idx,
+                table_column_index: column_ids[scan_column_index] as Idx,
+                filter: Arc::clone(filter),
+                filter_state: <dyn TableFilterState>::initialize(context, filter.as_ref()),
+                always_true: false,
+            });
+        }
+
+        self.column_has_filter.resize(column_ids.len(), false);
+        for filter in &self.filter_list {
+            let scan_idx = filter.scan_column_index as usize;
+            if scan_idx < self.column_has_filter.len() {
+                self.column_has_filter[scan_idx] = true;
+            }
+        }
+        self.base_column_has_filter = self.column_has_filter.clone();
+    }
+
     pub fn has_filters(&self) -> bool {
-        self.always_true_filters < self.filter_list.len()
+        self.table_filters.is_some() && self.always_true_filters < self.filter_list.len()
     }
 
     pub fn column_has_filters(&self, col_idx: usize) -> bool {
@@ -204,6 +248,10 @@ impl ScanFilterInfo {
         if let Some(f) = self.filter_list.get_mut(filter_idx) {
             if !f.always_true {
                 f.always_true = true;
+                let scan_idx = f.scan_column_index as usize;
+                if scan_idx < self.column_has_filter.len() {
+                    self.column_has_filter[scan_idx] = false;
+                }
                 self.always_true_filters += 1;
             }
         }
@@ -211,8 +259,26 @@ impl ScanFilterInfo {
 
     pub fn check_all_filters(&mut self) {
         self.always_true_filters = 0;
+        self.column_has_filter.clone_from(&self.base_column_has_filter);
         for f in &mut self.filter_list {
             f.always_true = false;
+        }
+    }
+
+    pub fn get_adaptive_filter(&mut self) -> Option<&mut AdaptiveFilter> {
+        self.adaptive_filter.as_mut()
+    }
+
+    pub fn begin_filter(&self) -> AdaptiveFilterState {
+        self.adaptive_filter
+            .as_ref()
+            .map(|adaptive_filter| adaptive_filter.begin_filter())
+            .unwrap_or_default()
+    }
+
+    pub fn end_filter(&mut self, state: AdaptiveFilterState) {
+        if let Some(adaptive_filter) = self.adaptive_filter.as_mut() {
+            adaptive_filter.end_filter(state);
         }
     }
 }
@@ -327,8 +393,14 @@ impl CollectionScanState {
         self.shared.lock().column_ids.clone()
     }
 
-    pub fn get_filter_info(&self) -> ScanFilterInfo {
-        self.shared.lock().filters.clone()
+    pub fn with_filter_info<R>(&self, f: impl FnOnce(&ScanFilterInfo) -> R) -> R {
+        let shared = self.shared.lock();
+        f(&shared.filters)
+    }
+
+    pub fn with_filter_info_mut<R>(&mut self, f: impl FnOnce(&mut ScanFilterInfo) -> R) -> R {
+        let mut shared = self.shared.lock();
+        f(&mut shared.filters)
     }
 
     pub fn get_options(&self) -> TableScanOptions {
@@ -438,7 +510,24 @@ impl TableScanState {
     pub fn initialize(&mut self, column_ids: Vec<u64>) {
         self.table_state.set_column_ids(column_ids.clone());
         self.local_state.set_column_ids(column_ids.clone());
-        self.shared.lock().column_ids = column_ids;
+        let mut shared = self.shared.lock();
+        shared.column_ids = column_ids;
+        shared.filters = ScanFilterInfo::default();
+    }
+
+    pub fn initialize_with_context(
+        &mut self,
+        column_ids: Vec<u64>,
+        context: &ClientContext,
+        table_filters: Option<&TableFilterSet>,
+    ) {
+        self.initialize(column_ids.clone());
+        if let Some(filters) = table_filters {
+            self.shared
+                .lock()
+                .filters
+                .initialize(context, filters, &column_ids);
+        }
     }
 
     pub fn column_ids(&self) -> Vec<u64> {

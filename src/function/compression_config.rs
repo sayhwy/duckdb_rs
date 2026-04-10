@@ -15,6 +15,7 @@ fn build_function_set() -> CompressionFunctionSet {
     let mut function_set = CompressionFunctionSet::new();
     let physical_types = [
         PhysicalType::Bool,
+        PhysicalType::Bit,
         PhysicalType::Int8,
         PhysicalType::Int16,
         PhysicalType::Int32,

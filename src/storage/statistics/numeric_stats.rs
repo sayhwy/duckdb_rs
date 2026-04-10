@@ -1,4 +1,6 @@
 use super::FilterPropagateResult;
+use crate::catalog::Value;
+use crate::common::enums::ExpressionType;
 use crate::common::types::{LogicalType, LogicalTypeId};
 use std::fmt;
 
@@ -60,6 +62,69 @@ impl Default for NumericStatsData {
 pub struct NumericStats;
 
 impl NumericStats {
+    fn value_as_f64(value: &Value) -> Option<f64> {
+        match value {
+            Value::Boolean(v) => Some(if *v { 1.0 } else { 0.0 }),
+            Value::Integer(v) => Some(*v as f64),
+            Value::Float(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    fn min_as_f64(data: &NumericStatsData, logical_type: &LogicalType) -> Option<f64> {
+        if !data.has_min {
+            return None;
+        }
+        Some(unsafe {
+            match Self::decimal_storage_kind(logical_type).unwrap_or(logical_type.id) {
+                LogicalTypeId::Boolean => {
+                    if data.min.boolean {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                LogicalTypeId::TinyInt => data.min.tinyint as f64,
+                LogicalTypeId::SmallInt => data.min.smallint as f64,
+                LogicalTypeId::Integer | LogicalTypeId::Date => data.min.integer as f64,
+                LogicalTypeId::BigInt | LogicalTypeId::Time | LogicalTypeId::Timestamp => {
+                    data.min.bigint as f64
+                }
+                LogicalTypeId::HugeInt => data.min.hugeint as f64,
+                LogicalTypeId::Float => data.min.float as f64,
+                LogicalTypeId::Double => data.min.double,
+                _ => return None,
+            }
+        })
+    }
+
+    fn max_as_f64(data: &NumericStatsData, logical_type: &LogicalType) -> Option<f64> {
+        if !data.has_max {
+            return None;
+        }
+        Some(unsafe {
+            match Self::decimal_storage_kind(logical_type).unwrap_or(logical_type.id) {
+                LogicalTypeId::Boolean => {
+                    if data.max.boolean {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                LogicalTypeId::TinyInt => data.max.tinyint as f64,
+                LogicalTypeId::SmallInt => data.max.smallint as f64,
+                LogicalTypeId::Integer | LogicalTypeId::Date => data.max.integer as f64,
+                LogicalTypeId::BigInt | LogicalTypeId::Time | LogicalTypeId::Timestamp => {
+                    data.max.bigint as f64
+                }
+                LogicalTypeId::HugeInt => data.max.hugeint as f64,
+                LogicalTypeId::Float => data.max.float as f64,
+                LogicalTypeId::Double => data.max.double,
+                _ => return None,
+            }
+        })
+    }
+
     fn decimal_storage_kind(logical_type: &LogicalType) -> Option<LogicalTypeId> {
         if logical_type.id != LogicalTypeId::Decimal {
             return None;
@@ -305,16 +370,119 @@ impl NumericStats {
     /// Check zonemap for filtering
     pub fn check_zonemap(
         data: &NumericStatsData,
-        _comparison_type: &str,
-        _constant: &NumericValueUnion,
-        _logical_type: &LogicalType,
+        comparison_type: ExpressionType,
+        constant: f64,
+        logical_type: &LogicalType,
     ) -> FilterPropagateResult {
         if !Self::has_min_max(data) {
             return FilterPropagateResult::NoPruningPossible;
         }
+        let Some(min) = Self::min_as_f64(data, logical_type) else {
+            return FilterPropagateResult::NoPruningPossible;
+        };
+        let Some(max) = Self::max_as_f64(data, logical_type) else {
+            return FilterPropagateResult::NoPruningPossible;
+        };
 
-        // TODO: Implement full zonemap checking logic
-        FilterPropagateResult::NoPruningPossible
+        match comparison_type {
+            ExpressionType::CompareEqual => {
+                if constant < min || constant > max {
+                    FilterPropagateResult::FilterAlwaysFalse
+                } else if min == max && min == constant {
+                    FilterPropagateResult::FilterAlwaysTrue
+                } else {
+                    FilterPropagateResult::NoPruningPossible
+                }
+            }
+            ExpressionType::CompareNotEqual => {
+                if constant < min || constant > max {
+                    FilterPropagateResult::FilterAlwaysTrue
+                } else if min == max && min == constant {
+                    FilterPropagateResult::FilterAlwaysFalse
+                } else {
+                    FilterPropagateResult::NoPruningPossible
+                }
+            }
+            ExpressionType::CompareGreaterThan => {
+                if max <= constant {
+                    FilterPropagateResult::FilterAlwaysFalse
+                } else if min > constant {
+                    FilterPropagateResult::FilterAlwaysTrue
+                } else {
+                    FilterPropagateResult::NoPruningPossible
+                }
+            }
+            ExpressionType::CompareGreaterThanOrEqualTo => {
+                if max < constant {
+                    FilterPropagateResult::FilterAlwaysFalse
+                } else if min >= constant {
+                    FilterPropagateResult::FilterAlwaysTrue
+                } else {
+                    FilterPropagateResult::NoPruningPossible
+                }
+            }
+            ExpressionType::CompareLessThan => {
+                if min >= constant {
+                    FilterPropagateResult::FilterAlwaysFalse
+                } else if max < constant {
+                    FilterPropagateResult::FilterAlwaysTrue
+                } else {
+                    FilterPropagateResult::NoPruningPossible
+                }
+            }
+            ExpressionType::CompareLessThanOrEqualTo => {
+                if min > constant {
+                    FilterPropagateResult::FilterAlwaysFalse
+                } else if max <= constant {
+                    FilterPropagateResult::FilterAlwaysTrue
+                } else {
+                    FilterPropagateResult::NoPruningPossible
+                }
+            }
+            _ => FilterPropagateResult::NoPruningPossible,
+        }
+    }
+
+    pub fn check_zonemap_stats(
+        stats: &super::BaseStatistics,
+        comparison_type: ExpressionType,
+        constants: &[Value],
+    ) -> FilterPropagateResult {
+        let Some(data) = stats.get_numeric_data() else {
+            return FilterPropagateResult::NoPruningPossible;
+        };
+        let logical_type = stats.get_type();
+        match comparison_type {
+            ExpressionType::CompareEqual => {
+                let mut found_unknown = false;
+                for constant in constants {
+                    let Some(value) = Self::value_as_f64(constant) else {
+                        return FilterPropagateResult::NoPruningPossible;
+                    };
+                    let result = Self::check_zonemap(data, comparison_type, value, logical_type);
+                    if result == FilterPropagateResult::FilterAlwaysTrue {
+                        return FilterPropagateResult::FilterAlwaysTrue;
+                    }
+                    if result == FilterPropagateResult::NoPruningPossible {
+                        found_unknown = true;
+                    }
+                }
+                if found_unknown {
+                    FilterPropagateResult::NoPruningPossible
+                } else {
+                    FilterPropagateResult::FilterAlwaysFalse
+                }
+            }
+            _ => {
+                let Some(first) = constants.first() else {
+                    return FilterPropagateResult::NoPruningPossible;
+                };
+                let Some(value) = Self::value_as_f64(first) else {
+                    return FilterPropagateResult::NoPruningPossible;
+                };
+                Self::check_zonemap(data, comparison_type, value, logical_type)
+            }
+        }
     }
 
     /// Convert statistics to string

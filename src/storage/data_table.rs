@@ -34,6 +34,7 @@ use crate::catalog::{PhysicalIndex, TableCatalogEntry};
 use crate::common::errors::StorageResult;
 use crate::common::types::{DataChunk, LogicalType, Vector};
 use crate::db::conn::ClientContext;
+use crate::planner::TableFilterSet;
 use crate::storage::local_storage::LocalStorage;
 use crate::storage::storage_info::StorageError;
 use crate::storage::local_storage::MAX_ROW_ID;
@@ -87,12 +88,6 @@ impl ColumnDefinition {
 }
 
 // ─── Scan 相关类型 ────────────────────────────────────────────────────────────
-
-/// 列过滤集（C++: `TableFilterSet`）。
-///
-/// 携带谓词下推的列级过滤器；完整实现在执行层。
-#[derive(Clone, Default)]
-pub struct TableFilterSet;
 
 /// 物理列存储索引（C++: `StorageIndex`，区别于逻辑 `LogicalIndex`）。
 ///

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::common::types::{SelectionVector, Vector, VectorType};
+use crate::common::types::{LogicalTypeId, SelectionVector, Vector, VectorType};
 use crate::function::compression_function::{
     AnalyzeState, CompressionFunction, CompressionInfo, CompressionState,
 };
@@ -142,6 +142,22 @@ fn fill_validity(result: &mut Vector, start_idx: usize, count: usize, valid: boo
     }
 }
 
+fn scan_partial_validity(
+    segment: &ColumnSegment,
+    _state: &ColumnScanState,
+    scan_count: Idx,
+    result: &mut Vector,
+    result_offset: Idx,
+) {
+    let all_valid = !all_null(segment);
+    fill_validity(
+        result,
+        result_offset as usize,
+        scan_count as usize,
+        all_valid,
+    );
+}
+
 fn scan_partial_t<T: ConstantValue>(
     segment: &ColumnSegment,
     _state: &ColumnScanState,
@@ -167,6 +183,27 @@ fn scan_partial_t<T: ConstantValue>(
     fill_validity(result, result_offset as usize, scan_count as usize, true);
 }
 
+fn scan_vector_validity(
+    segment: &ColumnSegment,
+    _state: &ColumnScanState,
+    scan_count: Idx,
+    result: &mut Vector,
+) {
+    let all_valid = !all_null(segment);
+    if all_valid {
+        if result.vector_type == VectorType::Constant {
+            result.validity.set_valid(0);
+        }
+        return;
+    }
+    if result.logical_type.id == LogicalTypeId::Struct || result.vector_type == VectorType::Constant {
+        result.validity.set_invalid(0);
+        return;
+    }
+    result.flatten(scan_count as usize);
+    fill_validity(result, 0, scan_count as usize, false);
+}
+
 fn scan_vector_t<T: ConstantValue>(
     segment: &ColumnSegment,
     _state: &ColumnScanState,
@@ -190,6 +227,10 @@ fn fetch_row_t<T: ConstantValue>(segment: &ColumnSegment, _row_id: Idx, result: 
     scan_partial_t::<T>(segment, &ColumnScanState::default(), 1, result, result_idx);
 }
 
+fn fetch_row_validity(segment: &ColumnSegment, _row_id: Idx, result: &mut Vector, result_idx: Idx) {
+    scan_partial_validity(segment, &ColumnScanState::default(), 1, result, result_idx);
+}
+
 fn select_t<T: ConstantValue>(
     segment: &ColumnSegment,
     state: &ColumnScanState,
@@ -199,6 +240,17 @@ fn select_t<T: ConstantValue>(
     _sel_count: Idx,
 ) {
     scan_vector_t::<T>(segment, state, vector_count, result);
+}
+
+fn select_validity(
+    segment: &ColumnSegment,
+    state: &ColumnScanState,
+    _vector_count: Idx,
+    result: &mut Vector,
+    _sel: &SelectionVector,
+    sel_count: Idx,
+) {
+    scan_vector_validity(segment, state, sel_count, result);
 }
 
 fn empty_skip(_segment: &ColumnSegment, _state: &mut ColumnScanState, _skip_count: Idx) {}
@@ -218,6 +270,7 @@ impl ConstantFun {
             Some(compress_finalize),
             Some(init_scan),
             Some(match data_type {
+                PhysicalType::Bit => scan_vector_validity,
                 PhysicalType::Bool => scan_vector_t::<bool>,
                 PhysicalType::Int8 => scan_vector_t::<i8>,
                 PhysicalType::Int16 => scan_vector_t::<i16>,
@@ -233,6 +286,7 @@ impl ConstantFun {
                 _ => unreachable!("unsupported constant physical type"),
             }),
             Some(match data_type {
+                PhysicalType::Bit => scan_partial_validity,
                 PhysicalType::Bool => scan_partial_t::<bool>,
                 PhysicalType::Int8 => scan_partial_t::<i8>,
                 PhysicalType::Int16 => scan_partial_t::<i16>,
@@ -248,6 +302,7 @@ impl ConstantFun {
                 _ => unreachable!("unsupported constant physical type"),
             }),
             Some(match data_type {
+                PhysicalType::Bit => fetch_row_validity,
                 PhysicalType::Bool => fetch_row_t::<bool>,
                 PhysicalType::Int8 => fetch_row_t::<i8>,
                 PhysicalType::Int16 => fetch_row_t::<i16>,
@@ -268,6 +323,7 @@ impl ConstantFun {
             None,
             None,
             Some(match data_type {
+                PhysicalType::Bit => select_validity,
                 PhysicalType::Bool => select_t::<bool>,
                 PhysicalType::Int8 => select_t::<i8>,
                 PhysicalType::Int16 => select_t::<i16>,
@@ -288,7 +344,8 @@ impl ConstantFun {
     pub fn type_is_supported(physical_type: PhysicalType) -> bool {
         matches!(
             physical_type,
-            PhysicalType::Bool
+            PhysicalType::Bit
+                | PhysicalType::Bool
                 | PhysicalType::Int8
                 | PhysicalType::Int16
                 | PhysicalType::Int32

@@ -1,4 +1,6 @@
 use super::FilterPropagateResult;
+use crate::catalog::Value;
+use crate::common::enums::ExpressionType;
 use std::cmp::Ordering;
 
 /// Maximum size for min/max string prefix storage (8 bytes)
@@ -185,7 +187,7 @@ impl StringStats {
     /// Check zonemap for filtering
     pub fn check_zonemap(
         data: &StringStatsData,
-        comparison_type: &str,
+        comparison_type: ExpressionType,
         constant: &str,
     ) -> FilterPropagateResult {
         let constant_bytes = constant.as_bytes();
@@ -199,15 +201,23 @@ impl StringStats {
         let max_cmp = Self::compare_bytes(&constant_prefix, &data.max);
 
         match comparison_type {
-            "=" | "==" => {
+            ExpressionType::CompareEqual => {
                 // Equal: constant must be within [min, max]
                 if min_cmp >= 0 && max_cmp <= 0 {
-                    FilterPropagateResult::NoPruningPossible
+                    if min_cmp == 0
+                        && max_cmp == 0
+                        && data.has_max_string_length
+                        && data.max_string_length as usize == constant_size
+                    {
+                        FilterPropagateResult::FilterAlwaysTrue
+                    } else {
+                        FilterPropagateResult::NoPruningPossible
+                    }
                 } else {
                     FilterPropagateResult::FilterAlwaysFalse
                 }
             }
-            "!=" | "<>" => {
+            ExpressionType::CompareNotEqual => {
                 // Not equal: if constant is outside [min, max], always true
                 if min_cmp < 0 || max_cmp > 0 {
                     FilterPropagateResult::FilterAlwaysTrue
@@ -215,23 +225,81 @@ impl StringStats {
                     FilterPropagateResult::NoPruningPossible
                 }
             }
-            ">=" | ">" => {
-                // Greater than: if max <= constant, always false
+            ExpressionType::CompareGreaterThan => {
                 if max_cmp <= 0 {
-                    FilterPropagateResult::NoPruningPossible
-                } else {
                     FilterPropagateResult::FilterAlwaysFalse
+                } else if min_cmp > 0 {
+                    FilterPropagateResult::FilterAlwaysTrue
+                } else {
+                    FilterPropagateResult::NoPruningPossible
                 }
             }
-            "<=" | "<" => {
-                // Less than: if min >= constant, always false
-                if min_cmp >= 0 {
-                    FilterPropagateResult::NoPruningPossible
-                } else {
+            ExpressionType::CompareGreaterThanOrEqualTo => {
+                if max_cmp < 0 {
                     FilterPropagateResult::FilterAlwaysFalse
+                } else if min_cmp >= 0 {
+                    FilterPropagateResult::FilterAlwaysTrue
+                } else {
+                    FilterPropagateResult::NoPruningPossible
+                }
+            }
+            ExpressionType::CompareLessThan => {
+                if min_cmp >= 0 {
+                    FilterPropagateResult::FilterAlwaysFalse
+                } else if max_cmp < 0 {
+                    FilterPropagateResult::FilterAlwaysTrue
+                } else {
+                    FilterPropagateResult::NoPruningPossible
+                }
+            }
+            ExpressionType::CompareLessThanOrEqualTo => {
+                if min_cmp > 0 {
+                    FilterPropagateResult::FilterAlwaysFalse
+                } else if max_cmp <= 0 {
+                    FilterPropagateResult::FilterAlwaysTrue
+                } else {
+                    FilterPropagateResult::NoPruningPossible
                 }
             }
             _ => FilterPropagateResult::NoPruningPossible,
+        }
+    }
+
+    pub fn check_zonemap_stats(
+        stats: &super::BaseStatistics,
+        comparison_type: ExpressionType,
+        constants: &[Value],
+    ) -> FilterPropagateResult {
+        let super::StatsData::String(data) = stats.get_stats_data() else {
+            return FilterPropagateResult::NoPruningPossible;
+        };
+        match comparison_type {
+            ExpressionType::CompareEqual => {
+                let mut found_unknown = false;
+                for constant in constants {
+                    let Value::Text(constant) = constant else {
+                        return FilterPropagateResult::NoPruningPossible;
+                    };
+                    let result = Self::check_zonemap(data, comparison_type, constant);
+                    if result == FilterPropagateResult::FilterAlwaysTrue {
+                        return FilterPropagateResult::FilterAlwaysTrue;
+                    }
+                    if result == FilterPropagateResult::NoPruningPossible {
+                        found_unknown = true;
+                    }
+                }
+                if found_unknown {
+                    FilterPropagateResult::NoPruningPossible
+                } else {
+                    FilterPropagateResult::FilterAlwaysFalse
+                }
+            }
+            _ => {
+                let Some(Value::Text(constant)) = constants.first() else {
+                    return FilterPropagateResult::NoPruningPossible;
+                };
+                Self::check_zonemap(data, comparison_type, constant)
+            }
         }
     }
 

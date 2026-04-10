@@ -260,6 +260,140 @@ fn fixed_size_fetch_row(segment: &ColumnSegment, row_id: Idx, result: &mut Vecto
     segment.fixed_size_fetch_row(row_id, result, result_idx);
 }
 
+fn validity_row_is_valid(buffer: &[u8], row_idx: usize) -> bool {
+    let byte_idx = row_idx / 8;
+    let bit_idx = row_idx % 8;
+    buffer
+        .get(byte_idx)
+        .map(|byte| (byte >> bit_idx) & 1 == 1)
+        .unwrap_or(true)
+}
+
+fn validity_set_invalid(buffer: &mut [u8], row_idx: usize) {
+    let byte_idx = row_idx / 8;
+    let bit_idx = row_idx % 8;
+    if let Some(byte) = buffer.get_mut(byte_idx) {
+        *byte &= !(1 << bit_idx);
+    }
+}
+
+fn validity_set_valid(buffer: &mut [u8], row_idx: usize) {
+    let byte_idx = row_idx / 8;
+    let bit_idx = row_idx % 8;
+    if let Some(byte) = buffer.get_mut(byte_idx) {
+        *byte |= 1 << bit_idx;
+    }
+}
+
+fn validity_init_scan(
+    segment: &ColumnSegment,
+    state: &mut ColumnScanState,
+) -> Option<Box<dyn SegmentScanState>> {
+    fixed_size_init_scan(segment, state)
+}
+
+fn validity_scan_partial(
+    segment: &ColumnSegment,
+    state: &ColumnScanState,
+    scan_count: Idx,
+    result: &mut Vector,
+    result_offset: Idx,
+) {
+    let start = state.position_in_segment() as usize;
+    let source = match segment.segment_type {
+        crate::storage::table::column_segment::ColumnSegmentType::Transient => {
+            let buf = segment.buffer.lock();
+            buf.clone()
+        }
+        crate::storage::table::column_segment::ColumnSegmentType::Persistent => {
+            let mut data = Vec::new();
+            if let Some(handle) = state.pinned_buffer.as_ref() {
+                let _ = handle.with_data(|block_data| {
+                    let begin = segment.block_offset() as usize;
+                    let end = begin + segment.segment_size() as usize;
+                    data.extend_from_slice(&block_data[begin..end]);
+                });
+            }
+            data
+        }
+    };
+    for i in 0..scan_count as usize {
+        if !validity_row_is_valid(&source, start + i) {
+            result.validity.set_invalid(result_offset as usize + i);
+        }
+    }
+}
+
+fn validity_scan(
+    segment: &ColumnSegment,
+    state: &ColumnScanState,
+    scan_count: Idx,
+    result: &mut Vector,
+) {
+    validity_scan_partial(segment, state, scan_count, result, 0);
+}
+
+fn validity_select(
+    segment: &ColumnSegment,
+    state: &ColumnScanState,
+    _vector_count: Idx,
+    result: &mut Vector,
+    sel: &SelectionVector,
+    sel_count: Idx,
+) {
+    let start = state.position_in_segment() as usize;
+    let source = match segment.segment_type {
+        crate::storage::table::column_segment::ColumnSegmentType::Transient => {
+            let buf = segment.buffer.lock();
+            buf.clone()
+        }
+        crate::storage::table::column_segment::ColumnSegmentType::Persistent => {
+            let mut data = Vec::new();
+            if let Some(handle) = state.pinned_buffer.as_ref() {
+                let _ = handle.with_data(|block_data| {
+                    let begin = segment.block_offset() as usize;
+                    let end = begin + segment.segment_size() as usize;
+                    data.extend_from_slice(&block_data[begin..end]);
+                });
+            }
+            data
+        }
+    };
+    for i in 0..sel_count as usize {
+        let source_idx = start + sel.get_index(i);
+        if !validity_row_is_valid(&source, source_idx) {
+            result.validity.set_invalid(i);
+        }
+    }
+}
+
+fn validity_fetch_row(segment: &ColumnSegment, row_id: Idx, result: &mut Vector, result_idx: Idx) {
+    let row_idx = row_id as usize;
+    let is_valid = match segment.segment_type {
+        crate::storage::table::column_segment::ColumnSegmentType::Transient => {
+            let buf = segment.buffer.lock();
+            validity_row_is_valid(&buf, row_idx)
+        }
+        crate::storage::table::column_segment::ColumnSegmentType::Persistent => {
+            let handle = segment
+                .block_handle
+                .as_ref()
+                .expect("persistent validity segment missing block handle");
+            let pinned = handle.block_manager.buffer_manager().pin(handle.clone());
+            pinned
+                .with_data(|block_data| {
+                    let begin = segment.block_offset() as usize;
+                    let end = begin + segment.segment_size() as usize;
+                    validity_row_is_valid(&block_data[begin..end], row_idx)
+                })
+                .unwrap_or(true)
+        }
+    };
+    if !is_valid {
+        result.validity.set_invalid(result_idx as usize);
+    }
+}
+
 fn empty_skip(_segment: &ColumnSegment, _state: &mut ColumnScanState, _skip_count: Idx) {}
 
 fn fixed_size_init_append(segment: &ColumnSegment, state: &mut ColumnAppendState) {
@@ -282,6 +416,62 @@ fn fixed_size_finalize_append(segment: &ColumnSegment, state: &mut ColumnAppendS
 
 fn fixed_size_revert_append(segment: &ColumnSegment, new_count: Idx) {
     segment.fixed_size_revert_append(new_count);
+}
+
+fn validity_append(
+    segment: &ColumnSegment,
+    _state: &mut ColumnAppendState,
+    vdata: &UnifiedVectorFormat<'_>,
+    offset: Idx,
+    count: Idx,
+) -> Idx {
+    let current_count = segment.count() as usize;
+    let max_tuples = segment.segment_size() as usize * 8;
+    let append_count = (count as usize).min(max_tuples.saturating_sub(current_count));
+    if append_count == 0 {
+        return 0;
+    }
+
+    if vdata.validity.is_all_valid() {
+        segment.set_count((current_count + append_count) as Idx);
+        segment.stats.lock().set_has_no_null();
+        return append_count as Idx;
+    }
+
+    let mut stats = segment.stats.lock();
+    let mut buf = segment.buffer.lock();
+    for i in 0..append_count {
+        let source_idx = vdata
+            .sel
+            .map(|sel| sel.get_index(offset as usize + i))
+            .unwrap_or(offset as usize + i);
+        let target_idx = current_count + i;
+        if !vdata.validity.row_is_valid(source_idx) {
+            validity_set_invalid(&mut buf, target_idx);
+            stats.set_has_null();
+        } else {
+            stats.set_has_no_null();
+        }
+    }
+    segment.set_count((current_count + append_count) as Idx);
+    append_count as Idx
+}
+
+fn validity_finalize_append(segment: &ColumnSegment, _state: &mut ColumnAppendState) -> Idx {
+    let count = segment.count() as usize;
+    (((count + 2048 - 1) / 2048) * 256) as Idx
+}
+
+fn validity_revert_append(segment: &ColumnSegment, new_count: Idx) {
+    let old_count = segment.count();
+    if new_count >= old_count {
+        return;
+    }
+    let mut buf = segment.buffer.lock();
+    for row_idx in new_count as usize..old_count as usize {
+        validity_set_valid(&mut buf, row_idx);
+    }
+    segment.set_count(new_count);
 }
 
 pub struct FixedSizeUncompressed;
@@ -323,7 +513,26 @@ pub struct ValidityUncompressed;
 
 impl ValidityUncompressed {
     pub fn get_function(data_type: PhysicalType) -> CompressionFunction {
-        FixedSizeUncompressed::get_function(data_type)
+        CompressionFunction::new(
+            CompressionType::Uncompressed,
+            data_type,
+            Some(init_analyze),
+            Some(analyze),
+            Some(final_analyze),
+            Some(init_compression),
+            Some(compress),
+            Some(compress_finalize),
+            Some(validity_init_scan),
+            Some(validity_scan),
+            Some(validity_scan_partial),
+            Some(validity_fetch_row),
+            Some(empty_skip),
+            Some(fixed_size_init_append),
+            Some(validity_append),
+            Some(validity_finalize_append),
+            Some(validity_revert_append),
+            Some(validity_select),
+        )
     }
 }
 
@@ -332,6 +541,7 @@ pub struct UncompressedFun;
 impl UncompressedFun {
     pub fn get_function(data_type: PhysicalType) -> CompressionFunction {
         match data_type {
+            PhysicalType::Bit => ValidityUncompressed::get_function(data_type),
             PhysicalType::Bool
             | PhysicalType::Int8
             | PhysicalType::Int16
@@ -354,7 +564,7 @@ impl UncompressedFun {
     pub fn type_is_supported(data_type: PhysicalType) -> bool {
         matches!(
             data_type,
-            PhysicalType::Bool
+            PhysicalType::Bool | PhysicalType::Bit
                 | PhysicalType::Int8
                 | PhysicalType::Int16
                 | PhysicalType::Int32
