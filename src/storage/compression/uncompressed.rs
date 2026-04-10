@@ -155,7 +155,7 @@ fn init_compression(
     checkpoint_state: Arc<Mutex<ColumnCheckpointState>>,
     _analyze_state: Box<dyn AnalyzeState>,
 ) -> Box<dyn CompressionState> {
-    let logical_type = checkpoint_state.lock().get_original_column().ctx.logical_type.clone();
+    let logical_type = checkpoint_state.lock().get_original_column().base.logical_type.clone();
     let current_segment = Arc::new(ColumnSegment::create_transient(
         logical_type.clone(),
         info.get_block_size(),

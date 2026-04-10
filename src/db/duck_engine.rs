@@ -9,7 +9,7 @@ use crate::common::errors::{Result, anyhow};
 use crate::common::types::{DataChunk, LogicalType};
 use crate::db::conn::{Connection, DatabaseInstance, TableHandle};
 use crate::storage::data_table::StorageIndex;
-use crate::storage::table::scan_state::{ParallelTableScanState, TableScanState};
+use crate::storage::table::scan_state::{ParallelCollectionScanState, ParallelTableScanState, TableScanState};
 use crate::storage::table::segment_base::SegmentBase;
 use crate::transaction::duck_transaction_manager::DuckTxnHandle;
 
@@ -217,7 +217,7 @@ impl DuckConnection {
         let resolved = self.resolve_scan(table_name, request)?;
         let mut parallel_state = EngineParallelScanState {
             parallel_state: ParallelTableScanState {
-                scan_state: crate::storage::table::scan_state::ParallelCollectionScanState {
+                scan_state: ParallelCollectionScanState {
                     row_groups: None,
                     current_row_group: None,
                     next_row_group_index: 0,
@@ -227,7 +227,7 @@ impl DuckConnection {
                     processed_rows: 0,
                     lock: parking_lot::Mutex::new(()),
                 },
-                local_state: crate::storage::table::scan_state::ParallelCollectionScanState {
+                local_state: ParallelCollectionScanState {
                     row_groups: None,
                     current_row_group: None,
                     next_row_group_index: 0,

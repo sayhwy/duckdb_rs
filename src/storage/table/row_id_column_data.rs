@@ -12,9 +12,9 @@
 //! # C++ → Rust 映射
 //!
 //! C++ 继承：`class RowIdColumnData : public ColumnData`。
-//! Rust：`RowIdColumnData` 实现 `ColumnData` trait，并作为 `ColumnDataKind::RowId` 变体。
+//! Rust：`RowIdColumnData` 作为独立列类型，复用 `ColumnDataBase` 的基础状态。
 
-use super::column_data::{ColumnDataContext, ColumnDataType};
+use super::column_data::{ColumnDataBase, ColumnDataType};
 use super::data_table_info::DataTableInfo;
 use super::types::{Idx, LogicalType, RowId, TransactionData};
 use std::sync::Arc;
@@ -26,14 +26,14 @@ use std::sync::Arc;
 /// 扫描时不读磁盘，动态生成行号向量。
 pub struct RowIdColumnData {
     /// 基础上下文（C++: `ColumnData` 基类字段）。
-    pub ctx: ColumnDataContext,
+    pub base: ColumnDataBase,
 }
 
 impl RowIdColumnData {
     /// 构造（C++: `RowIdColumnData(BlockManager&, DataTableInfo&)`）。
     pub fn new(info: Arc<DataTableInfo>, column_index: Idx) -> Self {
         Self {
-            ctx: ColumnDataContext::new(
+            base: ColumnDataBase::new(
                 info,
                 column_index,
                 LogicalType::bigint(),
@@ -97,15 +97,15 @@ impl RowIdColumnData {
 
     /// Append（C++: `Append()`）— row_id 列由引擎自动维护，不手动追加。
     pub fn append(&mut self, _count: Idx) {
-        let old = self.ctx.count.load(std::sync::atomic::Ordering::Relaxed);
-        self.ctx
+        let old = self.base.count.load(std::sync::atomic::Ordering::Relaxed);
+        self.base
             .count
             .store(old + _count, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// RevertAppend（C++: `RevertAppend(row_t new_count)`）。
     pub fn revert_append(&mut self, new_count: RowId) {
-        self.ctx
+        self.base
             .count
             .store(new_count as u64, std::sync::atomic::Ordering::Relaxed);
     }

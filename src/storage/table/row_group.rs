@@ -16,7 +16,7 @@
 //! | `reference<RowGroupCollection> collection` | `Weak<RowGroupCollection>` | No circular Arc |
 //! | `atomic<optional_ptr<RowVersionManager>> version_info` | `AtomicPtr` → `Mutex` | Lazy init |
 //! | `shared_ptr<RowVersionManager> owned_version_info` | `Arc<RowVersionManager>` | |
-//! | `mutable vector<shared_ptr<ColumnData>> columns` | `Mutex<Vec<Option<Arc<ColumnDataKind>>>>` | Lazy-loaded |
+//! | `mutable vector<shared_ptr<ColumnData>> columns` | `Mutex<Vec<Option<Arc<ColumnData>>>>` | Lazy-loaded |
 //! | `mutable unique_ptr<atomic<bool>[]> is_loaded` | `Vec<AtomicBool>` | Per-column load flags |
 //! | `mutable mutex row_group_lock` | `Mutex<RowGroupInner>` | |
 
@@ -31,7 +31,7 @@ use super::append_state::{ColumnAppendState, RowGroupAppendState};
 use super::chunk_info::SelectionVector;
 use super::column_checkpoint_state::PartialBlockManager;
 use super::column_data::{
-    ColumnData, ColumnDataKind, ColumnKindData, PersistentColumnData, PersistentRowGroupData,
+    ColumnData, ColumnKindData, PersistentColumnData, PersistentRowGroupData,
     logical_type_to_physical,
 };
 use super::column_segment::{SegmentStatistics, UnifiedVectorFormat};
@@ -239,7 +239,7 @@ impl RowGroup {
         let pointers = read_persistent_column_pointers(&mut de, &logical_type)
             .expect("failed to deserialize persistent column");
 
-        let column = ColumnDataKind::create(
+        let column = ColumnData::create(
             Arc::clone(&collection.info),
             col as Idx,
             logical_type.clone(),
@@ -247,7 +247,7 @@ impl RowGroup {
             false,
         );
         {
-            let mut lock = column.ctx.data.lock();
+            let mut lock = column.base.data.lock();
             let mut row_start = 0;
             for pointer in pointers {
                 // Register the block with the BufferPool (idempotent: returns
@@ -268,12 +268,12 @@ impl RowGroup {
                 );
                 let segment = Arc::new(segment);
                 column
-                    .ctx
+                    .base
                     .data
                     .append_segment(&mut lock, segment, row_start);
                 row_start += pointer.tuple_count;
             }
-            column.ctx.count.store(row_start, Ordering::Relaxed);
+            column.base.count.store(row_start, Ordering::Relaxed);
         }
         self.columns.lock()[col] = Some(column);
         self.is_loaded[col].store(true, Ordering::Release);
@@ -292,7 +292,7 @@ impl RowGroup {
             if columns.get(idx).and_then(|entry| entry.as_ref()).is_some() {
                 continue;
             }
-            let column = ColumnDataKind::create(
+            let column = ColumnData::create(
                 Arc::clone(&collection.info),
                 idx as Idx,
                 logical_type,
@@ -336,7 +336,7 @@ impl RowGroup {
     /// # Differences from C++
     /// - The C++ version takes a `SegmentNode<RowGroup>&`; here we accept a
     ///   bare `node_index: usize` (the row group's index in the segment tree).
-    /// - Column-level `InitializeScan` is delegated to `ColumnDataKind::initialize_scan`,
+    /// - Column-level `InitializeScan` is delegated to `ColumnData::initialize_scan`,
     ///   which is currently a stub (no segment-tree seek).
     /// `node_row_start` is the segment-tree node's row_start (may differ from `self.row_start`
     /// when a row group was merged from local storage via `merge_storage`).
@@ -1058,7 +1058,7 @@ fn serialize_column_to_persistent(
     let physical_type = logical_type_to_physical(logical_type);
     let logical_type_id = logical_type.id;
     let has_updates = col.has_updates();
-    let pointers = col.ctx.get_data_pointers();
+    let pointers = col.base.get_data_pointers();
 
     // Build validity-column logical type for child serialisation.
     let validity_type = LogicalType::boolean(); // validity columns stored as bool bitmask

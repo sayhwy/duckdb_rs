@@ -6,7 +6,7 @@
 //!
 //! | C++ | Rust |
 //! |-----|------|
-//! | `class ColumnData` (virtual base) | `ColumnDataContext` + `ColumnDataKind` struct |
+//! | `class ColumnData` (virtual base) | `ColumnDataBase` + `ColumnData` struct |
 //! | `class StandardColumnData : public ColumnData` | `ColumnKindData::Standard` variant |
 //! | `class ValidityColumnData : public ColumnData` | `ColumnKindData::Validity` variant |
 //! | `class ListColumnData : public ColumnData` | `ColumnKindData::List` variant |
@@ -19,7 +19,7 @@
 //!
 //! The auxiliary per-variant structs (`StandardColumnData`, `ValidityColumnData`,
 //! etc.) in their own files still exist for compatibility; they wrap
-//! `ColumnDataContext` but are separate from the `ColumnDataKind` enum.
+//! `ColumnDataBase` but are separate from the `ColumnData` enum-like wrapper.
 
 use std::sync::{
     Arc,
@@ -98,15 +98,15 @@ pub enum FilterPropagateResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ColumnDataContext
+// ColumnDataBase
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Fields shared by every column variant — the C++ `ColumnData` base class.
 ///
 /// Composite and sub-type column structs (`StandardColumnData`,
-/// `ValidityColumnData`, etc.) embed this as a `pub ctx: ColumnDataContext`
-/// field.  The polymorphic `ColumnDataKind` enum also stores one here.
-pub struct ColumnDataContext {
+/// `ValidityColumnData`, etc.) embed this as a `pub base: ColumnDataBase`
+/// field. The polymorphic `ColumnData` wrapper also stores one here.
+pub struct ColumnDataBase {
     /// Total rows in this column (C++: `idx_t count`).
     pub count: AtomicU64,
 
@@ -150,7 +150,7 @@ pub struct ColumnDataContext {
     pub compression: Mutex<Option<CompressionType>>,
 }
 
-impl ColumnDataContext {
+impl ColumnDataBase {
     /// Construct a new context.
     ///
     /// Mirrors `ColumnData::ColumnData(...)`.
@@ -175,7 +175,7 @@ impl ColumnDataContext {
             None
         };
 
-        ColumnDataContext {
+        ColumnDataBase {
             count: AtomicU64::new(0),
             info,
             column_index,
@@ -744,7 +744,7 @@ impl ColumnDataContext {
     /// C++: `ColumnData::RevertAppend`.
     pub fn revert_append(&self, new_count: Idx) {
         todo!(
-            "ColumnDataContext::revert_append: truncate segment tree to {}",
+            "ColumnDataBase::revert_append: truncate segment tree to {}",
             new_count
         )
     }
@@ -826,72 +826,67 @@ impl ColumnDataContext {
 // ColumnKindData
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Type-specific extra data for a `ColumnDataKind`.
+/// Type-specific extra data for a `ColumnData`.
 ///
 /// Mirrors the per-subclass fields in C++.
 pub enum ColumnKindData {
     /// Flat scalar column (`INTEGER`, `FLOAT`, `VARCHAR`, …).
     Standard {
         /// NULL bitmask child; absent for `NOT NULL` columns.
-        validity: Option<Arc<ColumnDataKind>>,
+        validity: Option<Arc<ColumnData>>,
     },
     /// NULL bitmask column (always a child of another column).
     Validity,
     /// Variable-length list column (`LIST(T)`).
     List {
         /// Offset + element data child.
-        child_column: Arc<ColumnDataKind>,
+        child_column: Arc<ColumnData>,
         /// Top-level null bitmask.
-        validity: Arc<ColumnDataKind>,
+        validity: Arc<ColumnData>,
     },
     /// Fixed-length array column (`ARRAY(T, N)`).
     Array {
         /// Flat element data (length = `row_count * array_size`).
-        child_column: Arc<ColumnDataKind>,
+        child_column: Arc<ColumnData>,
         /// Top-level null bitmask.
-        validity: Arc<ColumnDataKind>,
+        validity: Arc<ColumnData>,
         /// Fixed element count per row (the `N` in `ARRAY(T, N)`).
         array_size: u32,
     },
     /// Nested struct column (`STRUCT(a T1, b T2, …)`).
     Struct {
         /// One sub-column per field, in schema order.
-        sub_columns: Vec<Arc<ColumnDataKind>>,
+        sub_columns: Vec<Arc<ColumnData>>,
         /// Top-level null bitmask.
-        validity: Arc<ColumnDataKind>,
+        validity: Arc<ColumnData>,
     },
     /// JSON / Variant semi-structured column.
     Variant {
         /// Sub-columns: `[unshredded]` or `[unshredded, shredded]`.
-        sub_columns: Vec<Arc<ColumnDataKind>>,
+        sub_columns: Vec<Arc<ColumnData>>,
         /// Top-level null bitmask (optional).
-        validity: Option<Arc<ColumnDataKind>>,
+        validity: Option<Arc<ColumnData>>,
     },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ColumnDataKind  (the polymorphic column type)
+// ColumnData  (the polymorphic column type)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Polymorphic column storage — replaces C++ virtual dispatch.
 ///
 /// Each instance owns:
-/// - A `ColumnDataContext` with the segment tree, statistics, and MVCC log.
+/// - A `ColumnDataBase` with the segment tree, statistics, and MVCC log.
 /// - A `ColumnKindData` with type-specific child column references.
-///
-/// Prefer using the `ColumnData` type alias for brevity.
-pub struct ColumnDataKind {
+pub struct ColumnData {
     /// Shared base fields (segment tree, stats, MVCC log, …).
-    pub ctx: ColumnDataContext,
+    pub base: ColumnDataBase,
 
     /// Type-specific extra data and child column references.
     pub kind: ColumnKindData,
 }
 
-/// Type alias so code written as `Arc<ColumnData>` continues to compile.
-pub type ColumnData = ColumnDataKind;
-
-impl ColumnDataKind {
+impl ColumnData {
     // ── Constructors ──────────────────────────────────────────────────────────
 
     /// Create a standard (flat scalar) column.
@@ -905,8 +900,8 @@ impl ColumnDataKind {
         // Create validity child column (required by DuckDB format)
         let validity = Self::validity(info.clone(), column_index, data_type);
 
-        Arc::new(ColumnDataKind {
-            ctx: ColumnDataContext::new(info, column_index, logical_type, data_type, has_parent),
+        Arc::new(ColumnData {
+            base: ColumnDataBase::new(info, column_index, logical_type, data_type, has_parent),
             kind: ColumnKindData::Standard {
                 validity: Some(validity),
             },
@@ -919,8 +914,8 @@ impl ColumnDataKind {
         column_index: Idx,
         data_type: ColumnDataType,
     ) -> Arc<Self> {
-        Arc::new(ColumnDataKind {
-            ctx: ColumnDataContext::new(
+        Arc::new(ColumnData {
+            base: ColumnDataBase::new(
                 info,
                 column_index,
                 LogicalType::validity(),
@@ -950,28 +945,28 @@ impl ColumnDataKind {
 
     /// Access the shared base context.
     #[inline]
-    pub fn ctx(&self) -> &ColumnDataContext {
-        &self.ctx
+    pub fn base(&self) -> &ColumnDataBase {
+        &self.base
     }
 
     /// Total rows in this column.
     pub fn count(&self) -> Idx {
-        self.ctx.count()
+        self.base.count()
     }
 
     /// Bytes allocated for transient segments.
     pub fn allocation_size(&self) -> Idx {
-        self.ctx.allocation_size()
+        self.base.allocation_size()
     }
 
     /// `true` if there are any pending MVCC updates.
     pub fn has_updates(&self) -> bool {
-        self.ctx.has_updates()
+        self.base.has_updates()
     }
 
     /// `true` if any segment is transient or has pending updates.
     pub fn has_any_changes(&self) -> bool {
-        self.ctx.has_any_changes()
+        self.base.has_any_changes()
     }
 
     /// Checkpoint this column and return the checkpoint state.
@@ -984,7 +979,7 @@ impl ColumnDataKind {
         partial_block_manager: Arc<PartialBlockManager>,
     ) -> Arc<Mutex<ColumnCheckpointState>> {
         let checkpoint_state = Arc::new(Mutex::new(ColumnCheckpointState::with_type(
-            self.ctx.logical_type.clone(),
+            self.base.logical_type.clone(),
         )));
         {
             let mut state = checkpoint_state.lock();
@@ -992,7 +987,7 @@ impl ColumnDataKind {
             state.set_partial_block_manager(partial_block_manager);
         }
 
-        if self.ctx.data.lock().0.is_empty() {
+        if self.base.data.lock().0.is_empty() {
             return checkpoint_state;
         }
 
@@ -1010,17 +1005,17 @@ impl ColumnDataKind {
 
     /// Set up `state` for a forward scan from row 0.
     pub fn initialize_scan(&self, state: &mut ColumnScanState) {
-        self.ctx.initialize_scan(state);
+        self.base.initialize_scan(state);
     }
 
     /// Set up `state` for a forward scan from `row_idx`.
     pub fn initialize_scan_with_offset(&self, state: &mut ColumnScanState, row_idx: Idx) {
-        self.ctx.initialize_scan_with_offset(state, row_idx);
+        self.base.initialize_scan_with_offset(state, row_idx);
     }
 
     /// Number of rows to scan for the given vector-index window.
     pub fn get_vector_count(&self, vector_index: Idx) -> Idx {
-        self.ctx.get_vector_count(vector_index)
+        self.base.get_vector_count(vector_index)
     }
 
     // ── Append ────────────────────────────────────────────────────────────────
@@ -1029,7 +1024,7 @@ impl ColumnDataKind {
     ///
     /// Also initialises child-column append states (validity, children).
     pub fn initialize_append(&self, state: &mut ColumnAppendState) {
-        self.ctx.initialize_append(state);
+        self.base.initialize_append(state);
         match &self.kind {
             ColumnKindData::Standard { validity } => {
                 if let Some(v) = validity {
@@ -1097,7 +1092,7 @@ impl ColumnDataKind {
 
     /// Append `append_count` values from `vdata`, updating `append_stats`.
     ///
-    /// Delegates to `ColumnDataContext::append_data` and also appends to child columns.
+    /// Delegates to `ColumnDataBase::append_data` and also appends to child columns.
     ///
     /// C++: `ColumnData::AppendData(BaseStatistics&, ColumnAppendState&,
     ///           UnifiedVectorFormat&, idx_t)`
@@ -1109,7 +1104,7 @@ impl ColumnDataKind {
         append_count: Idx,
     ) {
         // Append to main column
-        self.ctx
+        self.base
             .append_data(append_stats, state, vdata, append_count);
 
         // Append to child columns (validity, etc.)
@@ -1222,7 +1217,7 @@ impl ColumnDataKind {
 
     /// Undo rows beyond `new_count`.
     pub fn revert_append(&self, new_count: Idx) {
-        self.ctx.revert_append(new_count);
+        self.base.revert_append(new_count);
     }
 
     // ── Scan operations ───────────────────────────────────────────────────────
@@ -1245,19 +1240,19 @@ impl ColumnDataKind {
         result: &mut Vector,
     ) -> Idx {
         // C++: auto target_count = GetVectorCount(vector_index)
-        let target_count = self.ctx.get_vector_count(vector_index);
+        let target_count = self.base.get_vector_count(vector_index);
         // Determine scan type based on whether we need to scan across segments
-        let scan_type = self.ctx.get_vector_scan_type(state, target_count);
+        let scan_type = self.base.get_vector_scan_type(state, target_count);
         let scanned = self
-            .ctx
+            .base
             .scan_vector(state, result, target_count, scan_type, 0);
         if scanned > 0 {
-            if let Some(update_segment) = self.ctx.updates.lock().as_ref() {
+            if let Some(update_segment) = self.base.updates.lock().as_ref() {
                 update_segment.fetch_updates(
                     transaction,
                     vector_index,
                     &mut result.raw_data_mut()
-                        [..(scanned as usize * self.ctx.logical_type.physical_size())],
+                        [..(scanned as usize * self.base.logical_type.physical_size())],
                 );
             }
         }
@@ -1269,14 +1264,14 @@ impl ColumnDataKind {
     /// Mirrors `ColumnData::Skip(ColumnScanState&, idx_t count)` which calls
     /// `state.Next(STANDARD_VECTOR_SIZE)` and follows segment boundaries.
     pub fn skip(&self, state: &mut ColumnScanState) {
-        self.ctx.skip(state);
+        self.base.skip(state);
     }
 
     // ── Statistics ────────────────────────────────────────────────────────────
 
     /// Merge segment stats into the row-group-level `TableStatistics`.
     pub fn merge_into_statistics(&self, stats: &TableStatistics) {
-        self.ctx.merge_into_statistics(stats);
+        self.base.merge_into_statistics(stats);
     }
 
     // ── Update (in-place, transient only) ─────────────────────────────────────
@@ -1294,7 +1289,7 @@ impl ColumnDataKind {
         use crate::storage::table::column_segment::ColumnSegmentType;
 
         let mut wrote = false;
-        self.ctx.for_each_segment(|segment, seg_row_start| {
+        self.base.for_each_segment(|segment, seg_row_start| {
             if wrote {
                 return;
             }

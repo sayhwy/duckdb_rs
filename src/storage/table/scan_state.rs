@@ -61,7 +61,7 @@ pub struct ColumnScanState {
 
     /// Row start of the current segment (C++: `current->GetRowStart()`).
     ///
-    /// Set by `ColumnDataContext::begin_scan_vector_internal` when a segment is
+    /// Set by `ColumnDataBase::begin_scan_vector_internal` when a segment is
     /// initialized.  Used by `position_in_segment()` to compute the per-segment
     /// row offset without holding the segment tree lock.
     pub segment_row_start: Idx,
@@ -115,7 +115,7 @@ impl ColumnScanState {
     ///
     /// Mirrors `ColumnScanState::Next(idx_t count)` in C++.
     /// Note: does **not** update `current_segment_index` — callers that cross
-    /// segment boundaries must do so explicitly (see `ColumnDataContext::skip`).
+    /// segment boundaries must do so explicitly (see `ColumnDataBase::skip`).
     pub fn next(&mut self, count: Idx) {
         self.offset_in_column += count;
         self.internal_index += count;

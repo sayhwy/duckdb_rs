@@ -15,7 +15,7 @@
 //! | C++ | Rust |
 //! |-----|------|
 //! | `class VariantColumnData : public ColumnData` | `VariantColumnData` impl `ColumnData` trait |
-//! | `vector<shared_ptr<ColumnData>> sub_columns` | `sub_columns: Vec<Arc<Mutex<ColumnDataKind>>>` |
+//! | `vector<shared_ptr<ColumnData>> sub_columns` | `sub_columns: Vec<Arc<Mutex<ColumnData>>>` |
 //! | `shared_ptr<ValidityColumnData> validity` | `validity: Option<Arc<Mutex<ValidityColumnData>>>` |
 //! | 静态方法 `ShredVariantData/UnshredVariantData` | 迁移到 `variant/` 子模块 |
 
@@ -23,7 +23,7 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 
 use super::column_checkpoint_state::ColumnCheckpointState;
-use super::column_data::{ColumnData, ColumnDataContext, ColumnDataType, PersistentColumnData};
+use super::column_data::{ColumnData, ColumnDataBase, ColumnDataType, PersistentColumnData};
 use super::data_table_info::DataTableInfo;
 use super::types::{Idx, LogicalType, RowId, TransactionData};
 use super::validity_column_data::ValidityColumnData;
@@ -33,7 +33,7 @@ use super::validity_column_data::ValidityColumnData;
 /// Variant（JSON）类型列数据（C++: `class VariantColumnData`）。
 pub struct VariantColumnData {
     /// 基础上下文（C++: `ColumnData` 基类字段）。
-    pub ctx: ColumnDataContext,
+    pub base: ColumnDataBase,
 
     /// 子列（Shredded 时有 2 个：类型列 + 值列）（C++: `vector<shared_ptr<ColumnData>>`）。
     pub sub_columns: Vec<Arc<Mutex<ColumnData>>>,
@@ -51,7 +51,7 @@ impl VariantColumnData {
         data_type: ColumnDataType,
     ) -> Self {
         Self {
-            ctx: ColumnDataContext::new(info, column_index, logical_type, data_type, false),
+            base: ColumnDataBase::new(info, column_index, logical_type, data_type, false),
             sub_columns: Vec::new(),
             validity: None,
         }
@@ -66,7 +66,7 @@ impl VariantColumnData {
 
     /// 最大条目数（C++: `GetMaxEntry()`）。
     pub fn get_max_entry(&self) -> Idx {
-        self.ctx.count.load(std::sync::atomic::Ordering::Relaxed)
+        self.base.count.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     // ── 扫描 ──────────────────────────────────────────────────────────────────

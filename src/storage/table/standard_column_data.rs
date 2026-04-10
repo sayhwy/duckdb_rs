@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use super::column_data::ColumnDataContext;
+use super::column_data::ColumnDataBase;
 use super::validity_column_data::ValidityColumnData;
 
 /// Standard (flat) column — the most common column variant.
@@ -19,7 +19,7 @@ use super::validity_column_data::ValidityColumnData;
 /// Mirrors `class StandardColumnData : public ColumnData`.
 pub struct StandardColumnData {
     /// Shared column metadata and segment tree.
-    pub ctx: ColumnDataContext,
+    pub base: ColumnDataBase,
 
     /// NULL bitmask for this column.
     /// Present unless the column is declared `NOT NULL`.
@@ -27,16 +27,16 @@ pub struct StandardColumnData {
 }
 
 impl StandardColumnData {
-    pub fn new(ctx: ColumnDataContext) -> Self {
+    pub fn new(base: ColumnDataBase) -> Self {
         StandardColumnData {
-            ctx,
+            base,
             validity: None,
         }
     }
 
-    pub fn with_validity(ctx: ColumnDataContext, validity: Arc<ValidityColumnData>) -> Self {
+    pub fn with_validity(base: ColumnDataBase, validity: Arc<ValidityColumnData>) -> Self {
         StandardColumnData {
-            ctx,
+            base,
             validity: Some(validity),
         }
     }

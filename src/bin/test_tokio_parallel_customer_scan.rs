@@ -8,7 +8,7 @@ use duckdb_rs::storage::data_table::StorageIndex;
 use duckdb_rs::storage::table::segment_base::SegmentBase;
 use tokio::sync::Mutex;
 
-const DB_PATH: &str = "/Users/liang/Documents/code/duckdb_rs/data/tpch-sf1.db";
+const DB_PATH: &str = "./data/tpch-sf1.db";
 const TABLE_NAME: &str = "lineitem";
 const TASK_COUNT: usize = 4;
 

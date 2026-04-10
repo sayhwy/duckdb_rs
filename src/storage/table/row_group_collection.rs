@@ -688,7 +688,7 @@ impl RowGroupCollection {
             for (u_col_idx, &col_id) in column_ids.iter().enumerate() {
                 let col_usize = col_id.0;
                 let col = rg.get_column(col_usize);
-                let type_size = col.ctx.logical_type.physical_size() as usize;
+                let type_size = col.base.logical_type.physical_size() as usize;
                 if type_size == 0 {
                     return Err(crate::storage::storage_info::StorageError::Other(format!(
                         "RowGroupCollection::update: unsupported variable-width update on column {}",
@@ -703,7 +703,7 @@ impl RowGroupCollection {
                 update_vector.copy_from_sel(&updates.data[u_col_idx], &batch_sel, batch_count, 0);
                 update_vector.flatten(batch_count);
 
-                if col.ctx.is_persistent() {
+                if col.base.is_persistent() {
                     let table = table.ok_or_else(|| {
                         crate::storage::storage_info::StorageError::Other(
                             "RowGroupCollection::update: persistent updates require table metadata"
@@ -711,8 +711,8 @@ impl RowGroupCollection {
                         )
                     })?;
                     let update_segment = {
-                        let _update_lock = col.ctx.update_lock.lock();
-                        let mut updates_guard = col.ctx.updates.lock();
+                        let _update_lock = col.base.update_lock.lock();
+                        let mut updates_guard = col.base.updates.lock();
                         Arc::clone(updates_guard.get_or_insert_with(|| {
                             let segment = Arc::new(super::update_segment::UpdateSegment::new(
                                 type_size as Idx,

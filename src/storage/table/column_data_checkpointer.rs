@@ -114,7 +114,7 @@ impl ColumnDataCheckpointData {
     pub fn get_type(&self) -> super::types::LogicalType {
         self.col_data
             .as_ref()
-            .map(|column| column.ctx.logical_type.clone())
+            .map(|column| column.base.logical_type.clone())
             .expect("col_data not set")
     }
 
@@ -218,15 +218,15 @@ impl ColumnDataCheckpointer {
         let mut scan_state = ColumnScanState::new();
         column.initialize_scan(&mut scan_state);
 
-        let vector_type = create_intermediate_type(&column.ctx.logical_type);
+        let vector_type = create_intermediate_type(&column.base.logical_type);
         let mut scan_vector = Vector::with_capacity(vector_type, crate::storage::table::types::STANDARD_VECTOR_SIZE as usize);
 
         let mut scanned = 0;
         while scanned < column.count() {
             let count = (column.count() - scanned).min(crate::storage::table::types::STANDARD_VECTOR_SIZE);
             scan_vector = Vector::with_capacity(scan_vector.get_type().clone(), crate::storage::table::types::STANDARD_VECTOR_SIZE as usize);
-            let scan_type = column.ctx.get_vector_scan_type(&scan_state, count);
-            column.ctx.scan_vector(
+            let scan_type = column.base.get_vector_scan_type(&scan_state, count);
+            column.base.scan_vector(
                 &mut scan_state,
                 &mut scan_vector,
                 count,
@@ -383,7 +383,7 @@ impl ColumnDataCheckpointer {
     fn write_persistent_segments(&self, state: &mut ColumnCheckpointState) {
         let column = state.get_original_column();
         state.data_pointers.clear();
-        for pointer in column.ctx.get_data_pointers() {
+        for pointer in column.base.get_data_pointers() {
             state.data_pointers.push(pointer);
         }
     }

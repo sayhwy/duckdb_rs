@@ -1,15 +1,3 @@
-// ============================================================
-// checkpoint_manager.rs 鈥?Checkpoint 绠＄悊鍣?
-// 瀵瑰簲 C++: duckdb/storage/checkpoint_manager.hpp/.cpp
-// ============================================================
-//
-// Checkpoint 娴佺▼锛?
-// 1. 鍒涘缓 MetadataWriter 鐢ㄤ簬鍐欏叆 catalog
-// 2. 閬嶅巻鎵€鏈?catalog entries锛坰chema, table, view 绛夛級
-// 3. 瀵规瘡涓〃锛屽啓鍏ヨ〃鏁版嵁鍜岃〃鍏冩暟鎹?
-// 4. 搴忓垪鍖?catalog 鍒?metadata
-// 5. 鏇存柊 DatabaseHeader 鐨?meta_block 鎸囬拡
-
 use std::sync::Arc;
 
 use crate::catalog::{ColumnDefinition, LogicalType, TableCatalogEntry};
@@ -201,9 +189,9 @@ impl CheckpointManager {
         &self,
         column: &std::sync::Arc<ColumnData>,
     ) -> PersistentColumnData {
-        let mut result = PersistentColumnData::new(&column.ctx.logical_type);
+        let mut result = PersistentColumnData::new(&column.base.logical_type);
         result.has_updates = column.has_updates();
-        result.pointers = column.ctx.get_data_pointers();
+        result.pointers = column.base.get_data_pointers();
 
         match &column.kind {
             ColumnKindData::Standard { validity } => {

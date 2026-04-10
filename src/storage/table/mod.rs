@@ -13,7 +13,7 @@
 //! column_segment                (ColumnSegment, ColumnSegmentType)
 //! column_segment_tree           (type alias: ColumnSegmentTree = SegmentTree<ColumnSegment>)
 //! update_segment                (UpdateSegment, UpdateNode)
-//! column_data                   (ColumnDataContext, ColumnDataKind, Persistent* structs)
+//! column_data                   (ColumnDataBase, ColumnData, Persistent* structs)
 //!   ├── standard_column_data
 //!   ├── validity_column_data
 //!   ├── list_column_data

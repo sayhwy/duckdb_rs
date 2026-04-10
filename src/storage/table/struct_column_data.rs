@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use super::column_data::{ColumnData, ColumnDataContext};
+use super::column_data::ColumnData;
 use super::validity_column_data::ValidityColumnData;
 
 /// Nested struct column.

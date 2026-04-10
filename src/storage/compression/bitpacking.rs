@@ -312,7 +312,7 @@ impl<T: BitpackingValue + std::fmt::Debug + Default + Send + Sync + 'static> Bit
         checkpoint_state: Arc<Mutex<ColumnCheckpointState>>,
         mut analyze_state: Box<dyn AnalyzeState>,
     ) -> Self {
-        let logical_type = checkpoint_state.lock().get_original_column().ctx.logical_type.clone();
+        let logical_type = checkpoint_state.lock().get_original_column().base.logical_type.clone();
         let mut state = BitpackingState::new();
         if let Some(analyze) = analyze_state
             .as_any_mut()

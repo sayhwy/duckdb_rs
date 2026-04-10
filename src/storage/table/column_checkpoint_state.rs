@@ -18,7 +18,7 @@ use std::sync::Arc;
 use crate::common::types::LogicalTypeId;
 use crate::storage::buffer::BlockManager as StorageBlockManager;
 
-use super::column_data::{ColumnData, ColumnDataKind, ColumnDataType};
+use super::column_data::{ColumnData, ColumnDataType};
 use super::column_segment::{ColumnSegment, ColumnSegmentType, SegmentStatistics};
 use super::segment_base::SegmentBase;
 use super::types::{DataPointer, Idx};
@@ -170,7 +170,7 @@ impl ColumnCheckpointState {
 
     /// 绑定原始列数据。
     pub fn set_original_column(&mut self, original_column: Arc<ColumnData>) {
-        self.global_stats = BaseStatistics::create_empty(original_column.ctx.logical_type.clone());
+        self.global_stats = BaseStatistics::create_empty(original_column.base.logical_type.clone());
         self.original_column = Some(original_column);
     }
 
@@ -193,10 +193,10 @@ impl ColumnCheckpointState {
     pub fn get_result_column(&mut self) -> Arc<ColumnData> {
         if self.result_column.is_none() {
             let original = self.get_original_column();
-            self.result_column = Some(ColumnDataKind::create(
-                Arc::clone(&original.ctx.info),
-                original.ctx.column_index,
-                original.ctx.logical_type.clone(),
+            self.result_column = Some(ColumnData::create(
+                Arc::clone(&original.base.info),
+                original.base.column_index,
+                original.base.logical_type.clone(),
                 ColumnDataType::CheckpointTarget,
                 false,
             ));
@@ -216,7 +216,7 @@ impl ColumnCheckpointState {
             .unwrap_or_default();
         let result = self.result_column.as_ref().cloned().unwrap();
         result
-            .ctx
+            .base
             .count
             .store(original_count, std::sync::atomic::Ordering::Relaxed);
         result
@@ -235,7 +235,7 @@ impl ColumnCheckpointState {
         };
         let result = self.get_result_column();
         let start_row = result.count();
-        result.ctx.append_existing_segment(Arc::clone(&segment), start_row);
+        result.base.append_existing_segment(Arc::clone(&segment), start_row);
         self.data_pointers.push(DataPointer {
             block_id: segment.block_id,
             offset: segment.block_offset as u32,

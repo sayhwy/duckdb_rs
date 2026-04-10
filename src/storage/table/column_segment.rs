@@ -481,7 +481,7 @@ impl ColumnSegment {
     ///
     /// C++: `ColumnSegment::Skip(ColumnScanState &state)`
     /// → For uncompressed: `UncompressedFunctions::EmptySkip` (no-op).
-    /// The caller (`ColumnDataContext::skip`) then sets
+    /// The caller (`ColumnDataBase::skip`) then sets
     /// `state.internal_index = state.offset_in_column`.
     pub fn skip(&self, state: &mut ColumnScanState) {
         let function = self.get_compression_function();
