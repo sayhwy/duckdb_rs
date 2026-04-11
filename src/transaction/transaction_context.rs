@@ -84,7 +84,7 @@ impl TransactionContext {
     pub fn get_or_create_transaction(&self) -> Arc<DuckTxnHandle> {
         let mut current = self.current_transaction.lock();
         if current.is_none() {
-            *current = Some(self.transaction_manager.start_duck_transaction(true));
+            *current = Some(self.transaction_manager.start_duck_transaction(&self.db, true));
         }
         Arc::clone(current.as_ref().unwrap())
     }
@@ -96,7 +96,7 @@ impl TransactionContext {
     pub fn get_or_create_write_transaction(&self) -> Arc<DuckTxnHandle> {
         let mut current = self.current_transaction.lock();
         if current.is_none() {
-            *current = Some(self.transaction_manager.start_duck_transaction(false));
+            *current = Some(self.transaction_manager.start_duck_transaction(&self.db, false));
         }
         let txn = Arc::clone(current.as_ref().unwrap());
         // 确保事务为读写模式（幂等）
@@ -115,7 +115,7 @@ impl TransactionContext {
         if current.is_some() {
             return Err(anyhow!("cannot begin transaction: already in transaction"));
         }
-        *current = Some(self.transaction_manager.start_duck_transaction(false));
+        *current = Some(self.transaction_manager.start_duck_transaction(&self.db, false));
         self.auto_commit.store(false, Ordering::Relaxed);
         Ok(())
     }

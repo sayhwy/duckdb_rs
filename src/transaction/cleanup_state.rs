@@ -18,13 +18,16 @@
 use super::append_info::AppendInfo;
 use super::commit_state::{IndexDataRemover, IndexRemovalType};
 use super::delete_info::DeleteInfo;
+use super::duck_transaction::DuckTransaction;
 use super::types::{ActiveTransactionState, TransactionId, UndoFlags};
 use super::update_info::UpdateInfo;
 
 // ─── CleanupState ──────────────────────────────────────────────────────────────
 
 /// Cleanup 阶段 Undo 遍历状态机。
-pub struct CleanupState {
+pub struct CleanupState<'a> {
+    /// 所属事务（对应 DuckDB `CleanupState(transaction, ...)`）。
+    transaction: &'a DuckTransaction,
     /// 当前系统中最低的活跃事务 start_time。
     lowest_active_transaction: TransactionId,
     /// 提交时的活跃事务状态。
@@ -33,13 +36,15 @@ pub struct CleanupState {
     index_data_remover: IndexDataRemover,
 }
 
-impl CleanupState {
+impl<'a> CleanupState<'a> {
     /// 构造。
     pub fn new(
+        transaction: &'a DuckTransaction,
         lowest_active_transaction: TransactionId,
         transaction_state: ActiveTransactionState,
     ) -> Self {
         Self {
+            transaction,
             lowest_active_transaction,
             transaction_state,
             index_data_remover: IndexDataRemover::new(IndexRemovalType::PermanentDelete),

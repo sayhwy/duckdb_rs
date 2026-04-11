@@ -19,9 +19,8 @@ fn main() -> Result<()> {
     println!("=== 事务回归测试 ===");
     println!("数据库文件: {}", DB_PATH);
 
-    let mut ddl_conn = engine.connect();
+    let ddl_conn = engine.connect();
     ddl_conn.create_table(
-        "main",
         TABLE_ACCOUNTS,
         vec![
             ("id".to_string(), LogicalType::integer()),
@@ -30,7 +29,6 @@ fn main() -> Result<()> {
         ],
     )?;
     ddl_conn.create_table(
-        "main",
         TABLE_CONCURRENT,
         vec![
             ("worker_id".to_string(), LogicalType::integer()),

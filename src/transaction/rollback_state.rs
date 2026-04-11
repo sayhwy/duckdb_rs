@@ -17,18 +17,21 @@
 
 use super::append_info::AppendInfo;
 use super::delete_info::DeleteInfo;
+use super::duck_transaction::DuckTransaction;
 use super::types::{NOT_DELETED_ID, UndoFlags};
 use super::update_info::UpdateInfo;
+use crate::catalog::{CatalogEntryKind, CatalogEntryNode, CatalogType};
 
 // ─── RollbackState ─────────────────────────────────────────────────────────────
 
 /// 回滚阶段 Undo 遍历状态机。
-pub struct RollbackState;
+pub struct RollbackState<'a> {
+    transaction: &'a DuckTransaction,
+}
 
-impl RollbackState {
-    /// 构造。
-    pub fn new() -> Self {
-        Self
+impl<'a> RollbackState<'a> {
+    pub fn new(transaction: &'a DuckTransaction) -> Self {
+        Self { transaction }
     }
 
     /// 处理一条 Undo 条目（反向遍历）。
@@ -65,11 +68,42 @@ impl RollbackState {
         }
     }
 
-    fn rollback_catalog_entry(&mut self, _payload: &[u8]) {
-        // 在完整实现中：
-        // 读取 CatalogEntry 指针和 extra_data
-        // 调用 Catalog::Undo(entry) 恢复旧版本
-        // 当前简化实现跳过
+    fn rollback_catalog_entry(&mut self, payload: &[u8]) {
+        if payload.len() < 8 {
+            return;
+        }
+        let entry_ptr = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
+        if entry_ptr == 0 {
+            return;
+        }
+        let old_entry = unsafe { &*(entry_ptr as *const CatalogEntryNode) };
+        let Some(set) = old_entry.catalog_set() else {
+            return;
+        };
+        let was_drop = old_entry.parent().map(|entry| entry.base.deleted).unwrap_or(false);
+        set.undo(old_entry);
+        if old_entry.base.entry_type == CatalogType::TableEntry {
+            match (&old_entry.kind, was_drop) {
+                (CatalogEntryKind::Table(_), false) => {
+                    self.transaction.db.tables.lock().remove(&(
+                        old_entry.base.schema_name.to_ascii_lowercase(),
+                        old_entry.base.name.to_ascii_lowercase(),
+                    ));
+                }
+                (CatalogEntryKind::Table(table), true) => {
+                    self.transaction.db.tables.lock().insert(
+                        (
+                            old_entry.base.schema_name.to_ascii_lowercase(),
+                            old_entry.base.name.to_ascii_lowercase(),
+                        ),
+                        crate::db::conn::TableHandle {
+                            entry: table.clone(),
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
     }
 
     fn rollback_append(&mut self, payload: &[u8]) {
@@ -81,11 +115,5 @@ impl RollbackState {
         // 这会减少 RowGroup 的行数并标记这些行为无效
         // 当前简化实现仅记录日志
         let _ = info;
-    }
-}
-
-impl Default for RollbackState {
-    fn default() -> Self {
-        Self::new()
     }
 }

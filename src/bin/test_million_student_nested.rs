@@ -28,10 +28,9 @@ fn main() {
 
     let student_types = student_types();
     let engine = DuckEngine::open(DB_PATH).expect("打开数据库失败");
-    let mut conn = engine.connect();
+    let conn = engine.connect();
 
     conn.create_table(
-        "main",
         "students_nested",
         vec![
             ("id".to_string(), student_types[0].clone()),

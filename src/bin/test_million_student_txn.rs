@@ -130,9 +130,8 @@ fn main() {
     println!("══ 步骤 1：创建数据库和学生表 ════════════════════════════════════");
     let t1 = Instant::now();
     let engine = DuckEngine::open(DB_PATH).expect("打开数据库失败");
-    let mut conn = engine.connect();
+    let conn = engine.connect();
     conn.create_table(
-        "main",
         "students",
         vec![
             ("id".to_string(), LogicalType::integer()),

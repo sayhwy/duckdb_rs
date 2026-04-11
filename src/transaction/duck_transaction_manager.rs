@@ -36,6 +36,7 @@
 
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
+use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -136,18 +137,21 @@ pub struct DbContext {
 /// - 调用方可持有 `Arc<DuckTxnHandle>` 作为 `TransactionRef`（`Arc<dyn Transaction>`）；
 /// - 两者均可通过 `Mutex::lock()` 获得独占写访问。
 pub struct DuckTxnHandle {
-    inner: Mutex<DuckTransaction>,
+    inner: Mutex<Box<DuckTransaction>>,
 }
 
 impl DuckTxnHandle {
     fn wrap(txn: DuckTransaction) -> Arc<Self> {
+        let mut txn = Box::new(txn);
+        let txn_ptr = NonNull::from(txn.as_mut());
+        txn.undo_buffer.set_transaction(txn_ptr);
         Arc::new(Self {
             inner: Mutex::new(txn),
         })
     }
 
     /// 获取内部 DuckTransaction 的 MutexGuard。
-    pub fn lock_inner(&self) -> parking_lot::MutexGuard<'_, DuckTransaction> {
+    pub fn lock_inner(&self) -> parking_lot::MutexGuard<'_, Box<DuckTransaction>> {
         self.inner.lock()
     }
 
@@ -577,8 +581,6 @@ impl DuckTransactionManager {
 
     /// 判断是否可以在本次提交后触发自动 checkpoint（C++: `CanCheckpoint()`）。
     ///
-    /// 调用时必须持有 `transaction_lock`（通过 `&TransactionLockInner`）。
-    ///
     /// C++ 签名：
     /// ```cpp
     /// CheckpointDecision CanCheckpoint(DuckTransaction&, unique_ptr<StorageLockKey>&,
@@ -586,11 +588,9 @@ impl DuckTransactionManager {
     /// ```
     fn can_checkpoint(
         &self,
-        inner: &TransactionLockInner,
-        txn_id: TransactionId,
         handle: &DuckTxnHandle,
         checkpoint_lock_out: &mut Option<Box<StorageLockKey>>,
-        db: &Arc<crate::db::conn::DatabaseInstance>,
+        undo_properties: &super::undo_buffer::UndoBufferProperties,
         db_ctx: &DbContext,
     ) -> CheckpointDecision {
         // C++: if (db.IsSystem()) return "system transaction";
@@ -607,11 +607,10 @@ impl DuckTransactionManager {
         }
 
         // C++: if (!transaction.AutomaticCheckpoint(db, undo_properties)) return "no reason";
-        let undo_properties = handle.inner.lock().get_undo_properties();
-        let should_auto_checkpoint = handle
-            .inner
-            .lock()
-            .automatic_checkpoint(db, &undo_properties);
+        let should_auto_checkpoint = {
+            let txn = handle.inner.lock();
+            txn.automatic_checkpoint(&txn.db, undo_properties)
+        };
         if !should_auto_checkpoint {
             return CheckpointDecision::no("no reason to automatically checkpoint");
         }
@@ -636,6 +635,17 @@ impl DuckTransactionManager {
         }
         *checkpoint_lock_out = lock;
 
+        CheckpointDecision::yes(CheckpointType::FullCheckpoint)
+    }
+
+    /// 获取自动 checkpoint 的具体类型（C++: `GetCheckpointType()`）。
+    fn get_checkpoint_type(
+        &self,
+        inner: &TransactionLockInner,
+        txn_id: TransactionId,
+        undo_properties: &super::undo_buffer::UndoBufferProperties,
+        db_ctx: &DbContext,
+    ) -> CheckpointDecision {
         // 默认 FULL_CHECKPOINT；若有其他活跃事务，可能降级为 CONCURRENT
         let mut checkpoint_type = CheckpointType::FullCheckpoint;
         let has_others = inner.has_other_transactions(txn_id);
@@ -869,7 +879,7 @@ impl DuckTransactionManager {
         let tables_guard = db.tables.lock();
         let tables: HashMap<u64, Arc<DataTable>> = tables_guard
             .values()
-            .map(|h| (h.storage.info.table_id(), h.storage.clone()))
+            .map(|h| (h.entry.storage.info.table_id(), h.entry.storage.clone()))
             .collect();
         drop(tables_guard);
 
@@ -901,15 +911,18 @@ impl DuckTransactionManager {
         // C++: unique_ptr<StorageLockKey> lock;
         //      auto undo_properties = transaction.GetUndoProperties();
         //      auto checkpoint_decision = CanCheckpoint(transaction, lock, undo_properties);
+        let undo_properties = handle.inner.lock().get_undo_properties();
         let mut checkpoint_lock_key: Option<Box<StorageLockKey>> = None;
         let mut checkpoint_decision = self.can_checkpoint(
-            &inner,
-            txn_id,
             &handle,
             &mut checkpoint_lock_key,
-            db,
+            &undo_properties,
             &db_ctx,
         );
+        if checkpoint_decision.can_checkpoint {
+            checkpoint_decision =
+                self.get_checkpoint_type(&inner, txn_id, &undo_properties, &db_ctx);
+        }
 
         // ── 步骤 3：写 WAL（若需要）──────────────────────────────────────────
         // C++: if (!checkpoint_decision.can_checkpoint && transaction.ShouldWriteToWAL(db)) {
@@ -1249,7 +1262,11 @@ impl DuckTransactionManager {
     ///
     /// C++ 中通过 `MetaTransaction::Get(context).IsReadOnly()` 判断是否为只读事务。
     /// 只读事务不获取 `start_transaction_lock`，允许在 FORCE CHECKPOINT 等待期间继续。
-    pub fn start_duck_transaction(&self, is_read_only: bool) -> Arc<DuckTxnHandle> {
+    pub fn start_duck_transaction(
+        &self,
+        db: &Arc<crate::db::conn::DatabaseInstance>,
+        is_read_only: bool,
+    ) -> Arc<DuckTxnHandle> {
         // C++: if (!meta_transaction.IsReadOnly()) {
         //          start_lock = make_uniq<lock_guard<mutex>>(start_transaction_lock);
         //      }
@@ -1289,6 +1306,7 @@ impl DuckTransactionManager {
         //                                                   last_committed_version);
         let catalog_version = inner.last_committed_version;
         let txn = DuckTransaction::new(
+            db.clone(),
             start_time,
             transaction_id,
             catalog_version,
@@ -1308,7 +1326,7 @@ impl DuckTransactionManager {
 
     /// 开始新事务的完整版本，接受 `is_read_only` 参数，返回 `TransactionRef`。
     pub fn start_transaction_with_read_only(&self, is_read_only: bool) -> TransactionRef {
-        self.start_duck_transaction(is_read_only) as TransactionRef
+        panic!("start_transaction_with_read_only requires DatabaseInstance in duckdb_rs")
     }
 
     /// 回滚指定 `Arc<DuckTxnHandle>` 持有的事务（供 `MetaTransaction` 使用）。

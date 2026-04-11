@@ -69,6 +69,8 @@ pub enum WalError {
     Io(io::Error),
     /// 损坏的 WAL：校验和不匹配、帧大小超出文件等（C++: `IOException` / `SerializationException`）。
     Corrupt(String),
+    /// WAL 语义回放失败（Catalog/Storage 操作报错）。
+    Replay(String),
     /// WAL 版本不匹配或 checkpoint iteration 不一致（C++: `IOException` 版本校验）。
     VersionMismatch(String),
     /// checkpoint WAL 中出现了 CHECKPOINT 标记（不允许嵌套 checkpoint）。
@@ -90,6 +92,7 @@ impl std::fmt::Display for WalError {
         match self {
             Self::Io(e) => write!(f, "WAL I/O error: {e}"),
             Self::Corrupt(msg) => write!(f, "Corrupt WAL: {msg}"),
+            Self::Replay(msg) => write!(f, "WAL replay error: {msg}"),
             Self::VersionMismatch(msg) => write!(f, "WAL version mismatch: {msg}"),
             Self::InvalidCheckpointWal(msg) => write!(f, "Invalid checkpoint WAL: {msg}"),
             Self::NoCurrentTable => write!(f, "WAL entry references table before USE_TABLE"),
@@ -122,6 +125,7 @@ impl HasErrorCode for WalError {
             | WalError::RowIdOutOfBounds
             | WalError::Io(_)
             | WalError::Corrupt(_)
+            | WalError::Replay(_)
             | WalError::VersionMismatch(_)
             | WalError::InvalidCheckpointWal(_)
             | WalError::UnsupportedVersion(_)

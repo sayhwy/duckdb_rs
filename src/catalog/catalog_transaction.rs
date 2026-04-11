@@ -12,6 +12,8 @@
 //! | `transaction_t start_time` | `start_time: TransactionId` |
 
 use crate::transaction::types::{TRANSACTION_ID_START, TransactionId};
+use crate::transaction::duck_transaction_manager::{DuckTransactionManager, DuckTxnHandle};
+use std::sync::Arc;
 
 // ─── CatalogTransaction ────────────────────────────────────────────────────────
 
@@ -19,7 +21,7 @@ use crate::transaction::types::{TRANSACTION_ID_START, TransactionId};
 ///
 /// 包含进行 catalog 操作所需的所有事务元数据。
 /// 在 Rust 中去除了直接指针，改用 ID 值传递。
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone)]
 pub struct CatalogTransaction {
     /// 数据库实例 OID（用于区分不同的 AttachedDatabase）。
     pub db_oid: u64,
@@ -29,16 +31,28 @@ pub struct CatalogTransaction {
     pub start_time: TransactionId,
     /// 是否拥有客户端上下文（用于区分系统事务和用户事务）。
     pub has_context: bool,
+    /// 当前事务句柄（对应 DuckDB `CatalogTransaction::transaction`）。
+    pub transaction: Option<Arc<DuckTxnHandle>>,
+    /// 当前事务所属事务管理器。
+    pub transaction_manager: Option<Arc<DuckTransactionManager>>,
 }
 
 impl CatalogTransaction {
     /// 创建用户事务上下文（C++: `CatalogTransaction(Catalog&, ClientContext&)`）。
-    pub fn new(db_oid: u64, transaction_id: TransactionId, start_time: TransactionId) -> Self {
+    pub fn new(
+        db_oid: u64,
+        transaction_id: TransactionId,
+        start_time: TransactionId,
+        transaction: Option<Arc<DuckTxnHandle>>,
+        transaction_manager: Option<Arc<DuckTransactionManager>>,
+    ) -> Self {
         Self {
             db_oid,
             transaction_id,
             start_time,
             has_context: true,
+            transaction,
+            transaction_manager,
         }
     }
 
@@ -48,9 +62,11 @@ impl CatalogTransaction {
     pub fn system(db_oid: u64) -> Self {
         Self {
             db_oid,
-            transaction_id: 0,
-            start_time: 0,
+            transaction_id: 1,
+            start_time: 1,
             has_context: false,
+            transaction: None,
+            transaction_manager: None,
         }
     }
 

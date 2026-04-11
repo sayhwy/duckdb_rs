@@ -665,6 +665,35 @@ pub fn read_catalog(stream: &mut dyn ReadStream) -> io::Result<Vec<CatalogEntry>
     Ok(entries)
 }
 
+#[derive(Default)]
+struct SliceReadStream {
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl ReadStream for SliceReadStream {
+    fn read_data(&mut self, out: &mut [u8]) {
+        let end = self.pos + out.len();
+        out.copy_from_slice(&self.buf[self.pos..end]);
+        self.pos = end;
+    }
+
+    fn is_eof(&self) -> bool {
+        self.pos >= self.buf.len()
+    }
+}
+
+pub fn decode_create_table_payload(
+    payload: &[u8],
+) -> io::Result<(String, String, String, Vec<ColumnInfo>)> {
+    let mut stream = SliceReadStream {
+        buf: payload.to_vec(),
+        pos: 0,
+    };
+    let mut reader = BinaryDeserializer::new(&mut stream);
+    read_create_table_info(&mut reader)
+}
+
 // These functions are no longer needed - all entries are in the top-level list
 
 fn skip_schema_info(r: &mut BinaryDeserializer<'_>) -> io::Result<()> {

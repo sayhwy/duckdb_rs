@@ -14,7 +14,7 @@
 //! | `unique_ptr<DependencyManager> dependency_manager` | `dependency_manager: DependencyManager` |
 //! | `mutex write_lock` | `write_lock: Mutex<()>` |
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -25,15 +25,16 @@ use super::dependency_manager::DependencyManager;
 use super::entry::{CatalogEntryBase, CatalogEntryKind, CatalogEntryNode};
 use super::entry_lookup::{CatalogEntryLookup, EntryLookupInfo, SimilarCatalogEntry};
 use super::error::CatalogError;
-use super::schema_entry::{DuckSchemaEntry, SchemaCatalogEntry};
+use super::catalog_entry::{DuckSchemaEntry, SchemaCatalogEntry};
 use super::transaction::CatalogTransaction;
 use super::types::{
     AlterInfo, CatalogLookupBehavior, CatalogType, CreateCollationInfo, CreateCopyFunctionInfo,
     CreateFunctionInfo, CreateIndexInfo, CreatePragmaFunctionInfo, CreateSchemaInfo,
     CreateSequenceInfo, CreateTableInfo, CreateTypeInfo, CreateViewInfo, DatabaseSize, DropInfo,
-    MetadataBlockInfo, OnEntryNotFound,
+    MetadataBlockInfo, OnEntryNotFound, BoundCreateTableInfo,
 };
 use crate::common::errors::CatalogResult;
+use crate::transaction::transaction::TransactionRef;
 
 // ─── Catalog trait ─────────────────────────────────────────────────────────────
 
@@ -114,7 +115,7 @@ pub trait Catalog: Send + Sync {
     fn create_table(
         &self,
         txn: &CatalogTransaction,
-        info: &CreateTableInfo,
+        info: &BoundCreateTableInfo,
     ) -> CatalogResult<()>;
     fn create_view(
         &self,
@@ -217,8 +218,6 @@ pub struct DuckCatalog {
     catalog_version: AtomicU64,
     /// Schema 集合（C++: `unique_ptr<CatalogSet> schemas`）。
     pub schemas: CatalogSet,
-    /// Schema 实例缓存（name → DuckSchemaEntry）。
-    schema_instances: RwLock<std::collections::HashMap<String, Arc<DuckSchemaEntry>>>,
     /// 依赖管理器（C++: `unique_ptr<DependencyManager> dependency_manager`）。
     pub dependency_manager: DependencyManager,
     /// 写锁（C++: `mutex write_lock`）。
@@ -256,7 +255,6 @@ impl DuckCatalog {
             oid,
             catalog_version: AtomicU64::new(0),
             schemas,
-            schema_instances: RwLock::new(std::collections::HashMap::new()),
             dependency_manager: DependencyManager::new(oid),
             write_lock: Mutex::new(()),
             is_in_memory,
@@ -287,65 +285,65 @@ impl DuckCatalog {
         self.catalog_version.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    // ── Schema 实例缓存管理 ────────────────────────────────────────────────────
-
-    /// 获取或创建 DuckSchemaEntry 实例（C++: 隐含在 LookupSchema 中）。
-    pub fn get_or_create_schema_instance(
-        &self,
-        name: &str,
-        txn: &CatalogTransaction,
-    ) -> Option<Arc<DuckSchemaEntry>> {
-        // 先查缓存
-        {
-            let cache = self.schema_instances.read();
-            if let Some(s) = cache.get(&name.to_lowercase()) {
-                return Some(s.clone());
-            }
-        }
-
-        // 查 CatalogSet 是否有该 schema
-        self.schemas.get_entry(txn, name)?;
-
-        // 创建新实例
-        let entry = Arc::new(DuckSchemaEntry::new(
-            name.len() as u64 ^ self.oid,
-            name.to_string(),
-            self.name.clone(),
-            self.oid,
-            DefaultSchemaGenerator::is_default_schema(name),
-        ));
-
-        let mut cache = self.schema_instances.write();
-        cache.insert(name.to_lowercase(), entry.clone());
-        Some(entry)
-    }
-
     /// 内部 get_schema_for_operation，获取 DuckSchemaEntry 以执行操作。
-    fn get_schema_for_op(
+    pub fn get_schema_for_op(
         &self,
         txn: &CatalogTransaction,
         schema_name: &str,
     ) -> CatalogResult<Arc<DuckSchemaEntry>> {
-        // 确保 schema 在 CatalogSet 中存在（触发默认生成器）
-        let entry_name = {
-            let lower = schema_name.to_lowercase();
-            let result = self.schemas.get_entry_detailed(txn, &lower);
-            if result.reason != LookupFailureReason::Success {
-                // 尝试默认生成器
-                // 注意：get_entry_with_defaults 需要 &mut self，这里用 unsafe 绕过
-                // 实际上应在初始化时预填充所有默认 schema
-                return Err(CatalogError::not_found(
-                    CatalogType::SchemaEntry,
-                    schema_name,
-                ));
-            }
-            lower
-        };
-
-        // 获取或创建实例
-        self.get_or_create_schema_instance(schema_name, txn)
+        self.schemas
+            .get_entry(txn, schema_name)
             .ok_or_else(|| CatalogError::not_found(CatalogType::SchemaEntry, schema_name))
+            .and_then(|entry| match entry.kind {
+                CatalogEntryKind::Schema(schema) => Ok(schema),
+                _ => Err(CatalogError::other(format!(
+                    "Entry \"{}\" is not a schema entry",
+                    schema_name
+                ))),
+            })
     }
+
+    pub fn get_schema_for_operation(
+        &self,
+        txn: &CatalogTransaction,
+        schema_name: &str,
+    ) -> CatalogResult<Arc<DuckSchemaEntry>> {
+        self.get_schema_for_op(txn, schema_name)
+    }
+
+    fn push_catalog_entry_ptr(
+        &self,
+        txn: &CatalogTransaction,
+        catalog_entry_ptr: u64,
+    ) -> CatalogResult<()> {
+        let Some(transaction) = &txn.transaction else {
+            return Ok(());
+        };
+        let Some(transaction_manager) = &txn.transaction_manager else {
+            return Ok(());
+        };
+        let transaction_ref: TransactionRef = transaction.clone();
+        transaction_manager
+            .push_catalog_entry(
+                &transaction_ref,
+                crate::transaction::duck_transaction_manager::DbContext {
+                    is_system: self.is_system_catalog(),
+                    is_temporary: self.is_temporary_catalog(),
+                    is_read_only: false,
+                    storage_loaded: true,
+                    storage_in_memory: self.is_in_memory,
+                    compression_enabled: false,
+                    debug_skip_checkpoint_on_commit: false,
+                    has_wal: !self.is_in_memory,
+                    recovery_mode_default: true,
+                    storage_manager: None,
+                },
+                catalog_entry_ptr,
+                &[],
+            )
+            .map_err(|e| CatalogError::other(e.to_string()))
+    }
+
 }
 
 impl Catalog for DuckCatalog {
@@ -368,10 +366,16 @@ impl Catalog for DuckCatalog {
     fn initialize(&mut self, load_builtin: bool) -> CatalogResult<()> {
         let sys_txn = CatalogTransaction::system(self.oid);
 
-        // 创建内置 schema（main, pg_catalog, information_schema）
+        // DuckDB: main 由 Initialize 显式创建，default generator 负责其余系统 schema。
+        let mut main_info = CreateSchemaInfo::new("main".to_string());
+        main_info.base.internal = true;
+        main_info.base.on_conflict = super::types::OnCreateConflict::IgnoreOnConflict;
+        let _ = self.create_schema(&sys_txn, &main_info);
+
         for schema_name in DefaultSchemaGenerator::DEFAULT_SCHEMAS {
-            let info = CreateSchemaInfo::new(schema_name.to_string());
-            // 忽略已存在错误（IgnoreOnConflict）
+            let mut info = CreateSchemaInfo::new(schema_name.to_string());
+            info.base.internal = true;
+            info.base.on_conflict = super::types::OnCreateConflict::IgnoreOnConflict;
             let _ = self.create_schema(&sys_txn, &info);
         }
 
@@ -393,6 +397,12 @@ impl Catalog for DuckCatalog {
     ) -> CatalogResult<()> {
         let _lock = self.write_lock.lock();
         let schema_name = info.schema_name();
+        if !info.base.internal && DefaultSchemaGenerator::is_default_schema(schema_name) {
+            return match info.base.on_conflict {
+                super::types::OnCreateConflict::IgnoreOnConflict => Ok(()),
+                _ => Err(CatalogError::already_exists(CatalogType::SchemaEntry, schema_name)),
+            };
+        }
         let oid = schema_name.len() as u64 ^ self.oid;
         let mut base = CatalogEntryBase::new(
             oid,
@@ -402,14 +412,25 @@ impl Catalog for DuckCatalog {
             String::new(),
         );
         base.temporary = info.base.temporary;
+        base.internal = info.base.internal;
         base.comment = info.base.comment.clone();
-        let node = Box::new(CatalogEntryNode::new(base, CatalogEntryKind::Schema));
+        let schema = Arc::new(DuckSchemaEntry::new(
+            oid,
+            schema_name.to_string(),
+            self.name.clone(),
+            self.oid,
+            info.base.internal,
+        ));
+        let node = Box::new(CatalogEntryNode::new(base, CatalogEntryKind::Schema(schema)));
 
         match self
             .schemas
             .create_entry(txn, schema_name, node, &LogicalDependencyList::new())
         {
             Ok(_) => {
+                if let Some(entry_ptr) = self.schemas.get_undo_entry_ptr(schema_name) {
+                    self.push_catalog_entry_ptr(txn, entry_ptr)?;
+                }
                 self.increment_catalog_version();
                 Ok(())
             }
@@ -470,11 +491,14 @@ impl Catalog for DuckCatalog {
     fn create_table(
         &self,
         txn: &CatalogTransaction,
-        info: &CreateTableInfo,
+        info: &BoundCreateTableInfo,
     ) -> CatalogResult<()> {
         let _lock = self.write_lock.lock();
-        let schema = self.get_schema_for_op(txn, &info.base.schema)?;
+        let schema = self.get_schema_for_op(txn, &info.base.base.schema)?;
         schema.create_table(txn, info)?;
+        if let Some(entry_ptr) = schema.tables.get_undo_entry_ptr(&info.base.table) {
+            self.push_catalog_entry_ptr(txn, entry_ptr)?;
+        }
         self.increment_catalog_version();
         Ok(())
     }
@@ -622,24 +646,25 @@ impl Catalog for DuckCatalog {
 
         if info.catalog_type == CatalogType::SchemaEntry {
             // Drop schema：需要先 drop schema 内的所有对象
-            let schema = self
-                .get_schema_for_op(txn, &info.name)
-                .or_else(|e| if info.if_exists { Err(e) } else { Err(e) })?;
+            if let Err(err) = self.get_schema_for_op(txn, &info.name) {
+                if info.if_exists {
+                    return Ok(());
+                }
+                return Err(err);
+            }
 
             // 依赖检查
             let schema_info =
                 super::dependency::CatalogEntryInfo::new(CatalogType::SchemaEntry, "", &info.name);
-            let to_drop = self
+            let _to_drop = self
                 .dependency_manager
                 .check_drop(txn, &schema_info, info.cascade)?;
 
             self.schemas
                 .drop_entry(txn, &info.name, info.cascade, info.allow_drop_internal)?;
-
-            // 从实例缓存中删除
-            self.schema_instances
-                .write()
-                .remove(&info.name.to_lowercase());
+            if let Some(entry_ptr) = self.schemas.get_undo_entry_ptr(&info.name) {
+                self.push_catalog_entry_ptr(txn, entry_ptr)?;
+            }
             self.increment_catalog_version();
             return Ok(());
         }
@@ -656,6 +681,12 @@ impl Catalog for DuckCatalog {
         // 真正的级联删除在实际实现中会递归删除 to_drop 中的条目
 
         schema.drop_entry(txn, info)?;
+        if let Some(entry_ptr) = schema
+            .get_catalog_set(info.catalog_type)
+            .get_undo_entry_ptr(&info.name)
+        {
+            self.push_catalog_entry_ptr(txn, entry_ptr)?;
+        }
         self.dependency_manager.erase_entry(txn, &entry_info)?;
         self.increment_catalog_version();
         Ok(())

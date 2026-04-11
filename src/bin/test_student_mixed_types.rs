@@ -34,11 +34,10 @@ fn main() {
 
     // 打开数据库
     let engine = DuckEngine::open(DB_PATH).expect("打开数据库失败");
-    let mut conn = engine.connect();
+    let conn = engine.connect();
 
     // 创建学生表（"main" schema 已预注册）
     conn.create_table(
-        "main",
         "students",
         vec![
             ("id".to_string(), LogicalType::integer()),

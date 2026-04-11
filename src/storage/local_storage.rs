@@ -27,7 +27,7 @@ use std::sync::{Arc, atomic::AtomicU8};
 
 use parking_lot::Mutex;
 
-use crate::catalog::table_catalog_entry::PhysicalIndex;
+use crate::catalog::PhysicalIndex;
 use crate::common::errors::StorageResult;
 use crate::common::types::DataChunk;
 use crate::db::conn::ClientContext;

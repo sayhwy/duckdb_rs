@@ -17,14 +17,16 @@ use std::sync::Arc;
 use chrono::{Duration, NaiveDate};
 
 use crate::catalog::{
-    ColumnDefinition as CatalogColumnDefinition, ColumnList, CreateTableInfo,
-    LogicalType as CatalogLogicalType, TableCatalogEntry,
+    Catalog, CatalogEntryKind, CatalogTransaction, ColumnDefinition as CatalogColumnDefinition,
+    ColumnList, CreateSchemaInfo, CreateTableInfo, BoundCreateTableInfo, DuckCatalog,
+    DuckTableEntry, DropInfo, EntryLookupInfo, LogicalType as CatalogLogicalType, OnCreateConflict,
+    OnEntryNotFound, TableCatalogEntry, CatalogType,
 };
 use crate::common::errors::{StorageResult, WalResult};
 use crate::common::types::{DataChunk, LogicalType, LogicalTypeId, Vector, STANDARD_VECTOR_SIZE};
 use crate::db::conn::{Connection, DatabaseInstance, TableHandle};
 use crate::storage::buffer::{BlockAllocator, BlockManager, BufferPool};
-use crate::storage::checkpoint::table_data_reader::{BoundCreateTableInfo, TableDataReader};
+use crate::storage::checkpoint::table_data_reader::TableDataReader;
 use crate::storage::data_table::{ColumnDefinition as StorageColumnDefinition, DataTable};
 use crate::storage::metadata::{BlockReaderType, MetadataManager, MetadataReader};
 use crate::storage::standard_file_system::LocalFileSystem;
@@ -73,15 +75,33 @@ impl DatabaseInstance {
             tables.insert(
                 (normalize_name(&entry.schema), normalize_name(&entry.name)),
                 TableHandle {
-                    catalog_entry: handle.catalog_entry,
-                    storage: handle.storage,
+                    entry: handle.entry,
                 },
             );
         }
 
+        let catalog_name = if path == SingleFileStorageManager::IN_MEMORY_PATH {
+            "memory".to_string()
+        } else {
+            std::path::Path::new(&path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("duckdb")
+                .to_string()
+        };
+        let mut catalog = if path == SingleFileStorageManager::IN_MEMORY_PATH {
+            DuckCatalog::new_in_memory(catalog_name.clone(), 1)
+        } else {
+            DuckCatalog::new_file(catalog_name.clone(), 1, path.clone())
+        };
+        catalog
+            .initialize(false)
+            .map_err(|e| StorageError::Corrupt { msg: e.to_string() })?;
+
         // 创建 DatabaseInstance
         let instance = Arc::new(DatabaseInstance::new(
             path.clone(),
+            catalog,
             storage_manager,
             transaction_manager,
             256 * 1024, // block_alloc_size
@@ -90,7 +110,10 @@ impl DatabaseInstance {
             .storage_manager
             .bind_database_instance(Arc::downgrade(&instance));
 
-        // 将表添加到 instance
+        // 将 checkpoint 恢复出的持久化对象同时装回运行时 catalog 和表映射。
+        if !tables.is_empty() {
+            install_checkpoint_catalog(&instance, &tables)?;
+        }
         for (name, handle) in tables {
             instance.tables.lock().insert(name, handle);
         }
@@ -125,8 +148,48 @@ impl DatabaseInstance {
         Connection::new(self.clone())
     }
 
-    /// 创建表（C++: `CreateTable`）。
-    pub fn create_table(&self, schema: &str, table: &str, columns: Vec<(String, LogicalType)>) {
+    /// 创建 schema。
+    pub fn create_schema_with_txn(
+        &self,
+        txn: &CatalogTransaction,
+        schema_name: &str,
+    ) -> StorageResult<()> {
+        let mut info = CreateSchemaInfo::new(schema_name.to_string());
+        info.base.catalog = self.catalog_name().to_string();
+        info.base.on_conflict = OnCreateConflict::ErrorOnConflict;
+
+        let catalog = self.catalog.lock();
+        catalog
+            .create_schema(txn, &info)
+            .map_err(|e| StorageError::Corrupt { msg: e.to_string() })?;
+        Ok(())
+    }
+
+    pub fn drop_schema_with_txn(
+        &self,
+        txn: &CatalogTransaction,
+        schema_name: &str,
+    ) -> StorageResult<()> {
+        let mut info = DropInfo::new(CatalogType::SchemaEntry, String::new(), schema_name.to_string());
+        info.catalog = self.catalog_name().to_string();
+        let catalog = self.catalog.lock();
+        catalog
+            .drop_entry(txn, &info)
+            .map_err(|e| StorageError::Corrupt { msg: e.to_string() })?;
+        Ok(())
+    }
+
+    /// 创建表。
+    ///
+    /// 当前实现先通过 catalog 建立 table entry，再补存储层 `tables` 映射。
+    /// 这样执行顺序与 DuckDB 更接近：先 catalog，再 storage。
+    pub fn create_table_with_txn(
+        &self,
+        txn: &CatalogTransaction,
+        schema: &str,
+        table: &str,
+        columns: Vec<(String, LogicalType)>,
+    ) -> StorageResult<()> {
         let catalog_columns: Vec<CatalogColumnDefinition> = columns
             .iter()
             .map(|(name, ty)| CatalogColumnDefinition::new(name.clone(), to_catalog_type(ty)))
@@ -142,23 +205,10 @@ impl DatabaseInstance {
             column_list.add_column(col);
         }
         create_info.columns = column_list;
-
-        // Use the database path as catalog name (like DuckDB does)
-        let catalog_name = if self.path == SingleFileStorageManager::IN_MEMORY_PATH {
-            "memory"
-        } else {
-            // Extract just the filename without extension for the catalog name
-            std::path::Path::new(&self.path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("duckdb")
-        };
-
         let tables = self.tables.lock();
         let table_id = tables.len() as u64 + 1;
         drop(tables);
 
-        let catalog_entry = TableCatalogEntry::new(catalog_name, schema, table_id, create_info);
         let storage = DataTable::new(1, table_id, schema, table, storage_columns, None);
         if self.path != SingleFileStorageManager::IN_MEMORY_PATH {
             let block_manager = self.storage_manager.block_manager_arc();
@@ -171,13 +221,61 @@ impl DatabaseInstance {
                 metadata_manager,
             }));
         }
+
+        let mut bound_info = BoundCreateTableInfo::new(create_info);
+        bound_info.storage = Some(storage.clone());
+
+        let catalog_entry = {
+            let catalog = self.catalog.lock();
+            catalog
+                .create_table(txn, &bound_info)
+                .map_err(|e| StorageError::Corrupt { msg: e.to_string() })?;
+            let lookup = EntryLookupInfo::new(crate::catalog::CatalogType::TableEntry, table);
+            let node = catalog
+                .get_entry(txn, schema, &lookup, OnEntryNotFound::ThrowException)
+                .map_err(|e| StorageError::Corrupt { msg: e.to_string() })?
+                .ok_or_else(|| StorageError::Corrupt {
+                    msg: format!("catalog entry for table '{}.{}' disappeared", schema, table),
+                })?;
+            match node.kind {
+                CatalogEntryKind::Table(entry) => entry,
+                other => {
+                    return Err(StorageError::Corrupt {
+                        msg: format!(
+                            "catalog entry for '{}.{}' has unexpected type {:?}",
+                            schema, table, other
+                        ),
+                    });
+                }
+            }
+        };
         self.tables.lock().insert(
             (normalize_name(schema), normalize_name(table)),
             TableHandle {
-                catalog_entry,
-                storage,
+                entry: catalog_entry,
             },
         );
+        Ok(())
+    }
+
+    pub fn drop_table_with_txn(
+        &self,
+        txn: &CatalogTransaction,
+        schema: &str,
+        table: &str,
+    ) -> StorageResult<()> {
+        let mut info = DropInfo::new(
+            CatalogType::TableEntry,
+            schema.to_string(),
+            table.to_string(),
+        );
+        info.catalog = self.catalog_name().to_string();
+
+        let catalog = self.catalog.lock();
+        catalog
+            .drop_entry(txn, &info)
+            .map_err(|e| StorageError::Corrupt { msg: e.to_string() })?;
+        Ok(())
     }
 
     /// 获取所有表名。
@@ -186,7 +284,7 @@ impl DatabaseInstance {
             .tables
             .lock()
             .values()
-            .map(|t| t.catalog_entry.base.fields().name.clone())
+            .map(|t| t.entry.name().to_string())
             .collect()
     }
 
@@ -243,20 +341,20 @@ impl DatabaseInstance {
         drop(tables);
 
         let column_ids = column_ids.unwrap_or_else(|| {
-            (0..table.storage.column_count())
+            (0..table.entry.storage.column_count())
                 .map(|idx| idx as u64)
                 .collect()
         });
         let result_types: Vec<LogicalType> = column_ids
             .iter()
             .map(|idx| {
-                table.storage.column_definitions[*idx as usize]
+                table.entry.storage.column_definitions[*idx as usize]
                     .logical_type
                     .clone()
             })
             .collect();
 
-        let mut state = table.storage.begin_scan_state(column_ids.clone());
+        let mut state = table.entry.storage.begin_scan_state(column_ids.clone());
 
         // 使用连接获取事务
         let conn = self.connect();
@@ -267,7 +365,7 @@ impl DatabaseInstance {
         {
             let txn_guard = txn.lock_inner();
             txn_guard.storage.initialize_scan_state(
-                &table.storage,
+                &table.entry.storage,
                 &mut state.local_state,
                 &column_ids,
             );
@@ -278,13 +376,16 @@ impl DatabaseInstance {
         // 收集列名信息用于打印
         let column_names: Vec<String> = column_ids
             .iter()
-            .map(|idx| table.storage.column_definitions[*idx as usize].name.clone())
+            .map(|idx| table.entry.storage.column_definitions[*idx as usize].name.clone())
             .collect();
 
         loop {
             let mut chunk = DataChunk::new();
             chunk.initialize(&result_types, STANDARD_VECTOR_SIZE);
-            table.storage.scan(conn.context.as_ref(), &mut chunk, &mut state);
+            table
+                .entry
+                .storage
+                .scan(conn.context.as_ref(), &mut chunk, &mut state);
 
             if chunk.size() == 0 {
                 break;
@@ -694,20 +795,20 @@ impl DatabaseInstance {
         drop(tables);
 
         let column_ids = column_ids.unwrap_or_else(|| {
-            (0..table.storage.column_count())
+            (0..table.entry.storage.column_count())
                 .map(|idx| idx as u64)
                 .collect()
         });
         let result_types: Vec<LogicalType> = column_ids
             .iter()
             .map(|idx| {
-                table.storage.column_definitions[*idx as usize]
+                table.entry.storage.column_definitions[*idx as usize]
                     .logical_type
                     .clone()
             })
             .collect();
 
-        let mut state = table.storage.begin_scan_state(column_ids.clone());
+        let mut state = table.entry.storage.begin_scan_state(column_ids.clone());
 
         // 使用连接获取事务
         let conn = self.connect();
@@ -718,7 +819,7 @@ impl DatabaseInstance {
         {
             let txn_guard = txn.lock_inner();
             txn_guard.storage.initialize_scan_state(
-                &table.storage,
+                &table.entry.storage,
                 &mut state.local_state,
                 &column_ids,
             );
@@ -728,7 +829,10 @@ impl DatabaseInstance {
         loop {
             let mut chunk = DataChunk::new();
             chunk.initialize(&result_types, STANDARD_VECTOR_SIZE);
-            table.storage.scan(conn.context.as_ref(), &mut chunk, &mut state);
+            table
+                .entry
+                .storage
+                .scan(conn.context.as_ref(), &mut chunk, &mut state);
             if chunk.size() == 0 {
                 break;
             }
@@ -790,10 +894,14 @@ impl RecoveryCatalog {
         Self { db, conn }
     }
 
+    fn replay_err<E: std::fmt::Display>(error: E) -> WalError {
+        WalError::Replay(error.to_string())
+    }
+
     fn table_handle(&self, schema: &str, table: &str) -> WalResult<TableHandle> {
         let key = (normalize_name(schema), normalize_name(table));
         self.db.tables.lock().get(&key).cloned().ok_or_else(|| {
-            WalError::Corrupt(format!(
+            WalError::Replay(format!(
                 "table {}.{} not found during WAL replay",
                 schema, table
             ))
@@ -802,16 +910,23 @@ impl RecoveryCatalog {
 }
 
 impl CatalogOps for RecoveryCatalog {
-    fn create_table(&mut self, _payload: &[u8]) -> WalResult<()> {
-        Err(WalError::Corrupt(
-            "WAL CREATE TABLE replay is not implemented in duckdb_rs yet".into(),
-        ))
+    fn create_table(&mut self, payload: &[u8]) -> WalResult<()> {
+        let (_catalog, schema, table, columns) =
+            crate::storage::checkpoint::catalog_deserializer::decode_create_table_payload(payload)
+                .map_err(|e| WalError::Replay(format!("failed to decode CREATE TABLE payload: {e}")))?;
+        let storage_columns = columns
+            .into_iter()
+            .map(|column| (column.name, from_catalog_type_to_storage_type(&column.logical_type)))
+            .collect();
+        self.conn
+            .create_table(&schema, &table, storage_columns)
+            .map_err(Self::replay_err)
     }
 
-    fn drop_table(&mut self, _schema: &str, _name: &str) -> WalResult<()> {
-        Err(WalError::Corrupt(
-            "WAL DROP TABLE replay is not implemented in duckdb_rs yet".into(),
-        ))
+    fn drop_table(&mut self, schema: &str, name: &str) -> WalResult<()> {
+        self.conn
+            .drop_table(schema, name)
+            .map_err(Self::replay_err)
     }
 
     fn alter_table(
@@ -825,16 +940,16 @@ impl CatalogOps for RecoveryCatalog {
         ))
     }
 
-    fn create_schema(&mut self, _name: &str) -> WalResult<()> {
-        Err(WalError::Corrupt(
-            "WAL CREATE SCHEMA replay is not implemented in duckdb_rs yet".into(),
-        ))
+    fn create_schema(&mut self, name: &str) -> WalResult<()> {
+        self.conn
+            .create_schema(name)
+            .map_err(Self::replay_err)
     }
 
-    fn drop_schema(&mut self, _name: &str) -> WalResult<()> {
-        Err(WalError::Corrupt(
-            "WAL DROP SCHEMA replay is not implemented in duckdb_rs yet".into(),
-        ))
+    fn drop_schema(&mut self, name: &str) -> WalResult<()> {
+        self.conn
+            .drop_schema(name)
+            .map_err(Self::replay_err)
     }
 
     fn create_view(&mut self, _payload: &[u8]) -> WalResult<()> {
@@ -928,10 +1043,11 @@ impl CatalogOps for RecoveryCatalog {
 
     fn append_chunk(&mut self, schema: &str, table: &str, chunk_payload: &[u8]) -> WalResult<()> {
         let handle = self.table_handle(schema, table)?;
-        let mut chunk = decode_insert_chunk_payload(chunk_payload, &handle.storage.get_types())?;
+        let mut chunk =
+            decode_insert_chunk_payload(chunk_payload, &handle.entry.storage.get_types())?;
         self.conn
             .insert_chunk(table, &mut chunk)
-            .map_err(|e| WalError::Corrupt(e.to_string()))
+            .map_err(Self::replay_err)
     }
 
     fn merge_row_group_data(
@@ -951,7 +1067,7 @@ impl CatalogOps for RecoveryCatalog {
         self.conn
             .delete_chunk(table, &row_ids)
             .map(|_| ())
-            .map_err(|e| WalError::Corrupt(e.to_string()))
+            .map_err(Self::replay_err)
     }
 
     fn update_rows(
@@ -966,25 +1082,25 @@ impl CatalogOps for RecoveryCatalog {
             decode_update_payload(column_indexes_payload, chunk_payload, &handle)?;
         self.conn
             .update_chunk(table, &row_ids, &column_ids, &mut updates)
-            .map_err(|e| WalError::Corrupt(e.to_string()))
+            .map_err(Self::replay_err)
     }
 
     fn commit(&mut self) -> WalResult<()> {
         self.conn
             .commit()
-            .map_err(|e| WalError::Corrupt(e.to_string()))
+            .map_err(Self::replay_err)
     }
 
     fn rollback(&mut self) -> WalResult<()> {
         self.conn
             .rollback()
-            .map_err(|e| WalError::Corrupt(e.to_string()))
+            .map_err(Self::replay_err)
     }
 
     fn begin_transaction(&mut self) -> WalResult<()> {
         self.conn
             .begin_transaction()
-            .map_err(|e| WalError::Corrupt(e.to_string()))
+            .map_err(Self::replay_err)
     }
 
     fn commit_indexes(&mut self, indexes: Vec<ReplayIndexInfo>) -> WalResult<()> {
@@ -1216,6 +1332,7 @@ fn decode_update_payload(
         let column_id =
             u64::from_le_bytes(column_indexes_payload[start..start + 8].try_into().unwrap());
         let ty = table
+            .entry
             .storage
             .column_definitions
             .get(column_id as usize)
@@ -1503,12 +1620,6 @@ fn build_table_handle(
         ));
     }
     create_info.columns = catalog_columns;
-    let catalog_entry = TableCatalogEntry::new(
-        entry.catalog.clone(),
-        entry.schema.clone(),
-        table_id,
-        create_info,
-    );
     let persistent_data = entry
         .table_pointer
         .and_then(|table_pointer| {
@@ -1527,10 +1638,56 @@ fn build_table_handle(
         storage_columns,
         persistent_data,
     );
-    TableHandle {
-        catalog_entry,
+    let catalog_entry = DuckTableEntry::from_create_info(
+        entry.catalog.clone(),
+        entry.schema.clone(),
+        table_id,
+        create_info,
         storage,
+    );
+    TableHandle {
+        entry: Arc::new(catalog_entry),
     }
+}
+
+fn install_checkpoint_catalog(
+    instance: &Arc<DatabaseInstance>,
+    tables: &HashMap<(String, String), TableHandle>,
+) -> StorageResult<()> {
+    let txn = CatalogTransaction::system(instance.db_id);
+    let table_entries: Vec<Arc<DuckTableEntry>> =
+        tables.values().map(|handle| handle.entry.clone()).collect();
+
+    if table_entries.is_empty() {
+        return Ok(());
+    }
+
+    let mut schema_names = std::collections::BTreeSet::new();
+    for entry in &table_entries {
+        let schema_name = normalize_name(entry.schema_name());
+        if schema_name != "main" {
+            schema_names.insert(schema_name);
+        }
+    }
+
+    let catalog = instance.catalog.lock();
+    for schema_name in schema_names {
+        let mut info = CreateSchemaInfo::new(schema_name);
+        info.base.on_conflict = OnCreateConflict::IgnoreOnConflict;
+        catalog
+            .create_schema(&txn, &info)
+            .map_err(|e| StorageError::Corrupt { msg: e.to_string() })?;
+    }
+
+    for entry in table_entries {
+        let mut bound = BoundCreateTableInfo::new(entry.get_info());
+        bound.storage = Some(entry.storage.clone());
+        catalog
+            .create_table(&txn, &bound)
+            .map_err(|e| StorageError::Corrupt { msg: e.to_string() })?;
+    }
+
+    Ok(())
 }
 
 fn from_catalog_type_to_storage_type(logical_type: &CatalogLogicalType) -> LogicalType {
@@ -1769,6 +1926,17 @@ impl BlockAllocator for NoopBlockAllocator {
 mod tests {
     use super::*;
 
+    fn create_table(
+        db: &Arc<DatabaseInstance>,
+        schema: &str,
+        table: &str,
+        columns: Vec<(String, LogicalType)>,
+    ) {
+        let txn = CatalogTransaction::system(db.db_id);
+        db.create_table_with_txn(&txn, schema, table, columns)
+            .expect("create_table failed");
+    }
+
     fn build_integer_chunk(values: &[i32]) -> DataChunk {
         let mut chunk = DataChunk::new();
         chunk.initialize(&[LogicalType::integer()], values.len());
@@ -1822,7 +1990,7 @@ mod tests {
     #[test]
     fn transient_insert_and_scan_roundtrip() {
         let mut db = DB::open(SingleFileStorageManager::IN_MEMORY_PATH).unwrap();
-        db.create_table(
+        create_table(&db,
             "main",
             "numbers",
             vec![("id".to_string(), LogicalType::integer())],
@@ -1843,7 +2011,7 @@ mod tests {
     #[test]
     fn transient_scan_multiple_vectors() {
         let mut db = DB::open(SingleFileStorageManager::IN_MEMORY_PATH).unwrap();
-        db.create_table("main", "t", vec![("v".to_string(), LogicalType::integer())]);
+        create_table(&db, "main", "t", vec![("v".to_string(), LogicalType::integer())]);
 
         // Insert 5000 rows (> 2048 = STANDARD_VECTOR_SIZE) in two chunks
         let batch1: Vec<i32> = (0..2500).collect();
@@ -2105,7 +2273,7 @@ mod tests {
 
         // Create database and table
         let mut db = DB::open(&db_path).expect("Failed to create database");
-        db.create_table(
+        create_table(&db,
             "main",
             "test_table",
             vec![
@@ -2166,7 +2334,7 @@ mod tests {
         // Phase 1: Create, insert, checkpoint, close
         {
             let mut db = DB::open(&db_path).expect("Failed to create database");
-            db.create_table(
+            create_table(&db,
                 "main",
                 "persist_test",
                 vec![("id".to_string(), LogicalType::integer())],
@@ -2222,7 +2390,7 @@ mod tests {
 
         {
             let mut db = DB::open(&db_path).expect("Failed to create database");
-            db.create_table(
+            create_table(&db,
                 "main",
                 "small_test",
                 vec![("id".to_string(), LogicalType::integer())],
@@ -2263,7 +2431,7 @@ mod tests {
 
         {
             let mut db = DB::open(&db_path).expect("Failed to create database");
-            db.create_table(
+            create_table(&db,
                 "main",
                 "wal_test",
                 vec![("id".to_string(), LogicalType::integer())],
@@ -2301,6 +2469,95 @@ mod tests {
     }
 
     #[test]
+    fn persistent_reopen_from_wal_replay_with_create_schema_and_table() {
+        let db_path = temp_db_path("reopen_wal_ddl_create");
+        cleanup_db(&db_path);
+
+        {
+            let db = DB::open(&db_path).expect("Failed to create database");
+            db.checkpoint()
+                .expect("Initial checkpoint failed");
+
+            let conn = db.connect();
+            conn.begin_transaction()
+                .expect("Failed to begin transaction");
+            conn.create_schema("s1").expect("create schema failed");
+            conn.create_table(
+                "s1",
+                "t1",
+                vec![("id".to_string(), LogicalType::integer())],
+            )
+            .expect("create table failed");
+            conn.commit().expect("commit failed");
+
+            let wal_path = format!("{}.wal", db_path);
+            let wal_meta = std::fs::metadata(&wal_path).expect("WAL should exist before reopen");
+            assert!(wal_meta.len() > 0, "WAL should contain replayable DDL");
+        }
+
+        {
+            let db = DB::open(&db_path).expect("Failed to reopen database from WAL");
+            let tables = db.tables();
+            assert!(
+                tables.contains(&"t1".to_string()),
+                "table created through WAL should exist after reopen"
+            );
+            let chunks = db
+                .scan_chunks_silent("s1.t1", None)
+                .expect("scan after WAL DDL replay failed");
+            let total_rows: usize = chunks.iter().map(|c| c.size()).sum();
+            assert_eq!(total_rows, 0, "newly created table should be empty");
+        }
+
+        cleanup_db(&db_path);
+    }
+
+    #[test]
+    fn persistent_reopen_from_wal_replay_with_drop_schema_and_table() {
+        let db_path = temp_db_path("reopen_wal_ddl_drop");
+        cleanup_db(&db_path);
+
+        {
+            let db = DB::open(&db_path).expect("Failed to create database");
+            let conn = db.connect();
+            conn.create_schema("s1").expect("create schema failed");
+            conn.create_table(
+                "s1",
+                "t1",
+                vec![("id".to_string(), LogicalType::integer())],
+            )
+            .expect("create table failed");
+            db.checkpoint()
+                .expect("Checkpoint after CREATE TABLE failed");
+
+            conn.begin_transaction()
+                .expect("Failed to begin transaction");
+            conn.drop_table("s1", "t1").expect("drop table failed");
+            conn.drop_schema("s1").expect("drop schema failed");
+            conn.commit().expect("commit failed");
+
+            let wal_path = format!("{}.wal", db_path);
+            let wal_meta = std::fs::metadata(&wal_path).expect("WAL should exist before reopen");
+            assert!(wal_meta.len() > 0, "WAL should contain replayable DROP DDL");
+        }
+
+        {
+            let db = DB::open(&db_path).expect("Failed to reopen database from WAL");
+            let tables = db.tables();
+            assert!(
+                !tables.contains(&"t1".to_string()),
+                "dropped table should not exist after WAL replay"
+            );
+            assert!(
+                db.scan_chunks_silent("s1.t1", None).is_err(),
+                "scanning dropped table should fail after WAL replay"
+            );
+        }
+
+        cleanup_db(&db_path);
+    }
+
+    #[test]
     fn persistent_checkpoint_after_multiple_bulk_commits_preserves_row_order() {
         let db_path = temp_db_path("checkpoint_bulk_row_starts");
         let row_group_size = crate::storage::table::types::ROW_GROUP_SIZE as usize;
@@ -2309,7 +2566,7 @@ mod tests {
 
         {
             let mut db = DB::open(&db_path).expect("Failed to create database");
-            db.create_table(
+            create_table(&db,
                 "main",
                 "bulk_test",
                 vec![("id".to_string(), LogicalType::integer())],
@@ -2369,7 +2626,7 @@ mod tests {
 
         {
             let mut db = DB::open(&db_path).expect("Failed to create database");
-            db.create_table(
+            create_table(&db,
                 "main",
                 "small_commit_test",
                 vec![("id".to_string(), LogicalType::integer())],
@@ -2423,7 +2680,7 @@ mod tests {
 
         {
             let mut db = DB::open(&db_path).expect("Failed to create database");
-            db.create_table(
+            create_table(&db,
                 "main",
                 "mixed_small_commit_test",
                 vec![("id".to_string(), LogicalType::integer())],
@@ -2488,7 +2745,7 @@ mod tests {
 
         {
             let mut db = DB::open(&db_path).expect("Failed to create database");
-            db.create_table(
+            create_table(&db,
                 "main",
                 "students",
                 vec![
@@ -2566,7 +2823,7 @@ mod tests {
 
         {
             let mut db = DB::open(&db_path).expect("Failed to create database");
-            db.create_table(
+            create_table(&db,
                 "main",
                 "students",
                 vec![
@@ -2643,7 +2900,7 @@ mod tests {
 
         {
             let mut db = DB::open(&db_path).expect("Failed to create database");
-            db.create_table(
+            create_table(&db,
                 "main",
                 "students",
                 vec![
@@ -2721,7 +2978,7 @@ mod tests {
 
         // Create database
         let mut db = DB::open(&db_path).expect("Failed to create database");
-        db.create_table(
+        create_table(&db,
             "main",
             "multi_test",
             vec![("id".to_string(), LogicalType::integer())],
@@ -2825,7 +3082,7 @@ mod tests {
 
         // Create database
         let mut db = DB::open(&db_path).expect("Failed to create database");
-        db.create_table(
+        create_table(&db,
             "main",
             "rollback_test",
             vec![("id".to_string(), LogicalType::integer())],

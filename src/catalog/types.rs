@@ -10,6 +10,10 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
+
+use crate::storage::data_table::DataTable;
+use crate::storage::table::persistent_table_data::PersistentTableData;
 
 // ─── CatalogType ───────────────────────────────────────────────────────────────
 
@@ -1036,7 +1040,7 @@ impl CreateSchemaInfo {
     }
 }
 
-/// 表创建信息（C++: `CreateTableInfo` / `BoundCreateTableInfo`）。
+/// 表创建信息（C++: `CreateTableInfo`）。
 #[derive(Debug, Clone)]
 pub struct CreateTableInfo {
     pub base: CreateInfo,
@@ -1069,6 +1073,31 @@ impl CreateTableInfo {
             self.table,
             parts.join(",\n  ")
         )
+    }
+}
+
+/// 绑定后的表创建信息（C++: `BoundCreateTableInfo`）。
+pub struct BoundCreateTableInfo {
+    pub base: CreateTableInfo,
+    pub data: Option<Box<PersistentTableData>>,
+    pub storage: Option<Arc<DataTable>>,
+}
+
+impl BoundCreateTableInfo {
+    pub fn new(base: CreateTableInfo) -> Self {
+        Self {
+            base,
+            data: None,
+            storage: None,
+        }
+    }
+
+    pub fn base(&self) -> &CreateTableInfo {
+        &self.base
+    }
+
+    pub fn base_mut(&mut self) -> &mut CreateTableInfo {
+        &mut self.base
     }
 }
 

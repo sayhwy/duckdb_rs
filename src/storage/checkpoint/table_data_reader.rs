@@ -1,21 +1,10 @@
-use crate::catalog::{CreateTableInfo, LogicalType as CatalogLogicalType, LogicalTypeId};
+use crate::catalog::{BoundCreateTableInfo, CreateTableInfo, LogicalType as CatalogLogicalType, LogicalTypeId};
 use crate::common::serializer::{BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID};
 use crate::storage::metadata::{BlockReaderType, MetaBlockPointer, MetadataReader, ReadStream};
 use crate::storage::table::persistent_table_data::{PersistentStorageRuntime, PersistentTableData};
 use crate::storage::table::row_group::RowGroupPointer;
 use crate::storage::table::table_statistics::TableStatistics;
 use std::sync::Arc;
-
-pub struct BoundCreateTableInfo {
-    pub base: CreateTableInfo,
-    pub data: Option<Box<PersistentTableData>>,
-}
-
-impl BoundCreateTableInfo {
-    pub fn new(base: CreateTableInfo) -> Self {
-        Self { base, data: None }
-    }
-}
 
 pub struct TableDataReader<'a, 'mgr> {
     pub reader: &'a mut MetadataReader<'mgr>,

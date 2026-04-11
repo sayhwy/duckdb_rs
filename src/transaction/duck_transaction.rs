@@ -211,6 +211,9 @@ impl ActiveTableLock {
 
 /// DuckDB 原生事务（C++: `class DuckTransaction`）。
 pub struct DuckTransaction {
+    /// 当前事务所属数据库。
+    pub(crate) db: Arc<crate::db::conn::DatabaseInstance>,
+
     // ── 事务标识 ──────────────────────────────────────────────────────────────
     /// 事务的 start_time（用于 MVCC 可见性判断）（C++: `transaction_t start_time`）。
     pub start_time: TransactionId,
@@ -287,12 +290,15 @@ impl DuckTransaction {
     /// C++ 还接受 `DuckTransactionManager&` 和 `ClientContext&`；
     /// 此处简化为仅接受所需的值参数，管理器在调用方持有。
     pub fn new(
+        db: Arc<crate::db::conn::DatabaseInstance>,
         start_time: TransactionId,
         transaction_id: TransactionId,
         catalog_version: Idx,
         block_alloc_size: u64,
     ) -> Self {
+        let undo_buffer = UndoBuffer::new(block_alloc_size);
         Self {
+            db,
             start_time,
             transaction_id,
             commit_id: NOT_DELETED_ID,
@@ -300,7 +306,7 @@ impl DuckTransaction {
             awaiting_cleanup: false,
             is_read_only: AtomicBool::new(true),
             active_query: AtomicU64::new(MAXIMUM_QUERY_ID),
-            undo_buffer: UndoBuffer::new(block_alloc_size),
+            undo_buffer,
             storage: Box::new(LocalStorage::new()),
             write_lock: None,
             sequence_usage: Mutex::new(HashMap::new()),
@@ -339,9 +345,21 @@ impl DuckTransaction {
         let entry_ref = self
             .undo_buffer
             .create_entry(UndoFlags::CatalogEntry, alloc_size);
-        // 载荷格式：catalog_entry_id(8B) [+ extra_data_size(8B) + extra_data(N B)]
-        // 注：实际写入操作待 UndoBufferReference 提供写接口后填充。
-        let _ = (entry_ref, catalog_entry_id, extra_data);
+        let mut payload = Vec::with_capacity(alloc_size);
+        payload.extend_from_slice(&catalog_entry_id.to_le_bytes());
+        if extra_data.is_empty() {
+            payload.extend_from_slice(&0u64.to_le_bytes());
+        } else {
+            payload.extend_from_slice(&(extra_data.len() as u64).to_le_bytes());
+            payload.extend_from_slice(extra_data);
+        }
+        self.undo_buffer.write_payload(
+            entry_ref
+                .slab_index
+                .expect("push_catalog_entry requires direct slab-backed undo entry"),
+            entry_ref.position,
+            &payload,
+        );
     }
 
     /// 记录 ATTACH DATABASE 操作（C++: `DuckTransaction::PushAttach()`）。

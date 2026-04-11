@@ -213,7 +213,6 @@ struct Snapshot {
 
 fn create_students_table(conn: &mut duckdb_rs::db::DuckConnection) {
     conn.create_table(
-        "main",
         "students",
         vec![
             ("id".to_string(), LogicalType::integer()),

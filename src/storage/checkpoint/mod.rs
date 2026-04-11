@@ -9,7 +9,7 @@ pub use row_group_writer::{RowGroupWriter, SingleFileRowGroupWriter};
 pub use string_checkpoint_state::{
     CompressedSegmentState, OverflowStringWriter, StringBlock, UncompressedStringSegmentState,
 };
-pub use table_data_reader::{BoundCreateTableInfo, TableDataReader};
+pub use table_data_reader::TableDataReader;
 pub use table_data_writer::{
     QueryContext, SingleFileCheckpointWriter, SingleFileTableDataWriter, TableDataWriter,
 };

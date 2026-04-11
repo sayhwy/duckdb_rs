@@ -21,14 +21,18 @@
 //! | `atomic<transaction_t> timestamp` | `timestamp: AtomicU64` |
 
 use parking_lot::RwLock;
+use std::ptr;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+use crate::catalog::catalog_entry::{DuckSchemaEntry, DuckTableEntry};
+use crate::catalog::catalog_set::CatalogSet;
 
 use super::dependency::LogicalDependencyList;
 use super::error::CatalogError;
 use crate::common::errors::CatalogResult;
-use super::transaction::CatalogTransaction;
+use super::catalog_transaction::CatalogTransaction;
 use super::types::{
     AlterInfo, AlterKind, CatalogType, ColumnList, ConstraintType, CreateCollationInfo,
     CreateFunctionInfo, CreateIndexInfo, CreateInfo, CreateSchemaInfo, CreateSequenceInfo,
@@ -123,9 +127,9 @@ impl Clone for CatalogEntryBase {
 #[derive(Debug, Clone)]
 pub enum CatalogEntryKind {
     /// Schema 条目占位（实际数据在 DuckSchemaEntry 中，通过 CatalogSet 管理）。
-    Schema,
+    Schema(Arc<DuckSchemaEntry>),
     /// 表条目数据（C++: `DuckTableEntry` 核心字段）。
-    Table(TableEntryData),
+    Table(Arc<DuckTableEntry>),
     /// 视图条目数据（C++: `ViewCatalogEntry`）。
     View(ViewEntryData),
     /// 序列条目数据（C++: `SequenceCatalogEntry`）。
@@ -145,8 +149,8 @@ pub enum CatalogEntryKind {
 impl CatalogEntryKind {
     pub fn to_sql(&self, base: &CatalogEntryBase) -> String {
         match self {
-            CatalogEntryKind::Schema => format!("CREATE SCHEMA {};", base.name),
-            CatalogEntryKind::Table(d) => d.to_sql(base),
+            CatalogEntryKind::Schema(_) => format!("CREATE SCHEMA {};", base.name),
+            CatalogEntryKind::Table(entry) => entry.base.to_sql(),
             CatalogEntryKind::View(d) => d.to_sql(base),
             CatalogEntryKind::Sequence(d) => d.to_sql(base),
             CatalogEntryKind::Index(d) => d.to_sql(base),
@@ -165,6 +169,15 @@ impl CatalogEntryKind {
         info.internal = base.internal;
         info.comment = base.comment.clone();
         info.tags = base.tags.clone();
+        if let CatalogEntryKind::Table(entry) = self {
+            let table_info = entry.get_info();
+            info.catalog = table_info.base.catalog;
+            info.schema = table_info.base.schema;
+            info.temporary = table_info.base.temporary;
+            info.internal = table_info.base.internal;
+            info.comment = table_info.base.comment;
+            info.tags = table_info.base.tags;
+        }
         info
     }
 }
@@ -232,7 +245,12 @@ impl TableEntryData {
             } => {
                 if new_data.columns.column_exists(&column.name) {
                     if *if_not_exists {
-                        return Ok((new_base, CatalogEntryKind::Table(new_data)));
+                        return Ok((
+                            new_base,
+                            CatalogEntryKind::Generic {
+                                sql: new_data.to_sql(&base.clone()),
+                            },
+                        ));
                     }
                     return Err(CatalogError::already_exists(
                         CatalogType::Invalid,
@@ -325,7 +343,12 @@ impl TableEntryData {
                 )));
             }
         }
-        Ok((new_base, CatalogEntryKind::Table(new_data)))
+        Ok((
+            new_base.clone(),
+            CatalogEntryKind::Generic {
+                sql: new_data.to_sql(&new_base),
+            },
+        ))
     }
 }
 
@@ -608,6 +631,10 @@ pub struct CatalogEntryNode {
     pub kind: CatalogEntryKind,
     /// 旧版本（C++: `unique_ptr<CatalogEntry> child`）。
     pub(crate) older: Option<Box<CatalogEntryNode>>,
+    /// 更新此节点的较新版本（C++: `optional_ptr<CatalogEntry> parent`）。
+    parent: AtomicUsize,
+    /// 所属 CatalogSet（C++: `optional_ptr<CatalogSet> set`）。
+    set: AtomicUsize,
 }
 
 impl CatalogEntryNode {
@@ -616,6 +643,8 @@ impl CatalogEntryNode {
             base,
             kind,
             older: None,
+            parent: AtomicUsize::new(0),
+            set: AtomicUsize::new(0),
         }
     }
 
@@ -633,6 +662,8 @@ impl CatalogEntryNode {
             base,
             kind: CatalogEntryKind::Generic { sql: String::new() },
             older: None,
+            parent: AtomicUsize::new(0),
+            set: AtomicUsize::new(0),
         }
     }
 
@@ -652,7 +683,16 @@ impl CatalogEntryNode {
     /// 应用 Alter 操作，返回新版本节点（C++: `virtual AlterEntry`）。
     pub fn alter(&self, info: &AlterInfo) -> CatalogResult<CatalogEntryNode> {
         let (new_base, new_kind) = match &self.kind {
-            CatalogEntryKind::Table(d) => d.apply_alter(&self.base, info)?,
+            CatalogEntryKind::Table(entry) => {
+                let altered = entry.base.alter_entry(info)?;
+                let mut base = self.base.clone();
+                let fields = altered.base.fields();
+                base.name = fields.name.clone();
+                base.comment = fields.comment.clone();
+                base.tags = fields.tags.clone();
+                let new_entry = DuckTableEntry::new(altered, entry.storage.clone());
+                (base, CatalogEntryKind::Table(Arc::new(new_entry)))
+            }
             CatalogEntryKind::View(d) => d.apply_alter(&self.base, info)?,
             CatalogEntryKind::Sequence(_) => {
                 if let AlterKind::SetComment { new_comment } = &info.kind {
@@ -678,10 +718,61 @@ impl CatalogEntryNode {
         CatalogEntryNode::new(self.base.clone(), self.kind.clone())
     }
 
+    pub fn set_catalog_set(&self, set: *const CatalogSet) {
+        self.set.store(set as usize, Ordering::SeqCst);
+    }
+
+    pub fn catalog_set(&self) -> Option<&CatalogSet> {
+        let ptr = self.set.load(Ordering::SeqCst);
+        if ptr == 0 {
+            None
+        } else {
+            // SAFETY: live catalog nodes are stored inside CatalogSet-owned Boxes.
+            Some(unsafe { &*(ptr as *const CatalogSet) })
+        }
+    }
+
+    pub fn set_parent(&self, parent: *mut CatalogEntryNode) {
+        self.parent.store(parent as usize, Ordering::SeqCst);
+    }
+
+    pub fn clear_parent(&self) {
+        self.parent.store(0, Ordering::SeqCst);
+    }
+
+    pub fn has_parent(&self) -> bool {
+        self.parent.load(Ordering::SeqCst) != 0
+    }
+
+    pub fn parent(&self) -> Option<&CatalogEntryNode> {
+        let ptr = self.parent.load(Ordering::SeqCst);
+        if ptr == 0 {
+            None
+        } else {
+            // SAFETY: the parent pointer always points at the newer version node that owns this child.
+            Some(unsafe { &*(ptr as *const CatalogEntryNode) })
+        }
+    }
+
+    pub fn parent_mut(&mut self) -> Option<&mut CatalogEntryNode> {
+        let ptr = self.parent.load(Ordering::SeqCst);
+        if ptr == 0 {
+            None
+        } else {
+            // SAFETY: commit/rollback walks the undo buffer serially and the pointed node remains owned by the set.
+            Some(unsafe { &mut *(ptr as *mut CatalogEntryNode) })
+        }
+    }
+
+    pub fn raw_ptr(&self) -> u64 {
+        ptr::from_ref(self) as usize as u64
+    }
+
     /// 设置为链表根（最新版本）时的回调（C++: `virtual SetAsRoot`）。
     pub fn set_as_root(&mut self) {
         // 对于 DuckTableEntry，SetAsRoot 会通知 DataTable 切换到新版本。
         // 在 Rust 中，DataTable 的更新通过存储层回调完成，此处记录时间戳即可。
+        self.clear_parent();
     }
 
     /// Drop 时的清理回调（C++: `virtual OnDrop`）。

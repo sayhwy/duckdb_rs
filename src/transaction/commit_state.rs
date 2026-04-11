@@ -14,9 +14,12 @@
 
 use super::append_info::AppendInfo;
 use super::delete_info::DeleteInfo;
+use super::duck_transaction::DuckTransaction;
 use super::types::{ActiveTransactionState, CommitMode, NOT_DELETED_ID, TransactionId, UndoFlags};
 use super::update_info::UpdateInfo;
 use std::sync::atomic::Ordering;
+
+use crate::catalog::{CatalogEntryKind, CatalogEntryNode, CatalogSet, CatalogType};
 
 // ─── IndexDataRemover ──────────────────────────────────────────────────────────
 
@@ -93,7 +96,9 @@ impl IndexDataRemover {
 // ─── CommitState ───────────────────────────────────────────────────────────────
 
 /// 提交阶段 Undo 遍历状态机。
-pub struct CommitState {
+pub struct CommitState<'a> {
+    /// 所属事务（对应 DuckDB `CommitState::transaction`）。
+    transaction: &'a DuckTransaction,
     /// 提交 / 回退 ID。
     pub commit_id: TransactionId,
     /// 提交模式。
@@ -106,9 +111,10 @@ pub struct CommitState {
     >,
 }
 
-impl CommitState {
+impl<'a> CommitState<'a> {
     /// 构造。
     pub fn new(
+        transaction: &'a DuckTransaction,
         commit_id: TransactionId,
         active_transaction_state: ActiveTransactionState,
         commit_mode: CommitMode,
@@ -116,6 +122,7 @@ impl CommitState {
         let removal_type =
             IndexDataRemover::index_removal_type(active_transaction_state, commit_mode);
         Self {
+            transaction,
             commit_id,
             commit_mode,
             index_data_remover: IndexDataRemover::new(removal_type),
@@ -164,10 +171,38 @@ impl CommitState {
 
     // ── 私有：各类型提交处理 ───────────────────────────────────────────────────
 
-    fn commit_catalog_entry(&mut self, _payload: &[u8]) {
-        // 在完整实现中，需要将 Catalog 条目的 timestamp 改为 commit_id
-        // 并标记 parent 不可见
-        // 当前简化实现跳过
+    fn commit_catalog_entry(&mut self, payload: &[u8]) {
+        if payload.len() < 8 {
+            return;
+        }
+        let entry_ptr = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
+        if entry_ptr == 0 {
+            return;
+        }
+        let old_entry = unsafe { &mut *(entry_ptr as *mut CatalogEntryNode) };
+        let Some(set_ptr) = old_entry
+            .catalog_set()
+            .map(|set| set as *const CatalogSet)
+        else {
+            return;
+        };
+        let set = unsafe { &*set_ptr };
+        let Some(new_entry) = old_entry.parent_mut() else {
+            return;
+        };
+        if new_entry.base.entry_type == CatalogType::DependencyEntry {
+            return;
+        }
+        if new_entry.base.deleted {
+            set.commit_drop(
+                self.commit_id,
+                self.transaction.start_time,
+                old_entry,
+                &self.transaction.db,
+            );
+            return;
+        }
+        set.update_timestamp(new_entry, self.commit_id);
     }
 
     fn commit_delete(&mut self, payload: &[u8]) {
@@ -217,8 +252,52 @@ impl CommitState {
         let _ = info; // 避免未使用警告
     }
 
-    fn revert_catalog_entry(&mut self, _payload: &[u8]) {
-        // 将 Catalog 条目恢复为 transaction_id（撤销提交）
+    fn revert_catalog_entry(&mut self, payload: &[u8]) {
+        if payload.len() < 8 {
+            return;
+        }
+        let transaction_id = self.commit_id;
+        let entry_ptr = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
+        if entry_ptr == 0 {
+            return;
+        }
+        let old_entry = unsafe { &mut *(entry_ptr as *mut CatalogEntryNode) };
+        let Some(set_ptr) = old_entry
+            .catalog_set()
+            .map(|set| set as *const CatalogSet)
+        else {
+            return;
+        };
+        let set = unsafe { &*set_ptr };
+        let was_drop = old_entry.parent().map(|entry| entry.base.deleted).unwrap_or(false);
+        if let Some(new_entry) = old_entry.parent_mut() {
+            set.update_timestamp(new_entry, transaction_id);
+        }
+        if old_entry.base.name != old_entry.parent().map(|entry| entry.base.name.as_str()).unwrap_or(&old_entry.base.name) {
+            set.update_timestamp(old_entry, transaction_id);
+        }
+        if old_entry.base.entry_type == CatalogType::TableEntry {
+            match (&old_entry.kind, was_drop) {
+                (CatalogEntryKind::Table(table), true) => {
+                    self.transaction.db.tables.lock().insert(
+                        (
+                            old_entry.base.schema_name.to_ascii_lowercase(),
+                            old_entry.base.name.to_ascii_lowercase(),
+                        ),
+                        crate::db::conn::TableHandle {
+                            entry: table.clone(),
+                        },
+                    );
+                }
+                (CatalogEntryKind::Table(_), false) => {
+                    self.transaction.db.tables.lock().remove(&(
+                        old_entry.base.schema_name.to_ascii_lowercase(),
+                        old_entry.base.name.to_ascii_lowercase(),
+                    ));
+                }
+                _ => {}
+            }
+        }
     }
 
     fn revert_delete(&mut self, _payload: &[u8]) {

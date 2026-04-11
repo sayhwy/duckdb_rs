@@ -12,9 +12,11 @@
 //! - **Cleanup**：正向遍历，回收 MVCC 旧版本（在无活跃事务可见它时）。
 
 use crate::common::errors::{Result, anyhow};
+use std::ptr::NonNull;
 
 use super::cleanup_state::CleanupState;
 use super::commit_state::CommitState;
+use super::duck_transaction::DuckTransaction;
 use super::rollback_state::RollbackState;
 use super::types::{ActiveTransactionState, TransactionId, UNDO_ENTRY_HEADER_SIZE, UndoFlags};
 use super::undo_buffer_allocator::{UndoBufferAllocator, UndoBufferReference};
@@ -70,7 +72,16 @@ pub struct UndoBuffer {
     allocator: UndoBufferAllocator,
     /// 提交时记录的活跃状态，供 Cleanup 判断是否可立即回收。
     active_transaction_state: ActiveTransactionState,
+    /// 所属事务（对应 DuckDB `UndoBuffer::transaction`）。
+    transaction: Option<NonNull<DuckTransaction>>,
 }
+
+// SAFETY:
+// `transaction` 是指向所属 `DuckTransaction` 的回指。
+// 该事务被 `Box` 固定地址后放入 `DuckTxnHandle::inner` 的 `Mutex` 中，
+// `UndoBuffer` 不会被单独在线程间脱离所属事务共享访问。
+unsafe impl Send for UndoBuffer {}
+unsafe impl Sync for UndoBuffer {}
 
 impl UndoBuffer {
     /// 创建空的 UndoBuffer。
@@ -78,7 +89,17 @@ impl UndoBuffer {
         Self {
             allocator: UndoBufferAllocator::new(block_alloc_size),
             active_transaction_state: ActiveTransactionState::Unset,
+            transaction: None,
         }
+    }
+
+    pub(crate) fn set_transaction(&mut self, transaction: NonNull<DuckTransaction>) {
+        self.transaction = Some(transaction);
+    }
+
+    fn transaction(&self) -> &DuckTransaction {
+        // UndoBuffer 由所属 DuckTransaction 初始化后立即绑定，之后终生有效。
+        unsafe { self.transaction.expect("UndoBuffer transaction not bound").as_ref() }
     }
 
     // ── 写入 ──────────────────────────────────────────────────────────────────
@@ -157,6 +178,7 @@ impl UndoBuffer {
 
         // 创建 CommitState 并遍历
         let mut commit_state = CommitState::new(
+            self.transaction(),
             info.commit_id,
             info.active_transactions,
             super::types::CommitMode::Commit,
@@ -255,6 +277,7 @@ impl UndoBuffer {
     /// 仅回退到 `end_state` 位置（即本次 commit 写入的范围）。
     pub fn revert_commit(&mut self, _end_state: &IteratorState, transaction_id: TransactionId) {
         let mut commit_state = CommitState::new(
+            self.transaction(),
             transaction_id,
             self.active_transaction_state,
             super::types::CommitMode::RevertCommit,
@@ -268,7 +291,7 @@ impl UndoBuffer {
 
     /// 回滚：反向遍历，撤销所有修改。
     pub fn rollback(&mut self) {
-        let mut rollback_state = RollbackState::new();
+        let mut rollback_state = RollbackState::new(self.transaction());
 
         // 反向遍历
         self.allocator.iterate_reverse(|flags, payload| {
@@ -283,8 +306,11 @@ impl UndoBuffer {
     ///
     /// 只有在提交成功后、且所有可能看见旧版本的事务都已结束时调用。
     pub fn cleanup(&self, lowest_active_transaction: TransactionId) {
-        let mut cleanup_state =
-            CleanupState::new(lowest_active_transaction, self.active_transaction_state);
+        let mut cleanup_state = CleanupState::new(
+            self.transaction(),
+            lowest_active_transaction,
+            self.active_transaction_state,
+        );
 
         self.allocator.iterate_forward(|flags, payload| {
             cleanup_state.cleanup_entry(flags, payload);

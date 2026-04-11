@@ -29,8 +29,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
+use crate::catalog::{Catalog, CatalogTransaction, CatalogType, DuckCatalog, DuckTableEntry, EntryLookupInfo, OnEntryNotFound};
 use crate::catalog::PhysicalIndex;
-use crate::catalog::TableCatalogEntry;
 use crate::common::errors::{Result, anyhow};
 use crate::common::types::{DataChunk, LogicalType, STANDARD_VECTOR_SIZE};
 use crate::storage::data_table::{DataTable, StorageIndex};
@@ -74,6 +74,9 @@ pub struct DatabaseInstance {
     /// - WAL 回放可以精确路由到正确表。
     pub tables: Mutex<HashMap<(String, String), TableHandle>>,
 
+    /// 数据库 catalog。
+    pub catalog: Mutex<DuckCatalog>,
+
     /// 全局事务 ID 计数器。
     transaction_counter: AtomicU64,
 
@@ -86,6 +89,7 @@ static DB_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 impl DatabaseInstance {
     pub fn new(
         path: String,
+        catalog: DuckCatalog,
         storage_manager: Arc<crate::storage::storage_manager::SingleFileStorageManager>,
         transaction_manager: Arc<DuckTransactionManager>,
         block_alloc_size: u64,
@@ -96,6 +100,7 @@ impl DatabaseInstance {
             storage_manager,
             transaction_manager,
             tables: Mutex::new(HashMap::new()),
+            catalog: Mutex::new(catalog),
             transaction_counter: std::sync::atomic::AtomicU64::new(0),
             block_alloc_size,
         }
@@ -105,6 +110,17 @@ impl DatabaseInstance {
     pub fn get_new_transaction_number(&self) -> u64 {
         self.transaction_counter.fetch_add(1, Ordering::Relaxed)
     }
+
+    pub fn catalog_name(&self) -> &str {
+        if self.path == crate::storage::storage_manager::SingleFileStorageManager::IN_MEMORY_PATH {
+            "memory"
+        } else {
+            std::path::Path::new(&self.path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("duckdb")
+        }
+    }
 }
 
 // ─── TableHandle ───────────────────────────────────────────────────────────────
@@ -112,8 +128,7 @@ impl DatabaseInstance {
 /// 表句柄：目录条目 + 存储引用。
 #[derive(Clone)]
 pub struct TableHandle {
-    pub catalog_entry: TableCatalogEntry,
-    pub storage: Arc<DataTable>,
+    pub entry: Arc<DuckTableEntry>,
 }
 
 // ─── ClientContext ─────────────────────────────────────────────────────────────
@@ -276,14 +291,23 @@ impl Connection {
     /// - 非限定：`"users"`  → 在默认 schema `"main"` 下查找
     /// - 限定：  `"main.users"` → 在指定 schema 下查找
     pub(crate) fn get_table(&self, table_name: &str) -> Result<TableHandle> {
-        let key = parse_table_name(table_name);
-        self.context
-            .db
-            .tables
-            .lock()
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| anyhow!("table '{}' not found", table_name))
+        let (schema_name, entry_name) = parse_table_name(table_name);
+        let txn = self.current_catalog_transaction();
+        let catalog = self.context.db.catalog.lock();
+        let lookup = EntryLookupInfo::new(CatalogType::TableEntry, entry_name.clone());
+        let entry = catalog
+            .get_entry(&txn, &schema_name, &lookup, OnEntryNotFound::ReturnNull)
+            .map_err(|e| anyhow!("lookup table '{}' failed: {}", table_name, e))?
+            .ok_or_else(|| anyhow!("table '{}' not found", table_name))?;
+        match entry.kind {
+            crate::catalog::CatalogEntryKind::Table(entry) => Ok(TableHandle { entry }),
+            other => Err(anyhow!(
+                "catalog entry '{}.{}' has unexpected type {:?}",
+                schema_name,
+                entry_name,
+                other
+            )),
+        }
     }
 
     // ── 事务获取辅助（短暂锁，立即释放）────────────────────────────────────
@@ -314,11 +338,83 @@ impl Connection {
     }
 
     /// 若 `auto_commit` 为 true 则提交。
-    fn commit_if_auto_commit(&self, auto_commit: bool) -> Result<()> {
+    pub(crate) fn commit_if_auto_commit(&self, auto_commit: bool) -> Result<()> {
         if auto_commit {
             self.context.commit()?;
         }
         Ok(())
+    }
+
+    pub(crate) fn ensure_catalog_write_transaction(&self) -> Result<(bool, CatalogTransaction)> {
+        let auto_commit = self.ensure_write_transaction()?;
+        let txn = self.acquire_write_transaction();
+        let txn_data = txn.transaction_data();
+        Ok((
+            auto_commit,
+            CatalogTransaction::new(
+                self.context.db.db_id,
+                txn_data.transaction_id,
+                txn_data.start_time,
+                Some(txn.clone()),
+                Some(self.context.db.transaction_manager.clone()),
+            ),
+        ))
+    }
+
+    pub(crate) fn current_catalog_transaction(&self) -> CatalogTransaction {
+        if let Some(txn) = self.get_transaction() {
+            let txn_data = txn.transaction_data();
+            CatalogTransaction::new(
+                self.context.db.db_id,
+                txn_data.transaction_id,
+                txn_data.start_time,
+                Some(txn.clone()),
+                Some(self.context.db.transaction_manager.clone()),
+            )
+        } else {
+            CatalogTransaction::system(self.context.db.db_id)
+        }
+    }
+
+    pub fn create_schema(&self, schema_name: &str) -> Result<()> {
+        let (auto_commit, txn) = self.ensure_catalog_write_transaction()?;
+        self.context
+            .db
+            .create_schema_with_txn(&txn, schema_name)
+            .map_err(|e| anyhow!("create schema failed: {e:?}"))?;
+        self.commit_if_auto_commit(auto_commit)
+    }
+
+    pub fn create_table(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: Vec<(String, LogicalType)>,
+    ) -> Result<()> {
+        let (auto_commit, txn) = self.ensure_catalog_write_transaction()?;
+        self.context
+            .db
+            .create_table_with_txn(&txn, schema, table, columns)
+            .map_err(|e| anyhow!("create table failed: {e:?}"))?;
+        self.commit_if_auto_commit(auto_commit)
+    }
+
+    pub fn drop_schema(&self, schema_name: &str) -> Result<()> {
+        let (auto_commit, txn) = self.ensure_catalog_write_transaction()?;
+        self.context
+            .db
+            .drop_schema_with_txn(&txn, schema_name)
+            .map_err(|e| anyhow!("drop schema failed: {e:?}"))?;
+        self.commit_if_auto_commit(auto_commit)
+    }
+
+    pub fn drop_table(&self, schema: &str, table: &str) -> Result<()> {
+        let (auto_commit, txn) = self.ensure_catalog_write_transaction()?;
+        self.context
+            .db
+            .drop_table_with_txn(&txn, schema, table)
+            .map_err(|e| anyhow!("drop table failed: {e:?}"))?;
+        self.commit_if_auto_commit(auto_commit)
     }
 
     fn build_row_id_vector(row_ids: &[i64]) -> crate::common::types::Vector {
@@ -355,8 +451,9 @@ impl Connection {
         let _txn = self.acquire_write_transaction();
 
         table
+            .entry
             .storage
-            .local_append(&table.catalog_entry, &self.context, chunk, &[])
+            .local_append(&table.entry.base, &self.context, chunk, &[])
             .map_err(|e| anyhow!("append failed: {e:?}"))?;
 
         self.commit_if_auto_commit(auto_commit)
@@ -371,7 +468,7 @@ impl Connection {
         let table = self.get_table(table_name)?;
 
         let column_ids = column_ids.unwrap_or_else(|| {
-            (0..table.storage.column_count())
+            (0..table.entry.storage.column_count())
                 .map(|idx| idx as u64)
                 .collect()
         });
@@ -379,7 +476,7 @@ impl Connection {
         let result_types: Vec<LogicalType> = column_ids
             .iter()
             .map(|idx| {
-                table.storage.column_definitions[*idx as usize]
+                table.entry.storage.column_definitions[*idx as usize]
                     .logical_type
                     .clone()
             })
@@ -393,7 +490,7 @@ impl Connection {
         let mut state = crate::storage::table::scan_state::TableScanState::new();
         {
             let txn_guard = txn.lock_inner();
-            table.storage.initialize_scan(
+            table.entry.storage.initialize_scan(
                 self.context.as_ref(),
                 &*txn_guard,
                 &mut state,
@@ -406,7 +503,10 @@ impl Connection {
         loop {
             let mut chunk = DataChunk::new();
             chunk.initialize(&result_types, STANDARD_VECTOR_SIZE);
-            table.storage.scan(self.context.as_ref(), &mut chunk, &mut state);
+            table
+                .entry
+                .storage
+                .scan(self.context.as_ref(), &mut chunk, &mut state);
             if chunk.size() == 0 {
                 break;
             }
@@ -434,10 +534,12 @@ impl Connection {
         let physical_column_ids = Self::build_physical_column_ids(column_ids);
 
         let mut state = table
+            .entry
             .storage
             .initialize_update()
             .map_err(|e| anyhow!("initialize update failed: {e:?}"))?;
         table
+            .entry
             .storage
             .update(
                 state.as_mut(),
@@ -460,8 +562,9 @@ impl Connection {
 
         let mut row_id_vector = Self::build_row_id_vector(row_ids);
 
-        let mut state = table.storage.initialize_delete();
+        let mut state = table.entry.storage.initialize_delete();
         let deleted = table
+            .entry
             .storage
             .delete(
                 state.as_mut(),

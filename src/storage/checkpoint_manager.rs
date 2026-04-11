@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::catalog::{ColumnDefinition, LogicalType, TableCatalogEntry};
+use crate::catalog::{ColumnDefinition, DuckTableEntry, LogicalType, TableCatalogEntry};
 use crate::common::errors::StorageResult;
 use crate::common::serializer::BinarySerializer;
 use crate::storage::buffer::BlockManager;
@@ -24,8 +24,7 @@ pub struct CheckpointManager {
 
 /// 琛ㄤ俊鎭?
 pub struct TableInfo {
-    pub entry: Arc<TableCatalogEntry>,
-    pub storage: Arc<DataTable>,
+    pub entry: Arc<DuckTableEntry>,
 }
 
 impl CheckpointManager {
@@ -67,10 +66,10 @@ impl CheckpointManager {
         let mut table_data: Vec<(&TableCatalogEntry, Option<MetaBlockPointer>, u64)> = Vec::new();
 
         for table_info in tables {
-            let total_rows = table_info.storage.get_total_rows();
+            let total_rows = table_info.entry.storage.get_total_rows();
             let table_pointer =
-                self.write_table_data(&mut table_metadata_writer, &table_info.storage);
-            table_data.push((&table_info.entry, table_pointer, total_rows));
+                self.write_table_data(&mut table_metadata_writer, &table_info.entry.storage);
+            table_data.push((&table_info.entry.base, table_pointer, total_rows));
         }
 
         // 4. ??? catalog
@@ -416,6 +415,24 @@ fn write_create_table_info(serializer: &mut BinarySerializer<'_>, entry: &TableC
     serializer.write_field_id(201);
     write_column_list(serializer, &entry.columns);
     serializer.end_object();
+}
+
+#[derive(Default)]
+struct VecWriteStream {
+    buf: Vec<u8>,
+}
+
+impl WriteStream for VecWriteStream {
+    fn write_data(&mut self, buf: &[u8]) {
+        self.buf.extend_from_slice(buf);
+    }
+}
+
+pub(crate) fn serialize_create_table_info(entry: &TableCatalogEntry) -> Vec<u8> {
+    let mut stream = VecWriteStream::default();
+    let mut serializer = BinarySerializer::new(&mut stream as &mut dyn WriteStream);
+    write_create_table_info(&mut serializer, entry);
+    stream.buf
 }
 
 fn write_column_list(serializer: &mut BinarySerializer<'_>, columns: &crate::catalog::ColumnList) {

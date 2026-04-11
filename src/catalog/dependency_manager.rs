@@ -32,7 +32,7 @@ use super::dependency::{
 use super::entry::{CatalogEntryBase, CatalogEntryKind, CatalogEntryNode, DependencyRelationData};
 use super::error::CatalogError;
 use crate::common::errors::CatalogResult;
-use super::transaction::CatalogTransaction;
+use super::catalog_transaction::CatalogTransaction;
 use super::types::CatalogType;
 
 // ─── DependencyCatalogSet ──────────────────────────────────────────────────────

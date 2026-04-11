@@ -868,8 +868,7 @@ impl SingleFileStorageManager {
         Ok(tables
             .values()
             .map(|handle| crate::storage::checkpoint_manager::TableInfo {
-                entry: Arc::new(handle.catalog_entry.clone()),
-                storage: handle.storage.clone(),
+                entry: handle.entry.clone(),
             })
             .collect())
     }

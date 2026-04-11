@@ -37,6 +37,20 @@ use super::transaction::CatalogTransaction;
 use super::types::{AlterInfo, CatalogType, CreateInfo, Value};
 use crate::common::errors::CatalogResult;
 
+pub mod duck_schema_entry;
+pub mod duck_table_entry;
+pub mod schema_catalog_entry;
+pub mod table_catalog_entry;
+
+pub use duck_schema_entry::DuckSchemaEntry;
+pub use duck_table_entry::DuckTableEntry;
+pub use schema_catalog_entry::SchemaCatalogEntry;
+pub use table_catalog_entry::{
+    COLUMN_IDENTIFIER_ROW_ID, ColumnSegmentInfo, ColumnStatistics, IndexInfo, LogicalIndex,
+    PhysicalIndex, ScanFunctionBinding, TableCatalogEntry, TableCatalogEntryVirtual,
+    TableStorageInfo, VirtualColumn, VirtualColumnMap,
+};
+
 // ─── CatalogEntryFields ────────────────────────────────────────────────────────
 
 /// `CatalogEntry` 的公共数据字段（C++: `CatalogEntry` 所有 public 成员变量）。

@@ -1,6 +1,6 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::catalog::{Catalog, SchemaCatalogEntry};
 use super::engine::{EngineError, SchemaInfo, SchemaTableInfo, TableScanBindData, TableScanRequest};
 use crate::common::errors::{Result, anyhow};
 use crate::common::types::{DataChunk, LogicalType};
@@ -52,13 +52,7 @@ impl DuckEngine {
     /// 但与同一引擎上的其他连接共享同一个 `DatabaseInstance`（存储 + 事务管理器）。
     pub fn connect(&self) -> DuckConnection {
         let conn = self.db.connect();
-        let mut schemas = HashSet::new();
-        schemas.insert("main".to_string());
-        DuckConnection {
-            conn,
-            db: Arc::clone(&self.db),
-            schemas,
-        }
+        DuckConnection { conn, db: Arc::clone(&self.db) }
     }
 }
 
@@ -69,7 +63,6 @@ impl DuckEngine {
 /// 通过 [`DuckEngine::connect`] 创建，持有：
 /// - `conn`：独立的底层连接（事务状态隔离）。
 /// - `db`：与引擎共享的数据库实例引用（DDL 修改元数据用）。
-/// - `schemas`：本连接可见的 schema 名称集合。
 pub struct DuckConnection {
     /// 底层连接（含独立 ClientContext / TransactionContext）。
     conn: Connection,
@@ -79,11 +72,41 @@ pub struct DuckConnection {
     /// 与创建本连接的 `DuckdbEngine.db` 指向同一个对象。
     db: Arc<DatabaseInstance>,
 
-    /// 本连接已注册的 schema 名称（默认包含 `"main"`）。
-    schemas: HashSet<String>,
 }
 
 impl DuckConnection {
+    fn default_schema_name(&self) -> String {
+        let catalog = self.db.catalog.lock();
+        catalog.default_schema().to_string()
+    }
+
+    fn current_catalog_transaction(&self) -> crate::catalog::CatalogTransaction {
+        self.conn.current_catalog_transaction()
+    }
+
+    fn parse_create_table_name(&self, table_name: &str) -> Result<(String, String), EngineError> {
+        let mut parts = table_name.split('.');
+        let first = parts.next().unwrap_or_default();
+        let second = parts.next();
+        let third = parts.next();
+
+        if first.is_empty() {
+            return Err(anyhow!("table name must not be empty"));
+        }
+        if third.is_some() {
+            return Err(anyhow!(
+                "table name '{}' is invalid: only 'table' or 'schema.table' is supported",
+                table_name
+            ));
+        }
+
+        match second {
+            Some(table) if table.is_empty() => Err(anyhow!("table name '{}' is invalid", table_name)),
+            Some(table) => Ok((first.to_string(), table.to_string())),
+            None => Ok((self.default_schema_name(), first.to_string())),
+        }
+    }
+
     fn resolve_scan(
         &self,
         table_name: &str,
@@ -91,7 +114,7 @@ impl DuckConnection {
     ) -> Result<ResolvedScan, EngineError> {
         let table = self.conn.get_table(table_name)?;
         let requested_column_ids = if request.column_ids.is_empty() {
-            (0..table.storage.column_count())
+            (0..table.entry.storage.column_count())
                 .map(|idx| StorageIndex(idx as u64))
                 .collect()
         } else {
@@ -122,7 +145,7 @@ impl DuckConnection {
             .iter()
             .take(requested_column_ids.len())
             .map(|idx| {
-                table.storage.column_definitions[idx.0 as usize]
+                table.entry.storage.column_definitions[idx.0 as usize]
                     .logical_type
                     .clone()
             })
@@ -131,7 +154,7 @@ impl DuckConnection {
             .column_ids
             .iter()
             .map(|idx| {
-                table.storage.column_definitions[idx.0 as usize]
+                table.entry.storage.column_definitions[idx.0 as usize]
                     .logical_type
                     .clone()
             })
@@ -207,7 +230,8 @@ impl DuckConnection {
         request: TableScanRequest,
     ) -> Result<DuckTableScanState, EngineError> {
         let resolved = self.resolve_scan(table_name, request)?;
-        let max_threads = resolved.table.storage.max_threads(resolved.storage_context.as_ref()) as usize;
+        let max_threads =
+            resolved.table.entry.storage.max_threads(resolved.storage_context.as_ref()) as usize;
         let mut parallel_state = ParallelTableScanState {
             scan_state: ParallelCollectionScanState {
                 row_groups: None,
@@ -230,7 +254,7 @@ impl DuckConnection {
                 lock: parking_lot::Mutex::new(()),
             },
         };
-        resolved.table.storage.initialize_parallel_scan(
+        resolved.table.entry.storage.initialize_parallel_scan(
             resolved.storage_context.as_ref(),
             &mut parallel_state,
             &[],
@@ -278,37 +302,37 @@ impl DuckConnection {
 
     // ── Schema / DDL ──────────────────────────────────────────────────────────
 
-    /// 注册 schema 名称（幂等）。
+    /// 创建 schema。
     ///
-    /// 注册后方可在该 schema 下执行 `create_table`。
-    /// `"main"` 默认已注册，无需显式调用。
-    pub fn create_schema(&mut self, schema_name: &str) -> Result<(), EngineError> {
-        self.schemas.insert(schema_name.to_string());
-        Ok(())
+    /// 对齐 DuckDB: `CREATE SCHEMA` 直接修改全局 catalog，而非连接本地状态。
+    pub fn create_schema(&self, schema_name: &str) -> Result<(), EngineError> {
+        self.conn.create_schema(schema_name)
     }
 
     /// 获取 schema 下所有表的定义。
     ///
     /// # Errors
-    /// 若 schema 未通过 [`create_schema`] 注册，返回错误。
+    /// 若 schema 在 catalog 中不存在，返回错误。
     pub fn get_schema(&self, schema_name: &str) -> Result<SchemaInfo, EngineError> {
-        if !self.schemas.contains(schema_name) {
-            return Err(anyhow!("schema '{}' not found", schema_name));
-        }
-        let tables_guard = self.db.tables.lock();
-        let schema_tables: Vec<SchemaTableInfo> = tables_guard
-            .values()
-            .filter(|t| t.catalog_entry.base.schema_name == schema_name)
-            .map(|t| SchemaTableInfo {
-                name: t.catalog_entry.base.fields().name.clone(),
-                columns: t
-                    .storage
-                    .column_definitions
-                    .iter()
-                    .map(|col| (col.name.clone(), col.logical_type.clone()))
-                    .collect(),
-            })
-            .collect();
+        let txn = self.current_catalog_transaction();
+        let catalog = self.db.catalog.lock();
+        let schema = catalog
+            .get_schema_for_operation(&txn, schema_name)
+            .map_err(|e| anyhow!("lookup schema failed: {e}"))?;
+        let mut schema_tables = Vec::new();
+        schema.scan(&txn, crate::catalog::CatalogType::TableEntry, &mut |node| {
+            if let crate::catalog::CatalogEntryKind::Table(entry) = &node.kind {
+                schema_tables.push(SchemaTableInfo {
+                    name: entry.name().to_string(),
+                    columns: entry
+                        .storage
+                        .column_definitions
+                        .iter()
+                        .map(|col| (col.name.clone(), col.logical_type.clone()))
+                        .collect(),
+                });
+            }
+        });
         Ok(SchemaInfo {
             name: schema_name.to_string(),
             tables: schema_tables,
@@ -316,23 +340,40 @@ impl DuckConnection {
     }
 
     /// 在指定 schema 下创建表。
-    ///
-    /// # Errors
-    /// 若 schema 未通过 [`create_schema`] 注册，返回错误。
-    pub fn create_table(
-        &mut self,
+    pub fn create_table_in_schema(
+        &self,
         schema: &str,
         table: &str,
         columns: Vec<(String, LogicalType)>,
     ) -> Result<(), EngineError> {
-        if !self.schemas.contains(schema) {
-            return Err(anyhow!(
-                "Schema '{}' not found. Call create_schema(\"{}\") first.",
-                schema, schema
-            ));
-        }
-        self.db.create_table(schema, table, columns);
-        Ok(())
+        self.conn.create_table(schema, table, columns)
+    }
+
+    /// 创建表。
+    ///
+    /// `table_name` 支持：
+    /// - `"tbl"`：在默认 schema 下建表
+    /// - `"schema.tbl"`：在指定 schema 下建表
+    pub fn create_table(
+        &self,
+        table_name: &str,
+        columns: Vec<(String, LogicalType)>,
+    ) -> Result<(), EngineError> {
+        let (schema, table) = self.parse_create_table_name(table_name)?;
+        self.create_table_in_schema(&schema, &table, columns)
+    }
+
+    pub fn drop_schema(&self, schema_name: &str) -> Result<(), EngineError> {
+        self.conn.drop_schema(schema_name)
+    }
+
+    pub fn drop_table_in_schema(&self, schema: &str, table: &str) -> Result<(), EngineError> {
+        self.conn.drop_table(schema, table)
+    }
+
+    pub fn drop_table(&self, table_name: &str) -> Result<(), EngineError> {
+        let (schema, table) = self.parse_create_table_name(table_name)?;
+        self.drop_table_in_schema(&schema, &table)
     }
 }
 
@@ -392,7 +433,7 @@ impl DuckTableScanState {
         }
 
         let mut parallel_state = self.parallel_state.lock();
-        local_state.rows_in_current_row_group = self.table.storage.next_parallel_scan(
+        local_state.rows_in_current_row_group = self.table.entry.storage.next_parallel_scan(
             self.storage_context.as_ref(),
             &mut parallel_state,
             &mut local_state.scan_state,
@@ -413,7 +454,7 @@ impl DuckTableScanState {
 
             if let Some(all_columns) = local_state.all_columns.as_mut() {
                 all_columns.reset();
-                self.table.storage.scan(
+                self.table.entry.storage.scan(
                     self.storage_context.as_ref(),
                     all_columns,
                     &mut local_state.scan_state,
@@ -424,6 +465,7 @@ impl DuckTableScanState {
                 }
             } else {
                 self.table
+                    .entry
                     .storage
                     .scan(self.storage_context.as_ref(), result, &mut local_state.scan_state);
                 if result.size() > 0 {
@@ -433,7 +475,7 @@ impl DuckTableScanState {
 
             local_state.rows_scanned += local_state.rows_in_current_row_group;
             let mut parallel_state = self.parallel_state.lock();
-            local_state.rows_in_current_row_group = self.table.storage.next_parallel_scan(
+            local_state.rows_in_current_row_group = self.table.entry.storage.next_parallel_scan(
                 self.storage_context.as_ref(),
                 &mut parallel_state,
                 &mut local_state.scan_state,
@@ -442,6 +484,36 @@ impl DuckTableScanState {
                 return Ok(false);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DuckEngine;
+    use crate::common::types::LogicalType;
+
+    #[test]
+    fn ddl_facade_follows_catalog_path() {
+        let engine = DuckEngine::open(":memory:").expect("open engine");
+        let conn = engine.connect();
+
+        conn.create_schema("s1").expect("create schema");
+        conn.create_table(
+            "s1.t1",
+            vec![("id".to_string(), LogicalType::integer())],
+        )
+        .expect("create table");
+
+        let schema = conn.get_schema("s1").expect("get schema");
+        assert_eq!(schema.tables.len(), 1);
+        assert_eq!(schema.tables[0].name, "t1");
+
+        conn.drop_table("s1.t1").expect("drop table");
+        let schema = conn.get_schema("s1").expect("get schema after drop table");
+        assert!(schema.tables.is_empty());
+
+        conn.drop_schema("s1").expect("drop schema");
+        assert!(conn.get_schema("s1").is_err());
     }
 }
 

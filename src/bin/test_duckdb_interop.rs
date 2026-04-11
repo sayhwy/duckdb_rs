@@ -210,10 +210,9 @@ fn test_rust_read_duckdb_file() -> Result<Vec<String>> {
 
 fn test_rust_create_student_table() -> Result<()> {
     let engine = DuckEngine::open(TEST_DB_RUST).map_err(|e| anyhow!("无法创建数据库: {e:?}"))?;
-    let mut conn = engine.connect();
+    let conn = engine.connect();
 
     conn.create_table(
-        "main",
         "students",
         vec![
             ("id".to_string(), LogicalType::integer()),

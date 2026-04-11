@@ -32,7 +32,7 @@ use super::entry::{CatalogEntryBase, CatalogEntryKind, CatalogEntryNode};
 use super::entry_lookup::SimilarCatalogEntry;
 use super::error::CatalogError;
 use crate::common::errors::CatalogResult;
-use super::transaction::{CatalogTransaction, has_conflict, is_visible};
+use super::catalog_transaction::{CatalogTransaction, has_conflict, is_visible};
 use super::types::{AlterInfo, CatalogType, CreateInfo, DropInfo};
 use crate::transaction::types::{TRANSACTION_ID_START, TransactionId};
 
@@ -204,6 +204,15 @@ impl CatalogSet {
         self.defaults = Some(generator);
     }
 
+    fn bind_node(&self, node: &mut CatalogEntryNode) {
+        let parent_ptr = node as *mut CatalogEntryNode;
+        node.set_catalog_set(self as *const CatalogSet);
+        if let Some(older) = node.older.as_deref_mut() {
+            older.set_catalog_set(self as *const CatalogSet);
+            older.set_parent(parent_ptr);
+        }
+    }
+
     // ─── 写操作（需要持有 catalog 级写锁，由调用方保证） ─────────────────────────
 
     /// 创建条目（C++: `CatalogSet::CreateEntry`）。
@@ -219,36 +228,38 @@ impl CatalogSet {
         let lower = name.to_lowercase();
         let mut map = self.map.write();
 
-        // 检查现有条目
-        let (existing, reason) = map.get_visible_detailed(txn, &lower);
-        match reason {
-            LookupFailureReason::Success => {
-                // 条目已存在（活跃且可见）
-                if let Some(existing) = existing {
-                    // 检查写-写冲突
-                    let ts = existing.base.get_timestamp();
-                    if has_conflict(txn, ts) {
-                        return Err(CatalogError::transaction_conflict(name));
-                    }
-                }
+        if map.get_raw(&lower).is_none() {
+            let mut dummy = Box::new(CatalogEntryNode::tombstone(
+                0,
+                name.to_string(),
+                String::new(),
+                String::new(),
+                CatalogType::Invalid,
+            ));
+            dummy.base.set_timestamp(0);
+            self.bind_node(dummy.as_mut());
+            map.entries.insert(lower.clone(), dummy);
+        } else {
+            let entry = map
+                .get_raw(&lower)
+                .expect("catalog entry disappeared while creating");
+            let ts = entry.base.get_timestamp();
+            if has_conflict(txn, ts) {
+                return Err(CatalogError::transaction_conflict(name));
+            }
+            if !entry.base.deleted {
                 return Err(CatalogError::already_exists(node.base.entry_type, name));
-            }
-            LookupFailureReason::Invisible => {
-                // 其他活跃事务创建的条目，冲突
-                if let Some(existing) = existing {
-                    if has_conflict(txn, existing.base.get_timestamp()) {
-                        return Err(CatalogError::transaction_conflict(name));
-                    }
-                }
-            }
-            LookupFailureReason::Deleted | LookupFailureReason::NotPresent => {
-                // 可以创建
             }
         }
 
         // 设置时间戳为当前事务 ID
         node.base.set_timestamp(txn.transaction_id);
-        map.push_head(lower, node);
+        let mut node = node;
+        self.bind_node(node.as_mut());
+        map.push_head(lower.clone(), node);
+        if let Some(head) = map.entries.get_mut(&lower) {
+            self.bind_node(head.as_mut());
+        }
         Ok(true)
     }
 
@@ -273,7 +284,12 @@ impl CatalogSet {
             }
             // 有现有条目 → 替换（推入链头）
             node.base.set_timestamp(txn.transaction_id);
-            map.push_head(lower, node);
+            let mut node = node;
+            self.bind_node(node.as_mut());
+            map.push_head(lower.clone(), node);
+            if let Some(head) = map.entries.get_mut(&lower) {
+                self.bind_node(head.as_mut());
+            }
             return Ok(true);
         }
         // 否则走普通创建
@@ -309,9 +325,13 @@ impl CatalogSet {
         }
 
         // 生成新版本
-        let new_node = Box::new(existing.alter(info)?);
+        let mut new_node = Box::new(existing.alter(info)?);
         new_node.base.set_timestamp(txn.transaction_id);
-        map.push_head(lower, new_node);
+        self.bind_node(new_node.as_mut());
+        map.push_head(lower.clone(), new_node);
+        if let Some(head) = map.entries.get_mut(&lower) {
+            self.bind_node(head.as_mut());
+        }
         Ok(())
     }
 
@@ -355,7 +375,7 @@ impl CatalogSet {
         let entry_type = existing.base.entry_type;
         let catalog_name = existing.base.catalog_name.clone();
         let schema_name = existing.base.schema_name.clone();
-        let tombstone = Box::new(CatalogEntryNode::tombstone(
+        let mut tombstone = Box::new(CatalogEntryNode::tombstone(
             oid,
             name.to_string(),
             catalog_name,
@@ -363,7 +383,11 @@ impl CatalogSet {
             entry_type,
         ));
         tombstone.base.set_timestamp(txn.transaction_id);
-        map.push_head(lower, tombstone);
+        self.bind_node(tombstone.as_mut());
+        map.push_head(lower.clone(), tombstone);
+        if let Some(head) = map.entries.get_mut(&lower) {
+            self.bind_node(head.as_mut());
+        }
         Ok(())
     }
 
@@ -402,7 +426,7 @@ impl CatalogSet {
                 let deps = LogicalDependencyList::new();
                 let node_box = Box::new(default_node);
                 // 将默认条目插入 map（使用系统事务时间戳 0）
-                let mut sys_txn = *txn;
+                let mut sys_txn = txn.clone();
                 sys_txn.transaction_id = 0;
                 let _ = self.create_entry(&sys_txn, name, node_box, &deps);
                 return self.get_entry(txn, name);
@@ -425,33 +449,60 @@ impl CatalogSet {
     // ─── MVCC 维护 ─────────────────────────────────────────────────────────────
 
     /// Undo 操作：回滚本事务对某条目的修改（C++: `CatalogSet::Undo`）。
-    pub fn undo(&self, name: &str, _commit_id: TransactionId) {
-        let lower = name.to_lowercase();
+    pub fn undo(&self, entry: &CatalogEntryNode) {
+        let lower = entry.base.name.to_lowercase();
         let mut map = self.map.write();
-        // 弹出链头（恢复到旧版本）
-        map.pop_head(&lower);
+        let mut to_be_removed = match map.entries.remove(&lower) {
+            Some(entry) => entry,
+            None => return,
+        };
+        let mut restored = match to_be_removed.older.take() {
+            Some(entry) => entry,
+            None => return,
+        };
+        restored.clear_parent();
+        if restored.base.entry_type != CatalogType::Invalid {
+            restored.set_as_root();
+            map.entries.insert(lower, restored);
+        }
     }
 
     /// 提交 Drop（C++: `CatalogSet::CommitDrop`）。
     ///
     /// 将墓碑节点的时间戳设置为 commit_id，使其对所有 start_time >= commit_id 的事务不可见。
-    pub fn commit_drop(&self, name: &str, commit_id: TransactionId) {
-        let lower = name.to_lowercase();
-        let mut map = self.map.write();
-        if let Some(head) = map.entries.get_mut(&lower) {
-            if head.base.deleted {
-                head.base.set_timestamp(commit_id);
+    pub fn commit_drop(
+        &self,
+        commit_id: TransactionId,
+        _start_time: TransactionId,
+        entry: &mut CatalogEntryNode,
+        db: &crate::db::conn::DatabaseInstance,
+    ) {
+        match &mut entry.kind {
+            CatalogEntryKind::Table(table) => {
+                table.storage.commit_drop_table();
+                db.tables.lock().remove(&(
+                    entry.base.schema_name.to_ascii_lowercase(),
+                    entry.base.name.to_ascii_lowercase(),
+                ));
             }
+            CatalogEntryKind::Schema(_) => {
+                db.tables
+                    .lock()
+                    .retain(|(schema, _), _| !schema.eq_ignore_ascii_case(&entry.base.name));
+            }
+            CatalogEntryKind::Index(_) => {
+                unimplemented!("index commit drop is not implemented")
+            }
+            _ => {}
+        }
+        if let Some(parent) = entry.parent_mut() {
+            parent.base.set_timestamp(commit_id);
         }
     }
 
     /// 更新条目时间戳（提交时调用）（C++: `CatalogSet::UpdateTimestamp`）。
-    pub fn update_timestamp(&self, name: &str, commit_id: TransactionId) {
-        let lower = name.to_lowercase();
-        let map = self.map.read();
-        if let Some(head) = map.entries.get(&lower) {
-            head.base.set_timestamp(commit_id);
-        }
+    pub fn update_timestamp(&self, entry: &CatalogEntryNode, commit_id: TransactionId) {
+        entry.base.set_timestamp(commit_id);
     }
 
     /// 清理不再可见的旧版本（C++: `CatalogSet::CleanupEntry`）。
@@ -633,6 +684,15 @@ impl CatalogSet {
     /// 返回所有可见条目数量（包括已删除的链头）。
     pub fn entry_count(&self) -> usize {
         self.map.read().entries.len()
+    }
+
+    pub fn get_undo_entry_ptr(&self, name: &str) -> Option<u64> {
+        let lower = name.to_lowercase();
+        let map = self.map.read();
+        map.entries
+            .get(&lower)
+            .and_then(|head| head.older.as_deref())
+            .map(CatalogEntryNode::raw_ptr)
     }
 }
 

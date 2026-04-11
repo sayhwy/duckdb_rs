@@ -20,7 +20,7 @@ use super::catalog_entry::{CatalogEntryFields, CatalogEntryVirtual, InCatalogEnt
 use super::dependency::LogicalDependencyList;
 use super::error::CatalogError;
 use crate::common::errors::CatalogResult;
-use super::transaction::CatalogTransaction;
+use super::catalog_transaction::CatalogTransaction;
 use super::types::{AlterInfo, CatalogType, CreateInfo};
 
 // ─── StandardEntry ─────────────────────────────────────────────────────────────

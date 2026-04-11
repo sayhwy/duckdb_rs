@@ -11,8 +11,11 @@
 //! | `virtual unique_ptr<CatalogEntry> CreateDefaultEntry(...)` | `fn create_default_entry(...)` |
 //! | `atomic<bool> created_all_entries` | `created_all_entries: AtomicBool` |
 
+use std::sync::Arc;
+
+use super::catalog_entry::DuckSchemaEntry;
 use super::entry::{CatalogEntryBase, CatalogEntryKind, CatalogEntryNode};
-use super::transaction::CatalogTransaction;
+use super::catalog_transaction::CatalogTransaction;
 use super::types::CatalogType;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -73,7 +76,7 @@ impl DefaultSchemaGenerator {
             .any(|s| s.eq_ignore_ascii_case(&lower))
     }
 
-    fn make_schema_node(&self, name: &str, txn: &CatalogTransaction) -> CatalogEntryNode {
+    fn make_schema_node(&self, name: &str, _txn: &CatalogTransaction) -> CatalogEntryNode {
         let oid = name.len() as u64 ^ self.catalog_oid; // 简单的 OID 生成
         let mut base = CatalogEntryBase::new(
             oid,
@@ -84,7 +87,14 @@ impl DefaultSchemaGenerator {
         );
         base.internal = true;
         base.set_timestamp(0); // 系统条目时间戳为 0（始终可见）
-        CatalogEntryNode::new(base, CatalogEntryKind::Schema)
+        let schema = Arc::new(DuckSchemaEntry::new(
+            oid,
+            name.to_string(),
+            self.catalog_name.clone(),
+            self.catalog_oid,
+            true,
+        ));
+        CatalogEntryNode::new(base, CatalogEntryKind::Schema(schema))
     }
 }
 

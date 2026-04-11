@@ -32,6 +32,8 @@ use super::append_info::AppendInfo;
 use super::delete_info::DeleteInfo;
 use super::types::UndoFlags;
 use super::update_info::UpdateInfo;
+use crate::catalog::{CatalogEntryKind, CatalogEntryNode, CatalogType};
+use crate::storage::checkpoint_manager::serialize_create_table_info;
 use crate::storage::table::types::TransactionData;
 use crate::storage::storage_manager::StorageCommitState;
 use crate::storage::write_ahead_log::WriteAheadLog;
@@ -359,120 +361,63 @@ impl<'wal> WALWriteState<'wal> {
     /// 载荷格式（由 `DuckTransaction::push_catalog_entry` 写入）：
     /// ```text
     /// [catalog_entry_id: u64]
-    /// [extra_data_size:  u64]    ← 存在则 > 0
-    /// [extra_data:       bytes]  ← CatalogEntryUndoData::serialize()
+    /// [extra_data_size:  u64]
+    /// [extra_data:       bytes]
     /// ```
     fn write_catalog_entry(&mut self, payload: &[u8]) {
-        // C++: auto catalog_entry = Load<CatalogEntry *>(data);
-        //      if (entry.temporary || entry.Parent().temporary) return;
-        //      WriteCatalogEntry(*catalog_entry, data + sizeof(CatalogEntry *));
-
-        // 跳过 catalog_entry_id（8 字节）
         if payload.len() < 8 {
             return;
         }
-        let after_id = &payload[8..];
-
-        // 读取 extra_data_size（8 字节），0 表示无 extra_data
-        if after_id.len() < 8 {
+        let entry_ptr = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as usize;
+        if entry_ptr == 0 {
             return;
         }
-        let extra_size = u64::from_le_bytes(after_id[0..8].try_into().unwrap()) as usize;
-        if extra_size == 0 || after_id.len() < 8 + extra_size {
+        let entry = unsafe { &*(entry_ptr as *const CatalogEntryNode) };
+        let Some(parent) = entry.parent() else {
             return;
-        }
-
-        let data = &after_id[8..8 + extra_size];
-        let entry = match CatalogEntryUndoData::deserialize(data) {
-            Some(e) => e,
-            None => return,
         };
-
-        // C++: if (entry.temporary || entry.Parent().temporary) return;
-        if entry.is_temporary {
+        if entry.base.temporary || parent.base.temporary {
             return;
         }
-
-        // C++: switch (parent.type) { … }
-        match entry.op {
-            CatalogWalOp::CreateTable => {
-                // C++: log.WriteCreateTable(parent.Cast<TableCatalogEntry>());
-                let _ = self.log.write_create_table(&entry.payload);
+        if parent.base.deleted {
+            match entry.base.entry_type {
+                CatalogType::TableEntry => {
+                    let _ = self
+                        .log
+                        .write_drop_table(&entry.base.schema_name, &entry.base.name);
+                }
+                CatalogType::SchemaEntry => {
+                    let _ = self.log.write_drop_schema(&entry.base.name);
+                }
+                CatalogType::IndexEntry => unimplemented!("index WAL is not implemented"),
+                _ => {}
             }
-            CatalogWalOp::DropTable => {
-                // C++: log.WriteDropTable(table_entry);
-                let _ = self.log.write_drop_table(&entry.schema, &entry.name);
+            return;
+        }
+        match parent.base.entry_type {
+            CatalogType::TableEntry => {
+                if let CatalogEntryKind::Table(table) = &parent.kind {
+                    let payload = serialize_create_table_info(&table.base);
+                    let _ = self.log.write_create_table(&payload);
+                }
             }
-            CatalogWalOp::CreateSchema => {
-                // C++: log.WriteCreateSchema(parent.Cast<SchemaCatalogEntry>());
-                let _ = self.log.write_create_schema(&entry.schema);
+            CatalogType::SchemaEntry => {
+                let _ = self.log.write_create_schema(&parent.base.name);
             }
-            CatalogWalOp::DropSchema => {
-                // C++: log.WriteDropSchema(entry.Cast<SchemaCatalogEntry>());
-                let _ = self.log.write_drop_schema(&entry.schema);
+            CatalogType::ViewEntry => {
+                let _ = self.log.write_create_view(parent.to_sql().as_bytes());
             }
-            CatalogWalOp::CreateView => {
-                // C++: log.WriteCreateView(parent.Cast<ViewCatalogEntry>());
-                let _ = self.log.write_create_view(&entry.payload);
+            CatalogType::SequenceEntry => {
+                let _ = self.log.write_create_sequence(parent.to_sql().as_bytes());
             }
-            CatalogWalOp::DropView => {
-                // C++: log.WriteDropView(entry.Cast<ViewCatalogEntry>());
-                let _ = self.log.write_drop_view(&entry.schema, &entry.name);
+            CatalogType::TypeEntry => {
+                let _ = self.log.write_create_type(parent.to_sql().as_bytes());
             }
-            CatalogWalOp::CreateSequence => {
-                // C++: log.WriteCreateSequence(parent.Cast<SequenceCatalogEntry>());
-                let _ = self.log.write_create_sequence(&entry.payload);
+            CatalogType::MacroEntry | CatalogType::TableMacroEntry => {
+                let _ = self.log.write_create_macro(parent.to_sql().as_bytes());
             }
-            CatalogWalOp::DropSequence => {
-                // C++: log.WriteDropSequence(entry.Cast<SequenceCatalogEntry>());
-                let _ = self.log.write_drop_sequence(&entry.schema, &entry.name);
-            }
-            CatalogWalOp::CreateType => {
-                // C++: log.WriteCreateType(parent.Cast<TypeCatalogEntry>());
-                let _ = self.log.write_create_type(&entry.payload);
-            }
-            CatalogWalOp::DropType => {
-                // C++: log.WriteDropType(entry.Cast<TypeCatalogEntry>());
-                let _ = self.log.write_drop_type(&entry.schema, &entry.name);
-            }
-            CatalogWalOp::CreateMacro => {
-                // C++: log.WriteCreateMacro(parent.Cast<ScalarMacroCatalogEntry>());
-                let _ = self.log.write_create_macro(&entry.payload);
-            }
-            CatalogWalOp::DropMacro => {
-                // C++: log.WriteDropMacro(entry.Cast<ScalarMacroCatalogEntry>());
-                let _ = self.log.write_drop_macro(&entry.schema, &entry.name);
-            }
-            CatalogWalOp::CreateTableMacro => {
-                // C++: log.WriteCreateTableMacro(parent.Cast<TableMacroCatalogEntry>());
-                let _ = self.log.write_create_table_macro(&entry.payload);
-            }
-            CatalogWalOp::DropTableMacro => {
-                // C++: log.WriteDropTableMacro(entry.Cast<TableMacroCatalogEntry>());
-                let _ = self.log.write_drop_table_macro(&entry.schema, &entry.name);
-            }
-            CatalogWalOp::CreateIndex => {
-                // C++: log.WriteCreateIndex(parent.Cast<IndexCatalogEntry>());
-                let _ = self
-                    .log
-                    .write_create_index(&entry.payload, &entry.secondary_payload);
-            }
-            CatalogWalOp::DropIndex => {
-                // C++: log.WriteDropIndex(entry.Cast<IndexCatalogEntry>());
-                let _ = self.log.write_drop_index(&entry.schema, &entry.name);
-            }
-            CatalogWalOp::AlterTable => {
-                // C++: log.WriteAlter(entry, alter_info);
-                let index_storage = if entry.secondary_payload.is_empty() {
-                    None
-                } else {
-                    Some(entry.secondary_payload.as_slice())
-                };
-                let _ = self.log.write_alter(&entry.payload, index_storage);
-            }
-            CatalogWalOp::Ignore => {
-                // C++: 对应 RENAMED_ENTRY / SCHEMA_ENTRY ALTER 等无需写 WAL 的情况
-            }
+            CatalogType::IndexEntry => unimplemented!("index WAL is not implemented"),
+            _ => {}
         }
     }
 

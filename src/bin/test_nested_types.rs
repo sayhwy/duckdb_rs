@@ -62,12 +62,8 @@ fn verify_list_case() -> &'static str {
     let mut chunk = make_list_i32_chunk(&list_type, &expected);
 
     let engine = DuckEngine::open(db_path).expect("打开数据库失败");
-    let mut conn = engine.connect();
-    conn.create_table(
-        "main",
-        "list_t",
-        vec![("v".to_string(), list_type.clone())],
-    )
+    let conn = engine.connect();
+    conn.create_table("list_t", vec![("v".to_string(), list_type.clone())])
     .expect("创建 list_t 失败");
     conn.begin_transaction().expect("LIST begin_transaction 失败");
     conn.insert("list_t", &mut chunk).expect("LIST insert 失败");
@@ -113,8 +109,8 @@ fn verify_list_null_case() -> &'static str {
     let mut chunk = make_nullable_list_i32_chunk(&list_type, &expected);
 
     let engine = DuckEngine::open(db_path).expect("打开数据库失败");
-    let mut conn = engine.connect();
-    conn.create_table("main", "list_null_t", vec![("v".to_string(), list_type.clone())])
+    let conn = engine.connect();
+    conn.create_table("list_null_t", vec![("v".to_string(), list_type.clone())])
         .expect("创建 list_null_t 失败");
     conn.begin_transaction()
         .expect("LIST NULL begin_transaction 失败");
@@ -164,12 +160,8 @@ fn verify_array_case() -> &'static str {
     let mut chunk = make_array_i32_chunk(&array_type, 3, &expected);
 
     let engine = DuckEngine::open(db_path).expect("打开数据库失败");
-    let mut conn = engine.connect();
-    conn.create_table(
-        "main",
-        "array_t",
-        vec![("v".to_string(), array_type.clone())],
-    )
+    let conn = engine.connect();
+    conn.create_table("array_t", vec![("v".to_string(), array_type.clone())])
     .expect("创建 array_t 失败");
     conn.begin_transaction().expect("ARRAY begin_transaction 失败");
     conn.insert("array_t", &mut chunk).expect("ARRAY insert 失败");
@@ -215,8 +207,8 @@ fn verify_array_null_case() -> &'static str {
     let mut chunk = make_nullable_array_i32_chunk(&array_type, 3, &expected);
 
     let engine = DuckEngine::open(db_path).expect("打开数据库失败");
-    let mut conn = engine.connect();
-    conn.create_table("main", "array_null_t", vec![("v".to_string(), array_type.clone())])
+    let conn = engine.connect();
+    conn.create_table("array_null_t", vec![("v".to_string(), array_type.clone())])
         .expect("创建 array_null_t 失败");
     conn.begin_transaction()
         .expect("ARRAY NULL begin_transaction 失败");
@@ -269,12 +261,8 @@ fn verify_struct_case() -> &'static str {
     let mut chunk = make_struct_i32_chunk(&struct_type, &expected);
 
     let engine = DuckEngine::open(db_path).expect("打开数据库失败");
-    let mut conn = engine.connect();
-    conn.create_table(
-        "main",
-        "struct_t",
-        vec![("v".to_string(), struct_type.clone())],
-    )
+    let conn = engine.connect();
+    conn.create_table("struct_t", vec![("v".to_string(), struct_type.clone())])
     .expect("创建 struct_t 失败");
     conn.begin_transaction().expect("STRUCT begin_transaction 失败");
     conn.insert("struct_t", &mut chunk).expect("STRUCT insert 失败");
@@ -323,12 +311,8 @@ fn verify_struct_null_case() -> &'static str {
     let mut chunk = make_nullable_struct_i32_chunk(&struct_type, &expected);
 
     let engine = DuckEngine::open(db_path).expect("打开数据库失败");
-    let mut conn = engine.connect();
-    conn.create_table(
-        "main",
-        "struct_null_t",
-        vec![("v".to_string(), struct_type.clone())],
-    )
+    let conn = engine.connect();
+    conn.create_table("struct_null_t", vec![("v".to_string(), struct_type.clone())])
     .expect("创建 struct_null_t 失败");
     conn.begin_transaction()
         .expect("STRUCT NULL begin_transaction 失败");
@@ -386,12 +370,8 @@ fn verify_list_struct_case() -> &'static str {
     let mut chunk = make_list_struct_chunk(&list_type, &expected);
 
     let engine = DuckEngine::open(db_path).expect("打开数据库失败");
-    let mut conn = engine.connect();
-    conn.create_table(
-        "main",
-        "list_struct_t",
-        vec![("v".to_string(), list_type.clone())],
-    )
+    let conn = engine.connect();
+    conn.create_table("list_struct_t", vec![("v".to_string(), list_type.clone())])
     .expect("创建 list_struct_t 失败");
     conn.begin_transaction()
         .expect("LIST<STRUCT> begin_transaction 失败");
@@ -448,12 +428,8 @@ fn verify_struct_nested_case() -> &'static str {
     let mut chunk = make_struct_list_array_chunk(&struct_type, &expected);
 
     let engine = DuckEngine::open(db_path).expect("打开数据库失败");
-    let mut conn = engine.connect();
-    conn.create_table(
-        "main",
-        "struct_nested_t",
-        vec![("v".to_string(), struct_type.clone())],
-    )
+    let conn = engine.connect();
+    conn.create_table("struct_nested_t", vec![("v".to_string(), struct_type.clone())])
     .expect("创建 struct_nested_t 失败");
     conn.begin_transaction()
         .expect("STRUCT<LIST,ARRAY> begin_transaction 失败");
@@ -511,12 +487,8 @@ fn verify_list_list_case() -> &'static str {
     let mut chunk = make_list_list_i32_chunk(&list_type, &expected);
 
     let engine = DuckEngine::open(db_path).expect("打开数据库失败");
-    let mut conn = engine.connect();
-    conn.create_table(
-        "main",
-        "list_list_t",
-        vec![("v".to_string(), list_type.clone())],
-    )
+    let conn = engine.connect();
+    conn.create_table("list_list_t", vec![("v".to_string(), list_type.clone())])
     .expect("创建 list_list_t 失败");
     conn.begin_transaction()
         .expect("LIST<LIST> begin_transaction 失败");
@@ -573,12 +545,8 @@ fn verify_struct_struct_case() -> &'static str {
     let mut chunk = make_struct_struct_chunk(&struct_type, &expected);
 
     let engine = DuckEngine::open(db_path).expect("打开数据库失败");
-    let mut conn = engine.connect();
-    conn.create_table(
-        "main",
-        "struct_struct_t",
-        vec![("v".to_string(), struct_type.clone())],
-    )
+    let conn = engine.connect();
+    conn.create_table("struct_struct_t", vec![("v".to_string(), struct_type.clone())])
     .expect("创建 struct_struct_t 失败");
     conn.begin_transaction()
         .expect("STRUCT<STRUCT> begin_transaction 失败");
