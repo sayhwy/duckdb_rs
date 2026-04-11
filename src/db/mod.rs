@@ -1875,15 +1875,17 @@ fn read_table_data(
     let mut reader = MetadataReader::new(
         &metadata_manager,
         table_pointer,
-        None,
-        BlockReaderType::ExistingBlocks,
+        Some(Vec::new()),
+        BlockReaderType::RegisterBlocks,
     );
     let mut table_reader = TableDataReader::new(&mut reader, &mut bound, table_pointer);
     table_reader.read_table_data();
+    let read_metadata_pointers = reader.take_read_pointers().unwrap_or_default();
     let mut data = match bound.data {
         Some(data) => *data,
         None => return Ok(None),
     };
+    data.read_metadata_pointers = read_metadata_pointers;
     data.total_rows = entry.total_rows;
     Ok(Some(data))
 }

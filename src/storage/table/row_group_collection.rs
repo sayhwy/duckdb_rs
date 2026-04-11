@@ -81,7 +81,12 @@ pub struct RowGroupCollection {
     pub allocation_size: AtomicU64,
 
     /// If loaded from disk: root metadata pointer for lazy-loading row groups.
-    pub metadata_pointer: Option<MetaBlockPointer>,
+    pub metadata_pointer: Mutex<Option<MetaBlockPointer>>,
+
+    /// Metadata blocks that belong to this table payload.
+    ///
+    /// Mirrors DuckDB `RowGroupCollection::metadata_pointers`.
+    pub metadata_pointers: Mutex<Vec<MetaBlockPointer>>,
 }
 
 impl RowGroupCollection {
@@ -100,7 +105,8 @@ impl RowGroupCollection {
             append_lock: Mutex::new(()),
             requires_new_row_group: Mutex::new(false),
             allocation_size: AtomicU64::new(0),
-            metadata_pointer: None,
+            metadata_pointer: Mutex::new(None),
+            metadata_pointers: Mutex::new(Vec::new()),
         })
     }
 
@@ -116,6 +122,8 @@ impl RowGroupCollection {
         let tree = Arc::new(RowGroupSegmentTree::with_lazy_loader(self, 0));
         tree.initialize(data);
         *self.owned_row_groups.lock() = tree;
+        *self.metadata_pointer.lock() = Some(data.base_table_pointer);
+        *self.metadata_pointers.lock() = data.read_metadata_pointers.clone();
         if data.table_stats.is_empty() {
             self.stats.initialize_empty(&self.types);
         } else {

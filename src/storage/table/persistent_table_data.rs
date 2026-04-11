@@ -34,6 +34,11 @@ pub struct PersistentTableData {
     /// 表元数据起始块指针（C++: `MetaBlockPointer base_table_pointer`）。
     pub base_table_pointer: MetaBlockPointer,
 
+    /// 读取表元数据时遍历过的 metadata blocks。
+    ///
+    /// Mirrors DuckDB `PersistentTableData::read_metadata_pointers`.
+    pub read_metadata_pointers: Vec<MetaBlockPointer>,
+
     /// 全局列统计信息（C++: `TableStatistics table_stats`）。
     pub table_stats: TableStatistics,
 
@@ -55,6 +60,7 @@ impl PersistentTableData {
     pub fn new(_column_count: usize) -> Self {
         Self {
             base_table_pointer: MetaBlockPointer::default(),
+            read_metadata_pointers: Vec::new(),
             table_stats: TableStatistics::new(),
             total_rows: 0,
             row_group_count: 0,

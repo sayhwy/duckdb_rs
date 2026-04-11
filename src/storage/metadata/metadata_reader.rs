@@ -130,6 +130,10 @@ impl<'mgr> MetadataReader<'mgr> {
         )
     }
 
+    pub fn take_read_pointers(&mut self) -> Option<Vec<MetaBlockPointer>> {
+        self.read_pointers.take()
+    }
+
     /// 对应 C++ MetadataReader::GetRemainingBlocks(MetaBlockPointer last_block)
     ///
     /// 消耗剩余所有块，返回它们的 MetaBlockPointer 列表。
