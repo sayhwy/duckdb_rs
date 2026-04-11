@@ -93,7 +93,7 @@ fn load_segment(state: &Arc<LazyLoadState>) -> Option<LoadedSegment<RowGroup>> {
         &metadata_manager,
         next_pointer,
         None,
-        BlockReaderType::RegisterBlocks,
+        BlockReaderType::ExistingBlocks,
     );
     let mut deserializer = BinaryMetadataDeserializer::new(&mut reader);
     let pointer = deserializer.read_row_group_pointer().ok()?;

@@ -44,19 +44,24 @@ pub fn write_row_group_pointer(serializer: &mut BinarySerializer<'_>, pointer: &
         serializer.list_write_object(|s| write_meta_block_pointer(s, delete_pointer));
     }
     serializer.end_list();
-    serializer.write_bool(104, false);
-    serializer.begin_list(105, 0);
+    serializer.write_bool(104, pointer.has_metadata_blocks);
+    serializer.begin_list(105, pointer.extra_metadata_blocks.len());
+    for block_id in &pointer.extra_metadata_blocks {
+        serializer.list_write_varint(*block_id);
+    }
     serializer.end_list();
 }
 
 pub fn write_data_pointer(serializer: &mut BinarySerializer<'_>, pointer: &DataPointer) {
-    if pointer.row_start != 0 {
-        serializer.write_varint(100, pointer.row_start);
-    }
+    // DuckDB v7 storage no longer serializes `row_start` for DataPointer.
+    // C++ generated code calls `ReadDeletedProperty<uint64_t>(100, "row_start")`
+    // on deserialize, so writing field 100 here would diverge from on-disk format.
     serializer.write_varint(101, pointer.tuple_count);
     serializer.begin_object(102);
     serializer.write_signed_varint(100, pointer.block_id);
-    serializer.write_varint(101, pointer.offset as u64);
+    if pointer.offset != 0 {
+        serializer.write_varint(101, pointer.offset as u64);
+    }
     serializer.end_object();
     serializer.write_u8(103, compression_tag(pointer.compression_type));
     serializer.begin_object(104);

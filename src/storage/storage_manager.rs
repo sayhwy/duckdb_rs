@@ -954,6 +954,11 @@ impl StorageManager for SingleFileStorageManager {
             &block_options,
         );
         buffer_manager.set_block_manager(block_manager.clone());
+        let metadata_manager = Arc::new(super::metadata::MetadataManager::new(
+            block_manager.clone() as Arc<dyn BlockManager>,
+            buffer_manager.clone(),
+        ));
+        block_manager.set_metadata_manager(metadata_manager);
         block_manager.initialize()?;
         let block_manager: Arc<dyn BlockManager> = block_manager;
         *self.block_manager_inner.lock() = Some(block_manager);
@@ -1217,18 +1222,17 @@ impl StorageManager for SingleFileStorageManager {
             },
         );
         buffer_manager.set_block_manager(block_manager.clone());
-        block_manager.initialize()?;
-
         let metadata_manager = Arc::new(super::metadata::MetadataManager::new(
             block_manager.clone() as Arc<dyn BlockManager>,
-            buffer_manager,
+            buffer_manager.clone(),
         ));
         block_manager.set_metadata_manager(metadata_manager.clone());
+        block_manager.initialize()?;
 
         let table_infos = self.checkpoint_tables()?;
         let checkpoint_manager = crate::storage::checkpoint_manager::CheckpointManager::new(
             block_manager.clone() as Arc<dyn BlockManager>,
-            metadata_manager,
+            metadata_manager.clone(),
         );
         let mut has_wal = false;
         let new_header =

@@ -29,7 +29,8 @@ use crate::storage::buffer::{
 
 use super::checksum::checksum;
 use super::metadata::{
-    MetadataHandle, MetadataManager, WriteStream, free_list_block_writer::FreeListBlockWriter,
+    MetadataHandle, MetadataManager, ReadStream, WriteStream,
+    free_list_block_writer::FreeListBlockWriter,
 };
 use super::storage_info::{
     BLOCK_HEADER_SIZE, DEFAULT_BLOCK_ALLOC_SIZE, DEFAULT_BLOCK_HEADER_STORAGE_SIZE, DatabaseHeader,
@@ -74,17 +75,29 @@ impl BlockListState {
     }
 
     /// 对应 C++ GetFreeBlockIdInternal()
-    fn get_free_block_id(&mut self) -> BlockId {
+    fn get_free_block_id_internal(&mut self, newly_used: bool) -> BlockId {
         if let Some(&id) = self.free_list.iter().next() {
             self.free_list.remove(&id);
-            self.newly_used_blocks.insert(id);
+            if newly_used {
+                self.newly_used_blocks.insert(id);
+            }
             id
         } else {
             let id = self.max_block;
             self.max_block += 1;
-            self.newly_used_blocks.insert(id);
+            if newly_used {
+                self.newly_used_blocks.insert(id);
+            }
             id
         }
+    }
+
+    fn get_free_block_id(&mut self) -> BlockId {
+        self.get_free_block_id_internal(true)
+    }
+
+    fn get_free_block_id_for_checkpoint(&mut self) -> BlockId {
+        self.get_free_block_id_internal(false)
     }
 
     /// 对应 C++ MarkBlockAsModified()
@@ -354,67 +367,41 @@ impl SingleFileBlockManager {
             return Ok(());
         }
 
-        // free_list 字段存储的是打包的 MetaBlockPointer（idx_t）：
-        //   bits[63:56] = block_index（物理块内第几个 meta 子块，0..63）
-        //   bits[55:0]  = block_id（物理数据块编号）
-        // 对应 C++ MetaBlockPointer ptr(GetActiveHeader().free_list, 0)
-        let metadata_block_size = (self.block_alloc_size - self.block_header_size) / 64;
-        let mut sub_buf = vec![0u8; metadata_block_size];
-        let mut current_packed = active_free_list_packed as u64;
+        let metadata_manager = self
+            .metadata_manager
+            .get()
+            .expect("metadata manager must exist before loading free list");
+        let free_pointer = crate::storage::metadata::MetaBlockPointer {
+            block_pointer: active_free_list_packed as u64,
+            offset: 0,
+        };
+        let mut reader = crate::storage::metadata::MetadataReader::new(
+            metadata_manager,
+            free_pointer,
+            None,
+            crate::storage::metadata::BlockReaderType::RegisterBlocks,
+        );
 
-        let mut free_ids: Vec<i64> = Vec::new();
-        let mut total_count: Option<usize> = None;
-
-        loop {
-            // 解包 MetaBlockPointer
-            let block_id = current_packed & 0x00FFFFFFFFFFFFFF;
-            let block_index = (current_packed >> 56) as usize;
-
-            // 计算子块在文件中的偏移：
-            //   物理块起始 + 8字节块头 + block_index * metadata_block_size
-            // Blocks 0, 1, 2 are headers, so data blocks start at block 3
-            let block_file_offset = self.block_offset(block_id as BlockId);
-            let sub_block_offset = block_file_offset
-                + self.block_header_size as u64
-                + (block_index * metadata_block_size) as u64;
-
-            file.read_at(&mut sub_buf, sub_block_offset)?;
-
-            // 子块前 8 字节：下一个 MetaBlockPointer（i64 LE，-1 表示链表末尾）
-            let next_packed = i64::from_le_bytes(sub_buf[0..8].try_into().unwrap());
-            let data = &sub_buf[8..];
-
-            if total_count.is_none() {
-                // 首个子块：先读 count
-                let count = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
-                total_count = Some(count);
-                let avail = (metadata_block_size - 8 - 8) / 8;
-                for i in 0..count.min(avail) {
-                    let off = 8 + i * 8;
-                    let bid = i64::from_le_bytes(data[off..off + 8].try_into().unwrap());
-                    free_ids.push(bid);
-                }
-            } else {
-                // 续链子块：继续读 block_id
-                let remaining = total_count.unwrap().saturating_sub(free_ids.len());
-                let avail = (metadata_block_size - 8) / 8;
-                for i in 0..remaining.min(avail) {
-                    let off = i * 8;
-                    let bid = i64::from_le_bytes(data[off..off + 8].try_into().unwrap());
-                    free_ids.push(bid);
-                }
-            }
-
-            if next_packed == -1 || total_count.map_or(true, |c| free_ids.len() >= c) {
-                break;
-            }
-            current_packed = next_packed as u64;
+        let free_list_count = reader.read_u64() as usize;
+        let mut free_list = BTreeSet::new();
+        for _ in 0..free_list_count {
+            free_list.insert(reader.read_i64());
         }
+
+        let multi_use_count = reader.read_u64() as usize;
+        let mut multi_use_blocks = HashMap::new();
+        for _ in 0..multi_use_count {
+            let block_id = reader.read_i64();
+            let ref_count = reader.read_u32();
+            multi_use_blocks.insert(block_id, ref_count);
+        }
+
+        metadata_manager.read(&mut reader);
+        metadata_manager.mark_blocks_as_modified();
 
         let mut state = self.block_state.lock();
-        for bid in free_ids {
-            state.free_list.insert(bid);
-        }
+        state.free_list = free_list;
+        state.multi_use_blocks = multi_use_blocks;
         Ok(())
     }
 
@@ -462,6 +449,10 @@ impl SingleFileBlockManager {
 
     pub fn get_free_block_id(&self) -> BlockId {
         self.block_state.lock().get_free_block_id()
+    }
+
+    pub fn get_free_block_id_for_checkpoint_internal(&self) -> BlockId {
+        self.block_state.lock().get_free_block_id_for_checkpoint()
     }
 
     pub fn mark_block_as_modified(&self, block_id: BlockId) {
@@ -849,7 +840,7 @@ impl BlockManager for SingleFileBlockManager {
     }
 
     fn get_free_block_id_for_checkpoint(&self) -> BlockId {
-        self.get_free_block_id()
+        self.get_free_block_id_for_checkpoint_internal()
     }
 
     fn mark_block_as_modified(&self, block_id: BlockId) {
@@ -858,6 +849,11 @@ impl BlockManager for SingleFileBlockManager {
 
     fn block_count(&self) -> u64 {
         self.block_state.lock().max_block as u64
+    }
+
+    fn metadata_manager(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        self.get_metadata_manager()
+            .map(|manager| manager.clone() as Arc<dyn Any + Send + Sync>)
     }
 }
 

@@ -89,6 +89,8 @@ pub struct RowGroupPointer {
     pub tuple_count: Idx,
     pub deletes_pointers: Vec<MetaBlockPointer>,
     pub column_pointers: Vec<MetaBlockPointer>,
+    pub has_metadata_blocks: bool,
+    pub extra_metadata_blocks: Vec<Idx>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -125,6 +127,10 @@ pub struct RowGroup {
     /// Metadata pointers for the delete info of this row group.
     pub deletes_pointers: Vec<MetaBlockPointer>,
 
+    pub has_metadata_blocks: AtomicBool,
+
+    pub extra_metadata_blocks: Mutex<Vec<Idx>>,
+
     /// Whether the delete info has been loaded from disk.
     deletes_is_loaded: AtomicBool,
 
@@ -153,6 +159,8 @@ impl RowGroup {
             is_loaded: (0..col_count).map(|_| AtomicBool::new(false)).collect(),
             column_pointers: vec![MetaBlockPointer::INVALID; col_count],
             deletes_pointers: Vec::new(),
+            has_metadata_blocks: AtomicBool::new(false),
+            extra_metadata_blocks: Mutex::new(Vec::new()),
             deletes_is_loaded: AtomicBool::new(false),
             row_start,
             allocation_size: AtomicU64::new(0),
@@ -176,6 +184,8 @@ impl RowGroup {
             is_loaded: (0..col_count).map(|_| AtomicBool::new(false)).collect(),
             column_pointers: pointer.column_pointers,
             deletes_pointers: pointer.deletes_pointers,
+            has_metadata_blocks: AtomicBool::new(pointer.has_metadata_blocks),
+            extra_metadata_blocks: Mutex::new(pointer.extra_metadata_blocks),
             deletes_is_loaded: AtomicBool::new(false),
             row_start: pointer.row_start,
             allocation_size: AtomicU64::new(0),
@@ -206,6 +216,14 @@ impl RowGroup {
         self.has_changes.load(Ordering::Relaxed)
     }
 
+    pub fn has_metadata_blocks(&self) -> bool {
+        self.has_metadata_blocks.load(Ordering::Relaxed)
+    }
+
+    pub fn get_extra_metadata_blocks(&self) -> Vec<Idx> {
+        self.extra_metadata_blocks.lock().clone()
+    }
+
     pub fn allocation_size(&self) -> Idx {
         self.allocation_size.load(Ordering::Relaxed)
     }
@@ -234,7 +252,7 @@ impl RowGroup {
             &metadata_manager,
             pointer,
             None,
-            crate::storage::metadata::BlockReaderType::RegisterBlocks,
+            crate::storage::metadata::BlockReaderType::ExistingBlocks,
         );
         let mut de = BinaryMetadataDeserializer::new(&mut reader);
         let persistent_column = read_persistent_column_data(&mut de, &logical_type)
@@ -735,17 +753,13 @@ impl RowGroup {
             .states
             .resize_with(col_count, ColumnAppendState::default);
 
-        // Initialise each column's append cursor.
-        //
-        // `try_get_column` is used instead of `get_column` so that columns
-        // that have not yet been created/loaded (e.g. on a brand-new row
-        // group) leave their `ColumnAppendState` in the default state rather
-        // than triggering a `todo!()` panic in `load_column`.  When column
-        // creation is fully implemented they will always be present here.
+        // Mirrors DuckDB: `auto &col_data = GetColumn(i);`
+        // Appending to a lazy/unloaded row group must first materialize the
+        // column. Skipping unloaded columns corrupts the row-group count
+        // because `self.count` advances while column storage does not.
         for i in 0..col_count {
-            if let Some(col) = self.try_get_column(i) {
-                col.initialize_append(&mut state.states[i]);
-            }
+            let col = self.get_column(i);
+            col.initialize_append(&mut state.states[i]);
         }
     }
 
@@ -768,33 +782,32 @@ impl RowGroup {
         let col_count = self.get_column_count();
 
         for i in 0..col_count {
-            if let Some(col) = self.try_get_column(i) {
-                let prev_alloc = col.allocation_size();
-                // Convert the flat Vector to a UnifiedVectorFormat view.
-                // C++: chunk.data[i].ToUnifiedFormat(append_count, vdata)
-                // Per-column segment statistics, updated by append.
-                // C++: column.Append(*collection.GetStats().GetStats(i).lock(), ...)
-                let mut seg_stats = SegmentStatistics::new(chunk.data[i].logical_type.clone());
-                col.append(
-                    seg_stats.statistics_mut(),
-                    &mut state.states[i],
-                    &chunk.data[i],
-                    append_count,
-                );
+            let col = self.get_column(i);
+            let prev_alloc = col.allocation_size();
+            // Convert the flat Vector to a UnifiedVectorFormat view.
+            // C++: chunk.data[i].ToUnifiedFormat(append_count, vdata)
+            // Per-column segment statistics, updated by append.
+            // C++: column.Append(*collection.GetStats().GetStats(i).lock(), ...)
+            let mut seg_stats = SegmentStatistics::new(chunk.data[i].logical_type.clone());
+            col.append(
+                seg_stats.statistics_mut(),
+                &mut state.states[i],
+                &chunk.data[i],
+                append_count,
+            );
 
-                // Wire per-append SegmentStatistics into the collection-level TableStatistics.
-                // Mirrors C++: collection.GetStats().GetStats(i).lock() passed directly to Append.
-                if let Some(ref coll) = collection {
-                    use crate::storage::statistics::ColumnStatistics;
-                    coll.stats.with_stats_mut(i, |cs| {
-                        let col_stats = ColumnStatistics::new(seg_stats.statistics().clone());
-                        cs.merge(&col_stats);
-                    });
-                }
-
-                let delta = col.allocation_size().saturating_sub(prev_alloc);
-                self.allocation_size.fetch_add(delta, Ordering::Relaxed);
+            // Wire per-append SegmentStatistics into the collection-level TableStatistics.
+            // Mirrors C++: collection.GetStats().GetStats(i).lock() passed directly to Append.
+            if let Some(ref coll) = collection {
+                use crate::storage::statistics::ColumnStatistics;
+                coll.stats.with_stats_mut(i, |cs| {
+                    let col_stats = ColumnStatistics::new(seg_stats.statistics().clone());
+                    cs.merge(&col_stats);
+                });
             }
+
+            let delta = col.allocation_size().saturating_sub(prev_alloc);
+            self.allocation_size.fetch_add(delta, Ordering::Relaxed);
         }
 
         state.offset_in_row_group += append_count;
@@ -974,10 +987,18 @@ impl RowGroup {
     pub fn write_to_disk(&self, info: &RowGroupWriteInfo) -> RowGroupWriteData {
         let col_count = self.get_column_count();
 
-        // DuckDB only reuses existing metadata behind the experimental metadata
-        // reuse setting. This Rust port must not unconditionally carry over
-        // pre-existing column metadata pointers, because WAL-recovered row
-        // groups still need a fresh checkpoint serialization pass.
+        // Mirror DuckDB's unchanged-persistent fast path. Once a row group has
+        // already been checkpointed and has not been modified since, we must
+        // reuse its existing column metadata pointers. Re-serializing a lazy
+        // unloaded persistent row group would otherwise observe empty in-memory
+        // segment trees and write corrupt zero-pointer metadata back to disk.
+        if !self.has_changes() && self.is_persistent() {
+            return RowGroupWriteData {
+                result_row_group: self.make_shallow_copy(),
+                reuse_existing_metadata_blocks: true,
+                should_checkpoint: false,
+            };
+        }
 
         // Validate that caller provided one compression type per column.
         assert_eq!(
@@ -1013,6 +1034,8 @@ impl RowGroup {
             is_loaded,
             column_pointers: self.column_pointers.clone(),
             deletes_pointers: self.deletes_pointers.clone(),
+            has_metadata_blocks: AtomicBool::new(self.has_metadata_blocks()),
+            extra_metadata_blocks: Mutex::new(self.get_extra_metadata_blocks()),
             deletes_is_loaded: AtomicBool::new(self.deletes_is_loaded.load(Ordering::Relaxed)),
             row_start: self.row_start,
             allocation_size: AtomicU64::new(self.allocation_size()),
@@ -1083,6 +1106,8 @@ impl RowGroup {
             is_loaded,
             column_pointers: self.column_pointers.clone(),
             deletes_pointers: self.deletes_pointers.clone(),
+            has_metadata_blocks: AtomicBool::new(self.has_metadata_blocks()),
+            extra_metadata_blocks: Mutex::new(self.get_extra_metadata_blocks()),
             deletes_is_loaded: AtomicBool::new(self.deletes_is_loaded.load(Ordering::Relaxed)),
             row_start: self.row_start,
             allocation_size: AtomicU64::new(self.allocation_size()),
@@ -1109,6 +1134,8 @@ impl RowGroup {
                 is_loaded,
                 column_pointers: copied.column_pointers.clone(),
                 deletes_pointers: copied.deletes_pointers.clone(),
+                has_metadata_blocks: AtomicBool::new(copied.has_metadata_blocks()),
+                extra_metadata_blocks: Mutex::new(copied.get_extra_metadata_blocks()),
                 deletes_is_loaded: AtomicBool::new(
                     copied.deletes_is_loaded.load(Ordering::Relaxed),
                 ),

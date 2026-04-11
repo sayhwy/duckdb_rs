@@ -1876,7 +1876,7 @@ fn read_table_data(
         &metadata_manager,
         table_pointer,
         None,
-        BlockReaderType::RegisterBlocks,
+        BlockReaderType::ExistingBlocks,
     );
     let mut table_reader = TableDataReader::new(&mut reader, &mut bound, table_pointer);
     table_reader.read_table_data();
@@ -1889,10 +1889,15 @@ fn read_table_data(
 }
 
 fn new_table_io_manager(block_manager: Arc<dyn BlockManager>) -> Arc<dyn TableIOManager> {
-    let metadata_manager = Arc::new(MetadataManager::new(
-        block_manager.clone(),
-        block_manager.buffer_manager(),
-    ));
+    let metadata_manager = block_manager
+        .metadata_manager()
+        .and_then(|manager| Arc::downcast::<MetadataManager>(manager).ok())
+        .unwrap_or_else(|| {
+            Arc::new(MetadataManager::new(
+                block_manager.clone(),
+                block_manager.buffer_manager(),
+            ))
+        });
     SingleFileTableIOManager::new(block_manager, metadata_manager)
 }
 

@@ -138,6 +138,10 @@ impl<'mgr> MetadataWriter<'mgr> {
         }
     }
 
+    pub fn take_written_pointers(&mut self) -> Option<Vec<MetaBlockPointer>> {
+        self.written_pointers.take()
+    }
+
     /// 对应 C++ MetadataWriter::NextHandle()（可被子类覆盖）
     /// 默认实现：向 MetadataManager 申请新 handle。
     fn next_handle(&self) -> MetadataHandle {

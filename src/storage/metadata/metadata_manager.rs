@@ -398,11 +398,13 @@ impl MetadataManager {
                     entry.block = Some(new_block);
                 }
             } else {
-                // 已持久化块 → 直接写盘
-                handle.with_data(|data| {
-                    // TODO: 调用 block_manager.write_block(data, block_id)
-                    // 暂时通过 FileBuffer 间接写入（骨架阶段）
-                    let _ = data;
+                // 已持久化块 → 直接写回磁盘。
+                // 这一步必须与 DuckDB `MetadataManager::Flush` 保持一致：
+                // free list / metadata registry 会复用已有 metadata block，
+                // 如果这里不调用 `Write(FileBuffer&, block_id)`，磁盘上的
+                // metadata 注册表仍是旧内容，DuckDB C++ 重新打开后会缺块。
+                handle.with_file_buffer(|buffer| {
+                    self.block_manager.write_block(buffer, block_id);
                 });
             }
 

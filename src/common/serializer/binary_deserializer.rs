@@ -333,6 +333,8 @@ impl<'a> BinaryMetadataDeserializer<'a> {
                         tuple_count,
                         deletes_pointers,
                         column_pointers,
+                        has_metadata_blocks,
+                        extra_metadata_blocks,
                     });
                 }
                 other => {

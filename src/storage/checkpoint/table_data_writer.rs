@@ -1,6 +1,7 @@
 use crate::catalog::TableCatalogEntry;
 use crate::common::serializer::BinarySerializer;
 use crate::storage::metadata::{MetaBlockPointer, MetadataManager, MetadataWriter, WriteStream};
+use crate::storage::serialization::serialize_storage::write_row_group_pointer;
 use crate::storage::storage_manager::CheckpointOptions;
 use crate::storage::table::data_table_info::DataTableInfo;
 use crate::storage::table::row_group::RowGroupPointer;
@@ -144,32 +145,7 @@ impl<'writer, 'mgr> SingleFileTableDataWriter<'writer, 'mgr> {
             let mut serializer =
                 BinarySerializer::new(self.table_data_writer as &mut dyn WriteStream);
             serializer.begin_root_object();
-            serializer.write_varint(100, row_group_pointer.row_start);
-            serializer.write_varint(101, row_group_pointer.tuple_count);
-            serializer.begin_list(102, row_group_pointer.column_pointers.len());
-            for column_pointer in &row_group_pointer.column_pointers {
-                serializer.list_write_object(|s| {
-                    if column_pointer.block_pointer != 0 {
-                        s.write_varint(100, column_pointer.block_pointer);
-                    }
-                    if column_pointer.offset != 0 {
-                        s.write_varint(101, column_pointer.offset as u64);
-                    }
-                });
-            }
-            serializer.end_list();
-            serializer.begin_list(103, row_group_pointer.deletes_pointers.len());
-            for delete_pointer in &row_group_pointer.deletes_pointers {
-                serializer.list_write_object(|s| {
-                    if delete_pointer.block_pointer != 0 {
-                        s.write_varint(100, delete_pointer.block_pointer);
-                    }
-                    if delete_pointer.offset != 0 {
-                        s.write_varint(101, delete_pointer.offset as u64);
-                    }
-                });
-            }
-            serializer.end_list();
+            write_row_group_pointer(&mut serializer, row_group_pointer);
             serializer.end_object();
         }
         (pointer, total_rows)

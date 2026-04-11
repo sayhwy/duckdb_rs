@@ -469,6 +469,11 @@ impl RowGroupCollection {
             return Ok(());
         }
 
+        let is_persistent = source_segments
+            .last()
+            .map(|segment| segment.node().is_persistent())
+            .unwrap_or(false);
+
         // DuckDB appends after fully materializing the current segment tree.
         let tree = self.get_row_groups();
         let mut tree_lock = tree.lock();
@@ -495,6 +500,10 @@ impl RowGroupCollection {
 
         // Merge statistics
         self.stats.merge_stats(&source.stats);
+
+        if is_persistent {
+            self.set_append_requires_new_row_group();
+        }
 
         Ok(())
     }

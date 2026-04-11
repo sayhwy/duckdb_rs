@@ -15,6 +15,7 @@ use crate::storage::table::row_group::{RowGroupPointer, RowGroupWriteInfo};
 use crate::storage::table::segment_base::SegmentBase;
 use crate::storage::table::types::{CompressionType, Idx};
 use crate::storage::statistics::BaseStatistics;
+use std::collections::BTreeSet;
 
 /// Checkpoint 绠＄悊鍣?
 pub struct CheckpointManager {
@@ -121,7 +122,44 @@ impl CheckpointManager {
                     partial_block_manager: Arc::clone(&partial_block_manager),
                 };
                 let write_data = row_group.write_to_disk(&write_info);
-                let pointer = self.write_row_group(writer, &write_data.result_row_group);
+                let pointer = if write_data.reuse_existing_metadata_blocks {
+                    let mut pointer = RowGroupPointer {
+                        row_start: write_data.result_row_group.row_start(),
+                        tuple_count: write_data.result_row_group.count(),
+                        deletes_pointers: write_data.result_row_group.deletes_pointers.clone(),
+                        column_pointers: write_data.result_row_group.column_pointers.clone(),
+                        has_metadata_blocks: true,
+                        extra_metadata_blocks: if write_data
+                            .result_row_group
+                            .has_metadata_blocks()
+                        {
+                            write_data.result_row_group.get_extra_metadata_blocks()
+                        } else {
+                            Vec::new()
+                        },
+                    };
+                    if !write_data.result_row_group.has_metadata_blocks() {
+                        pointer.extra_metadata_blocks =
+                            self.compute_extra_metadata_blocks(&pointer.column_pointers);
+                    }
+                    let extra_metadata_pointers: Vec<MetaBlockPointer> = pointer
+                        .extra_metadata_blocks
+                        .iter()
+                        .map(|&block_pointer| MetaBlockPointer {
+                            block_pointer,
+                            offset: 0,
+                        })
+                        .collect();
+                    self.metadata_manager
+                        .clear_modified_blocks(&pointer.column_pointers);
+                    self.metadata_manager
+                        .clear_modified_blocks(&extra_metadata_pointers);
+                    self.metadata_manager
+                        .clear_modified_blocks(&pointer.deletes_pointers);
+                    pointer
+                } else {
+                    self.write_row_group(writer, &write_data.result_row_group)
+                };
                 row_group_pointers.push(pointer);
             }
             idx += 1;
@@ -157,11 +195,23 @@ impl CheckpointManager {
         writer: &mut MetadataWriter<'_>,
         row_group: &std::sync::Arc<crate::storage::table::row_group::RowGroup>,
     ) -> RowGroupPointer {
+        writer.set_written_pointers(Some(Vec::new()));
         let mut column_pointers = Vec::new();
         let col_count = row_group.get_column_count();
         for col_idx in 0..col_count {
             let column = row_group.get_column(col_idx);
             column_pointers.push(self.write_column(writer, &column));
+        }
+        let column_metadata = writer.take_written_pointers().unwrap_or_default();
+        let mut metadata_blocks = BTreeSet::new();
+        for pointer in &column_pointers {
+            metadata_blocks.insert(pointer.block_pointer);
+        }
+        let mut extra_metadata_blocks = Vec::new();
+        for pointer in column_metadata {
+            if metadata_blocks.insert(pointer.block_pointer) {
+                extra_metadata_blocks.push(pointer.block_pointer);
+            }
         }
 
         RowGroupPointer {
@@ -169,6 +219,8 @@ impl CheckpointManager {
             tuple_count: row_group.count(),
             deletes_pointers: Vec::new(),
             column_pointers,
+            has_metadata_blocks: true,
+            extra_metadata_blocks,
         }
     }
 
@@ -257,6 +309,43 @@ impl CheckpointManager {
         self.create_persistent_column_data(validity)
     }
 
+    fn compute_extra_metadata_blocks(&self, column_pointers: &[MetaBlockPointer]) -> Vec<Idx> {
+        if column_pointers.is_empty() {
+            return Vec::new();
+        }
+        let mut extra_blocks = BTreeSet::new();
+        let start_blocks: BTreeSet<u64> = column_pointers.iter().map(|ptr| ptr.block_pointer).collect();
+
+        for window in column_pointers.windows(2) {
+            let start = window[0];
+            let last = window[1];
+            let mut reader = crate::storage::metadata::MetadataReader::new(
+                &self.metadata_manager,
+                start,
+                None,
+                crate::storage::metadata::BlockReaderType::RegisterBlocks,
+            );
+            for ptr in reader.get_remaining_blocks(last) {
+                if !start_blocks.contains(&ptr.block_pointer) {
+                    extra_blocks.insert(ptr.block_pointer);
+                }
+            }
+        }
+
+        let mut reader = crate::storage::metadata::MetadataReader::new(
+            &self.metadata_manager,
+            *column_pointers.last().unwrap(),
+            None,
+            crate::storage::metadata::BlockReaderType::RegisterBlocks,
+        );
+        for ptr in reader.get_remaining_blocks(crate::storage::metadata::MetaBlockPointer::INVALID) {
+            if !start_blocks.contains(&ptr.block_pointer) {
+                extra_blocks.insert(ptr.block_pointer);
+            }
+        }
+
+        extra_blocks.into_iter().collect()
+    }
 }
 
 fn create_empty_validity_persistent_column(tuple_count: Idx) -> PersistentColumnData {
