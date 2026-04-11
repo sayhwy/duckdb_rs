@@ -1,0 +1,12 @@
+以下是完成任务的前提：
+* duckdb的源码路径：/Users/liang/Documents/code/duckdb
+* 始终假设 Rust 代码必须与 DuckDB 的 C++ 结构保持一致
+* 建议结构体/方法名时，以 DuckDB 源码命名为准
+* 讨论执行流程时，对应到 DuckDB 实际的调用链
+* 不建议任何偏离 DuckDB 架构的惯用 Rust 重写方式
+* 对 DuckDB 内部实现不确定时，明确说明，不猜测
+* 不考虑索引的实现，遇到索引的逻辑，请使用unimplement!
+* 当前Duckdb_rs目的是1:1复原Duckdb，不要自作主张，也不要work around，老老实实依照duckdb复刻逻辑
+
+
+任务：
