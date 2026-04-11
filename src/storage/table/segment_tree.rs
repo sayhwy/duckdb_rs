@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 
+use super::segment_base::SegmentBase;
 use super::segment_lock::SegmentLock;
 use super::types::Idx;
 
@@ -82,7 +83,12 @@ impl<T> SegmentNode<T> {
 ///
 /// The `load_fn` replaces the `SUPPORTS_LAZY_LOADING` + virtual `LoadSegment`
 /// mechanism: provide a closure that streams segments on demand.
-pub struct SegmentTree<T: Send + Sync> {
+pub struct LoadedSegment<T: Send + Sync> {
+    pub row_start: Idx,
+    pub segment: Arc<T>,
+}
+
+pub struct SegmentTree<T: SegmentBase + Send + Sync> {
     /// All loaded segment nodes, sorted by `row_start` (guarded by Mutex).
     /// This field IS the combined "nodes + node_lock" from C++.
     nodes: Mutex<Vec<SegmentNode<T>>>,
@@ -99,10 +105,10 @@ pub struct SegmentTree<T: Send + Sync> {
     ///
     /// Replaces `virtual shared_ptr<T> LoadSegment() const` + the
     /// `SUPPORTS_LAZY_LOADING` template parameter.
-    load_fn: Option<Box<dyn Fn() -> Option<Arc<T>> + Send + Sync>>,
+    load_fn: Option<Box<dyn Fn() -> Option<LoadedSegment<T>> + Send + Sync>>,
 }
 
-impl<T: Send + Sync> SegmentTree<T> {
+impl<T: SegmentBase + Send + Sync> SegmentTree<T> {
     // ── Constructors ─────────────────────────────────────────
 
     /// Creates an empty tree without lazy loading.
@@ -118,7 +124,7 @@ impl<T: Send + Sync> SegmentTree<T> {
     /// Creates a tree with a lazy segment loader.
     pub fn with_loader(
         base_row_id: Idx,
-        load_fn: impl Fn() -> Option<Arc<T>> + Send + Sync + 'static,
+        load_fn: impl Fn() -> Option<LoadedSegment<T>> + Send + Sync + 'static,
     ) -> Self {
         SegmentTree {
             nodes: Mutex::new(Vec::new()),
@@ -140,21 +146,30 @@ impl<T: Send + Sync> SegmentTree<T> {
 
     // ── Query ─────────────────────────────────────────────────
 
-    pub fn is_empty(&self, lock: &SegmentLock<'_, T>) -> bool {
+    pub fn is_empty(&self, lock: &mut SegmentLock<'_, T>) -> bool {
         self.get_root_segment(lock).is_none()
     }
 
     /// Returns a reference to the first (lowest row_start) segment node.
     ///
     /// May trigger a lazy-load call.
-    pub fn get_root_segment<'a>(&self, lock: &'a SegmentLock<'_, T>) -> Option<&'a SegmentNode<T>> {
+    pub fn get_root_segment<'a>(
+        &self,
+        lock: &'a mut SegmentLock<'_, T>,
+    ) -> Option<&'a SegmentNode<T>> {
+        if lock.0.is_empty() {
+            self.load_next_segment_inner(&mut lock.0);
+        }
         lock.0.first()
     }
 
     /// Returns the last (highest row_start) segment node.
     /// Triggers full lazy-load.
-    pub fn get_last_segment<'a>(&self, lock: &'a SegmentLock<'_, T>) -> Option<&'a SegmentNode<T>> {
-        self.load_all_segments_inner(&mut *self.nodes.lock());
+    pub fn get_last_segment<'a>(
+        &self,
+        lock: &'a mut SegmentLock<'_, T>,
+    ) -> Option<&'a SegmentNode<T>> {
+        self.load_all_segments_inner(&mut lock.0);
         lock.0.last()
     }
 
@@ -171,21 +186,19 @@ impl<T: Send + Sync> SegmentTree<T> {
     /// Returns the segment at the given Vec index (negative = from back).
     pub fn get_segment_by_index<'a>(
         &self,
-        lock: &'a SegmentLock<'_, T>,
+        lock: &'a mut SegmentLock<'_, T>,
         index: i64,
     ) -> Option<&'a SegmentNode<T>> {
-        let nodes = &*lock.0;
         if index < 0 {
-            self.load_all_segments_inner(&mut *self.nodes.lock());
-            let pos = nodes.len() as i64 + index;
+            self.load_all_segments_inner(&mut lock.0);
+            let pos = lock.0.len() as i64 + index;
             if pos < 0 {
                 return None;
             }
-            nodes.get(pos as usize)
+            lock.0.get(pos as usize)
         } else {
-            // lazy-load until we have enough segments
             while (index as usize) >= lock.0.len() {
-                if !self.load_next_segment_inner(&mut *self.nodes.lock()) {
+                if !self.load_next_segment_inner(&mut lock.0) {
                     break;
                 }
             }
@@ -196,14 +209,14 @@ impl<T: Send + Sync> SegmentTree<T> {
     /// Returns the segment immediately after `node`.
     pub fn get_next_segment<'a>(
         &self,
-        lock: &'a SegmentLock<'_, T>,
+        lock: &'a mut SegmentLock<'_, T>,
         node: &SegmentNode<T>,
     ) -> Option<&'a SegmentNode<T>> {
         let next_idx = node.index + 1;
         if next_idx < lock.0.len() {
             lock.0.get(next_idx)
         } else {
-            if self.load_next_segment_inner(&mut *self.nodes.lock()) {
+            if self.load_next_segment_inner(&mut lock.0) {
                 lock.0.get(next_idx)
             } else {
                 None
@@ -271,19 +284,9 @@ impl<T: Send + Sync> SegmentTree<T> {
             return false;
         }
         if let Some(ref f) = self.load_fn {
-            if let Some(seg) = f() {
-                let row_start = if nodes.is_empty() {
-                    self.base_row_id
-                } else {
-                    // T must expose its count somehow; here we use a sentinel
-                    // TODO: require T: SegmentBase and use .count()
-                    nodes
-                        .last()
-                        .map(|n| n.row_start)
-                        .unwrap_or(self.base_row_id)
-                };
+            if let Some(loaded) = f() {
                 let idx = nodes.len();
-                nodes.push(SegmentNode::new(row_start, seg, idx));
+                nodes.push(SegmentNode::new(loaded.row_start, loaded.segment, idx));
                 return true;
             }
         }

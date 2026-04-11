@@ -224,14 +224,14 @@ impl RowGroup {
         let Some(collection) = self.collection.upgrade() else {
             return;
         };
-        let Some(storage) = collection.info.persistent_storage() else {
-            return;
-        };
+        let io_manager = collection.info.get_io_manager();
+        let metadata_manager = io_manager.get_metadata_manager();
+        let block_manager = io_manager.get_block_manager_for_row_data();
         let logical_type = collection.types[col].clone();
         let pointer = self.column_pointers[col];
 
         let mut reader = crate::storage::metadata::MetadataReader::new(
-            &storage.metadata_manager,
+            &metadata_manager,
             pointer,
             None,
             crate::storage::metadata::BlockReaderType::RegisterBlocks,
@@ -247,7 +247,7 @@ impl RowGroup {
             super::column_data::ColumnDataType::MainTable,
             false,
         );
-        initialize_column_from_persistent(&column, &persistent_column, &logical_type, storage.as_ref());
+        initialize_column_from_persistent(&column, &persistent_column, &logical_type, &block_manager);
         self.columns.lock()[col] = Some(column);
         self.is_loaded[col].store(true, Ordering::Release);
     }
@@ -974,16 +974,10 @@ impl RowGroup {
     pub fn write_to_disk(&self, info: &RowGroupWriteInfo) -> RowGroupWriteData {
         let col_count = self.get_column_count();
 
-        // Fast path: no changes and already persistent — reuse existing metadata.
-        // Mirrors C++ `WriteToDisk(RowGroupWriter&)` early-out when
-        // `ExperimentalMetadataReuseSetting` is set and `!HasChanges()`.
-        if !self.has_changes() && self.is_persistent() {
-            return RowGroupWriteData {
-                result_row_group: self.make_shallow_copy(),
-                reuse_existing_metadata_blocks: true,
-                should_checkpoint: false,
-            };
-        }
+        // DuckDB only reuses existing metadata behind the experimental metadata
+        // reuse setting. This Rust port must not unconditionally carry over
+        // pre-existing column metadata pointers, because WAL-recovered row
+        // groups still need a fresh checkpoint serialization pass.
 
         // Validate that caller provided one compression type per column.
         assert_eq!(
@@ -1332,7 +1326,7 @@ fn initialize_column_from_persistent(
     column: &Arc<ColumnData>,
     persistent: &PersistentColumnData,
     logical_type: &LogicalType,
-    storage: &crate::storage::table::persistent_table_data::PersistentStorageRuntime,
+    block_manager: &Arc<dyn crate::storage::buffer::BlockManager>,
 ) {
     {
         let mut lock = column.base.data.lock();
@@ -1343,13 +1337,13 @@ fn initialize_column_from_persistent(
             if let Some(stats) = column.base.stats.as_ref() {
                 stats.lock().statistics_mut().merge(&pointer.statistics);
             }
-            let block_handle = storage.block_manager.register_block(pointer.block_id);
+            let block_handle = block_manager.register_block(pointer.block_id);
             let segment = ColumnSegment::create_persistent_with_handle(
                 logical_type.clone(),
                 pointer.block_id,
                 pointer.offset as Idx,
                 pointer.tuple_count,
-                storage.block_manager.get_block_size() as Idx,
+                block_manager.get_block_size() as Idx,
                 pointer.compression_type,
                 super::column_segment::SegmentStatistics::from_stats(pointer.statistics.clone()),
                 block_handle,
@@ -1370,7 +1364,7 @@ fn initialize_column_from_persistent(
                 validity,
                 validity_data,
                 &LogicalType::validity(),
-                storage,
+                block_manager,
             );
         }
         }
@@ -1382,12 +1376,12 @@ fn initialize_column_from_persistent(
                 &list.validity,
                 validity_data,
                 &LogicalType::validity(),
-                storage,
+                block_manager,
             );
             let child_type = logical_type
                 .get_child_type()
                 .expect("LIST logical type missing child type");
-            initialize_column_from_persistent(&list.child_column, child_data, child_type, storage);
+            initialize_column_from_persistent(&list.child_column, child_data, child_type, block_manager);
         }
         (
             ColumnKindData::Array(array),
@@ -1397,12 +1391,12 @@ fn initialize_column_from_persistent(
                 &array.validity,
                 validity_data,
                 &LogicalType::validity(),
-                storage,
+                block_manager,
             );
             let child_type = logical_type
                 .get_child_type()
                 .expect("ARRAY logical type missing child type");
-            initialize_column_from_persistent(&array.child_column, child_data, child_type, storage);
+            initialize_column_from_persistent(&array.child_column, child_data, child_type, block_manager);
             column
                 .base
                 .count
@@ -1416,14 +1410,14 @@ fn initialize_column_from_persistent(
                 &struct_data.validity,
                 &child_columns[0],
                 &LogicalType::validity(),
-                storage,
+                block_manager,
             );
             for (idx, child_column) in struct_data.sub_columns.iter().enumerate() {
                 if let Some(child_data) = child_columns.get(idx + 1) {
                     let child_type = logical_type
                         .get_struct_child_type(idx)
                         .expect("STRUCT logical type missing child type");
-                    initialize_column_from_persistent(child_column, child_data, child_type, storage);
+                    initialize_column_from_persistent(child_column, child_data, child_type, block_manager);
                 }
             }
             column

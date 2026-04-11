@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use crate::db::conn::ClientContext;
 use crate::storage::data_table::{ColumnDefinition, DataTable};
+use crate::storage::storage_manager::StorageManager;
 use crate::storage::table::column_checkpoint_state::PartialBlockManager;
 use crate::storage::table::data_table_info::DataTableInfo;
 use crate::storage::table::row_group::RowGroup;
@@ -376,9 +377,7 @@ impl OptimisticDataWriter {
 
     /// Check if storage is in-memory.
     fn is_in_memory(&self) -> bool {
-        // In a full implementation, check StorageManager::Get(table.GetAttached()).InMemory()
-        // For now, assume all storage is on-disk
-        false
+        self.context.db.storage_manager.in_memory()
     }
 
     /// Get compression type for a column.
@@ -389,12 +388,8 @@ impl OptimisticDataWriter {
     }
 
     fn create_partial_block_manager(&self) -> PartialBlockManager {
-        let runtime = self
-            .table
-            .info
-            .persistent_storage()
-            .expect("OptimisticDataWriter requires persistent storage runtime");
-        PartialBlockManager::new(runtime.block_manager.clone())
+        let block_manager = self.table.info.get_io_manager().get_block_manager_for_row_data();
+        PartialBlockManager::new(block_manager)
     }
 }
 

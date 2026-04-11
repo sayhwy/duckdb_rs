@@ -775,7 +775,9 @@ impl ColumnSegment {
         }
     }
 
-    fn get_compression_function(&self) -> &'static crate::function::compression_function::CompressionFunction {
+    pub(crate) fn get_compression_function(
+        &self,
+    ) -> &'static crate::function::compression_function::CompressionFunction {
         get_compression_function(self.compression, self.physical_type())
     }
 

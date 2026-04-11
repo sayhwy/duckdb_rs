@@ -22,19 +22,10 @@
 
 use super::table_statistics::TableStatistics;
 use super::types::{Idx, MetaBlockPointer};
-use crate::storage::buffer::BlockManager;
-use crate::storage::metadata::MetadataManager;
-use std::sync::Arc;
-
 use super::row_group::RowGroupPointer;
 
 // Re-export the canonical persistent data structs defined in column_data.rs.
 pub use super::column_data::{PersistentColumnData, PersistentRowGroupData};
-
-pub struct PersistentStorageRuntime {
-    pub block_manager: Arc<dyn BlockManager>,
-    pub metadata_manager: Arc<MetadataManager>,
-}
 
 // ─── PersistentTableData ──────────────────────────────────────────────────────
 
@@ -57,9 +48,6 @@ pub struct PersistentTableData {
 
     /// 已反序列化的 RowGroup 指针列表。
     pub row_group_pointers: Vec<RowGroupPointer>,
-
-    /// 打开真实 DuckDB 文件所需的运行时句柄。
-    pub runtime: Option<Arc<PersistentStorageRuntime>>,
 }
 
 impl PersistentTableData {
@@ -72,7 +60,6 @@ impl PersistentTableData {
             row_group_count: 0,
             block_pointer: MetaBlockPointer::default(),
             row_group_pointers: Vec::new(),
-            runtime: None,
         }
     }
 }

@@ -15,7 +15,7 @@
 //! | C++ | Rust |
 //! |-----|------|
 //! | `AttachedDatabase &db` | `db_id: u64` |
-//! | `shared_ptr<TableIOManager>` | `table_io_manager_id: u64` |
+//! | `shared_ptr<TableIOManager>` | `table_io_manager: Arc<dyn TableIOManager>` |
 //! | `TableIndexList indexes` | `indexes: TableIndexList` |
 //! | `StorageLock checkpoint_lock` | `checkpoint_lock: StorageLock` |
 //! | `optional_idx last_seen_checkpoint` | `Option<u64>` |
@@ -23,9 +23,9 @@
 
 use parking_lot::Mutex;
 
-use super::persistent_table_data::PersistentStorageRuntime;
 use super::table_index_list::TableIndexList;
 use crate::storage::storage_lock::{StorageLock, StorageLockKey};
+use crate::storage::table_io_manager::TableIOManager;
 use std::sync::Arc;
 
 // ─── IndexStorageInfo ──────────────────────────────────────────────────────────
@@ -52,8 +52,11 @@ pub struct DataTableInfo {
     /// 所属数据库 ID（C++: `AttachedDatabase &db`）。
     pub db_id: u64,
 
-    /// IO 管理器 ID（C++: `shared_ptr<TableIOManager> table_io_manager`）。
-    pub table_io_manager_id: u64,
+    /// 表的唯一 ID。
+    table_id: u64,
+
+    /// IO 管理器（C++: `shared_ptr<TableIOManager> table_io_manager`）。
+    table_io_manager: Arc<dyn TableIOManager>,
 
     /// 受 name_lock 保护的表名（C++: `mutex name_lock; string schema; string table`）。
     name: Mutex<TableName>,
@@ -69,23 +72,26 @@ pub struct DataTableInfo {
 
     /// 最后一次看到的 checkpoint ID（C++: `optional_idx last_seen_checkpoint`）。
     pub last_seen_checkpoint: Mutex<Option<u64>>,
-
-    /// 真实 DuckDB 文件读取所需的运行时句柄。
-    persistent_storage: Mutex<Option<Arc<PersistentStorageRuntime>>>,
 }
 
 impl DataTableInfo {
     /// 构造（C++: `DataTableInfo(AttachedDatabase&, shared_ptr<TableIOManager>, string, string)`）。
-    pub fn new(db_id: u64, table_io_manager_id: u64, schema: String, table: String) -> Self {
+    pub fn new(
+        db_id: u64,
+        table_id: u64,
+        table_io_manager: Arc<dyn TableIOManager>,
+        schema: String,
+        table: String,
+    ) -> Self {
         Self {
             db_id,
-            table_io_manager_id,
+            table_id,
+            table_io_manager,
             name: Mutex::new(TableName { schema, table }),
             indexes: TableIndexList::new(),
             index_storage_infos: Mutex::new(Vec::new()),
             checkpoint_lock: StorageLock::new(),
             last_seen_checkpoint: Mutex::new(None),
-            persistent_storage: Mutex::new(None),
         }
     }
 
@@ -119,12 +125,8 @@ impl DataTableInfo {
     }
 
     /// 返回此表的唯一数字 ID，供 `LocalStorage` 以 `table_id` 为键查找本地缓冲区。
-    ///
-    /// 临时方案：将 `db_id` 和 `table_io_manager_id` 组合成一个 `u64`。
-    /// 完整实现应使用 catalog 层分配的持久化 OID。
     pub fn table_id(&self) -> u64 {
-        // 高 32 位 = db_id，低 32 位 = table_io_manager_id
-        (self.db_id << 32) | (self.table_io_manager_id & 0xFFFF_FFFF)
+        self.table_id
     }
 
     /// 检查 checkpoint_id 是否为本表尚未见过的 checkpoint（C++: `IsUnseenCheckpoint()`）。
@@ -155,11 +157,7 @@ impl DataTableInfo {
             .collect()
     }
 
-    pub fn set_persistent_storage(&self, storage: Arc<PersistentStorageRuntime>) {
-        *self.persistent_storage.lock() = Some(storage);
-    }
-
-    pub fn persistent_storage(&self) -> Option<Arc<PersistentStorageRuntime>> {
-        self.persistent_storage.lock().clone()
+    pub fn get_io_manager(&self) -> Arc<dyn TableIOManager> {
+        self.table_io_manager.clone()
     }
 }

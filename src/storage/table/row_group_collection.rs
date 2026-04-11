@@ -24,22 +24,21 @@ use std::sync::{
 };
 
 use crate::common::errors::StorageResult;
+use crate::storage::buffer::BlockManager;
+use crate::storage::metadata::MetadataManager;
 use crate::storage::storage_info::StorageError;
 use super::append_state::TableAppendState;
 use super::column_data::{PersistentCollectionData, PersistentRowGroupData};
 use super::data_table_info::DataTableInfo;
 use super::persistent_table_data::PersistentTableData;
 use super::row_group::{RowGroup, RowGroupPointer, RowGroupWriteInfo};
+pub use super::row_group_segment_tree::RowGroupSegmentTree;
 use super::scan_state::{CollectionScanState, ParallelCollectionScanState, RowGroupSegmentRef};
 use super::segment_base::SegmentBase;
-use super::segment_tree::SegmentTree;
 use super::table_statistics::TableStatistics;
 use super::types::{Idx, LogicalType, MetaBlockPointer, RowId, TransactionData, TransactionId};
 use crate::common::types::DataChunk;
 use parking_lot::Mutex;
-
-/// Type alias for the row-group segment tree.
-pub type RowGroupSegmentTree = SegmentTree<RowGroup>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RowGroupCollection
@@ -114,16 +113,9 @@ impl RowGroupCollection {
 
     pub fn initialize_from_table_data(self: &Arc<Self>, data: &PersistentTableData) {
         self.total_rows.store(data.total_rows, Ordering::Relaxed);
-        let tree_guard = self.owned_row_groups.lock();
-        let tree = Arc::clone(&*tree_guard);
-        drop(tree_guard);
-        let mut seg_lock = tree.lock();
-        for pointer in &data.row_group_pointers {
-            let row_group =
-                RowGroup::from_pointer(Arc::downgrade(self), pointer.clone(), self.types.len());
-            tree.append_segment(&mut seg_lock, row_group, pointer.row_start);
-        }
-        drop(seg_lock);
+        let tree = Arc::new(RowGroupSegmentTree::with_lazy_loader(self, 0));
+        tree.initialize(data);
+        *self.owned_row_groups.lock() = tree;
         if data.table_stats.is_empty() {
             self.stats.initialize_empty(&self.types);
         } else {
@@ -148,6 +140,14 @@ impl RowGroupCollection {
         *self.requires_new_row_group.lock() = true;
     }
 
+    pub fn get_block_manager(&self) -> Arc<dyn BlockManager> {
+        self.info.get_io_manager().get_block_manager_for_row_data()
+    }
+
+    pub fn get_metadata_manager(&self) -> Arc<MetadataManager> {
+        self.info.get_io_manager().get_metadata_manager()
+    }
+
     // ── Row-group access ──────────────────────────────────────
 
     pub fn total_rows(&self) -> Idx {
@@ -163,17 +163,8 @@ impl RowGroupCollection {
         let tree_guard = self.owned_row_groups.lock();
         let tree = Arc::clone(&*tree_guard);
         drop(tree_guard);
-        let lock = tree.lock();
-        if index < 0 {
-            let pos = lock.0.len() as i64 + index;
-            if pos < 0 {
-                None
-            } else {
-                lock.0.get(pos as usize).map(|n| n.arc())
-            }
-        } else {
-            lock.0.get(index as usize).map(|n| n.arc())
-        }
+        let mut lock = tree.lock();
+        tree.get_segment_by_index(&mut lock, index).map(|n| n.arc())
     }
 
     // ── Scan ─────────────────────────────────────────────────
@@ -207,9 +198,9 @@ impl RowGroupCollection {
         drop(tree_guard);
         state.row_groups = Some(Arc::clone(&tree));
         let (root_arc, root_idx, base_row_id, root_row_start) = {
-            let lock = tree.lock();
+            let mut lock = tree.lock();
             let base = tree.base_row_id();
-            match tree.get_root_segment(&lock) {
+            match tree.get_root_segment(&mut lock) {
                 None => {
                     state.current_row_group = None;
                     // Empty collection.
@@ -280,7 +271,7 @@ impl RowGroupCollection {
         let (target, target_idx, row_group_start) = {
             let tree = self.get_row_groups();
             let mut lock = tree.lock();
-            let need_new_row_group = lock.0.is_empty() || *self.requires_new_row_group.lock();
+            let need_new_row_group = tree.is_empty(&mut lock) || *self.requires_new_row_group.lock();
             if need_new_row_group {
                 let start_row = self.total_rows();
                 let col_count = self.types.len();
@@ -288,9 +279,8 @@ impl RowGroupCollection {
                 tree.append_segment(&mut lock, rg, start_row);
                 *self.requires_new_row_group.lock() = false;
             }
-            let last = lock
-                .0
-                .last()
+            let last = tree
+                .get_last_segment(&mut lock)
                 .expect("row group collection should have a root row group");
             (last.arc(), last.index(), last.row_start())
         };
@@ -479,8 +469,10 @@ impl RowGroupCollection {
             return Ok(());
         }
 
-        // Calculate starting index for merged row groups
+        // DuckDB appends after fully materializing the current segment tree.
         let tree = self.get_row_groups();
+        let mut tree_lock = tree.lock();
+        let _ = tree.get_last_segment(&mut tree_lock);
         let start_index = self.total_rows();
 
         // Merge each row group
@@ -491,14 +483,7 @@ impl RowGroupCollection {
             let count = segment.node().count();
             let row_group = segment.node().shallow_copy_with_row_start(index);
 
-            // Append to our segment tree
-            {
-                let mut lock = tree.lock();
-                let new_index = lock.0.len();
-                lock.0.push(super::segment_tree::SegmentNode::new(
-                    index, row_group, new_index,
-                ));
-            }
+            tree.append_segment(&mut tree_lock, row_group, index);
 
             total_merged_rows += count;
             index += count;
@@ -539,19 +524,16 @@ impl RowGroupCollection {
         }
 
         let tree = self.get_row_groups();
-        let lock = tree.lock();
-        let Some((node_index, row_group_start, row_group_count, row_group)) =
-            lock.0.iter().enumerate().find_map(|(idx, node)| {
-                let start = node.row_start();
-                let end = start + node.node().count();
-                (start_row >= start && start_row < end)
-                    .then(|| (idx, start, node.node().count(), node.arc()))
-            })
+        let mut lock = tree.lock();
+        let Some(node) = tree.get_segment(&mut lock, start_row)
         else {
             state.current_row_group = None;
             state.max_row_group_row = 0;
             return;
         };
+        let node_index = node.index();
+        let row_group_start = node.row_start();
+        let row_group = node.arc();
         drop(lock);
 
         state.current_row_group = Some(RowGroupSegmentRef {
@@ -843,8 +825,8 @@ impl RowGroupCollection {
                 let idx = state.next_row_group_index;
                 state.next_row_group_index += 1;
                 let current_ref = {
-                    let lock = tree.lock();
-                    lock.0.get(idx as usize).map(|node| RowGroupSegmentRef {
+                    let mut lock = tree.lock();
+                    tree.get_segment_by_index(&mut lock, idx as i64).map(|node| RowGroupSegmentRef {
                         row_start: node.row_start(),
                         index: node.index(),
                         row_group: node.arc(),

@@ -213,11 +213,8 @@ impl ColumnDataBase {
     ///
     /// C++: `ColumnData::InitializeScan`.
     pub fn initialize_scan(&self, state: &mut ColumnScanState) {
-        // Access lock.0 directly to avoid re-entrant mutex deadlock:
-        // SegmentTree::get_root_segment tries self.nodes.lock() if empty,
-        // which would deadlock since we already hold the guard here.
-        let lock = self.data.lock();
-        let first = lock.0.first();
+        let mut lock = self.data.lock();
+        let first = self.data.get_root_segment(&mut lock);
         let row_start = first.map_or(0, |n| n.row_start());
         state.current_segment_index = first.map(|n| n.index());
         state.offset_in_column = row_start;
@@ -381,16 +378,20 @@ impl ColumnDataBase {
         while remaining > 0 {
             loop {
                 let advance = {
-                    let lock = self.data.lock();
+                    let mut lock = self.data.lock();
                     match state.current_segment_index {
                         None => None,
-                        Some(idx) if idx < lock.0.len() => {
-                            let node = &lock.0[idx];
+                        Some(idx) => {
+                            let Some(node) = self.data.get_segment_by_index(&mut lock, idx as i64) else {
+                                return initial_remaining - remaining;
+                            };
                             let segment_end = node.row_start() + node.node().count();
                             if state.offset_in_column >= segment_end {
                                 let next_idx = idx + 1;
-                                if next_idx < lock.0.len() {
-                                    Some((next_idx, lock.0[next_idx].row_start()))
+                                if let Some(next_node) =
+                                    self.data.get_segment_by_index(&mut lock, next_idx as i64)
+                                {
+                                    Some((next_node.index(), next_node.row_start()))
                                 } else {
                                     Some((usize::MAX, segment_end))
                                 }
@@ -398,7 +399,6 @@ impl ColumnDataBase {
                                 None
                             }
                         }
-                        _ => Some((usize::MAX, state.offset_in_column)),
                     }
                 };
 
@@ -426,12 +426,14 @@ impl ColumnDataBase {
             }
             if !state.initialized {
                 let (seg_arc, row_start) = {
-                    let lock = self.data.lock();
+                    let mut lock = self.data.lock();
                     let idx = match state.current_segment_index {
-                        Some(idx) if idx < lock.0.len() => idx,
-                        _ => break,
+                        Some(idx) => idx,
+                        None => break,
                     };
-                    let node = &lock.0[idx];
+                    let Some(node) = self.data.get_segment_by_index(&mut lock, idx as i64) else {
+                        break;
+                    };
                     (node.arc(), node.row_start())
                 };
                 state.segment_row_start = row_start;
@@ -441,14 +443,15 @@ impl ColumnDataBase {
             }
             // Clone Arc to avoid holding the tree lock during scan.
             let (seg_arc, current_start, current_count) = {
-                let lock = self.data.lock();
+                let mut lock = self.data.lock();
                 match state.current_segment_index {
                     None => break,
-                    Some(idx) if idx < lock.0.len() => {
-                        let node = &lock.0[idx];
+                    Some(idx) => {
+                        let Some(node) = self.data.get_segment_by_index(&mut lock, idx as i64) else {
+                            break;
+                        };
                         (node.arc(), node.row_start(), node.node().count())
                     }
-                    _ => break,
                 }
             };
 
@@ -473,18 +476,11 @@ impl ColumnDataBase {
             if remaining > 0 {
                 // Advance to the next segment.
                 let next = {
-                    let lock = self.data.lock();
+                    let mut lock = self.data.lock();
                     let curr_idx = state.current_segment_index.unwrap();
-                    let next_idx = curr_idx + 1;
-                    if next_idx < lock.0.len() {
-                        Some((
-                            lock.0[next_idx].index(),
-                            lock.0[next_idx].row_start(),
-                            lock.0[next_idx].arc(),
-                        ))
-                    } else {
-                        None
-                    }
+                    self.data
+                        .get_segment_by_index(&mut lock, (curr_idx + 1) as i64)
+                        .map(|node| (node.index(), node.row_start(), node.arc()))
                 };
 
                 match next {
@@ -522,24 +518,25 @@ impl ColumnDataBase {
 
         // If we've advanced past the current segment, find the new one.
         let needs_advance = {
-            let lock = self.data.lock();
+            let mut lock = self.data.lock();
             match state.current_segment_index {
                 None => false,
-                Some(idx) if idx < lock.0.len() => {
-                    let node = &lock.0[idx];
+                Some(idx) => {
+                    let Some(node) = self.data.get_segment_by_index(&mut lock, idx as i64) else {
+                        return;
+                    };
                     state.offset_in_column >= node.row_start() + node.node().count()
                 }
-                _ => false,
             }
         };
 
         if needs_advance {
-            let lock = self.data.lock();
+            let mut lock = self.data.lock();
             let curr_idx = state.current_segment_index.unwrap();
-            let next_idx = curr_idx + 1;
-            if next_idx < lock.0.len() {
-                state.current_segment_index = Some(next_idx);
-                state.segment_row_start = lock.0[next_idx].row_start();
+            if let Some(next_node) = self.data.get_segment_by_index(&mut lock, (curr_idx + 1) as i64)
+            {
+                state.current_segment_index = Some(next_node.index());
+                state.segment_row_start = next_node.row_start();
                 state.initialized = false; // will be re-initialised on next scan
             } else {
                 state.current_segment_index = None;
@@ -601,26 +598,35 @@ impl ColumnDataBase {
     ///
     /// C++: `ColumnData::InitializeAppend`.
     pub fn initialize_append(&self, state: &mut ColumnAppendState) {
-        // Use lock.0 directly to avoid re-entrant deadlock:
-        // SegmentTree::get_last_segment internally calls self.nodes.lock() again.
-        {
-            let lock = self.data.lock();
-            if lock.0.is_empty() {
-                drop(lock);
-                self.append_transient_segment(0);
-            } else {
-                let last = lock.0.last().unwrap();
-                let seg = last.node();
-                if seg.segment_type == ColumnSegmentType::Persistent {
-                    let total = last.row_start() + seg.count();
-                    drop(lock);
-                    self.append_transient_segment(total);
-                }
-                // else: existing transient segment is reusable
-            }
+        let mut lock = self.data.lock();
+        if self.data.is_empty(&mut lock) {
+            drop(lock);
+            self.append_transient_segment(0);
+            lock = self.data.lock();
         }
-        let lock = self.data.lock();
-        state.current_segment_index = lock.0.last().map(|n| n.index());
+
+        let mut current = self
+            .data
+            .get_last_segment(&mut lock)
+            .expect("column segment tree should have a last segment after initialise");
+        let last_segment = current.node();
+        if last_segment.segment_type == ColumnSegmentType::Persistent
+            || last_segment.get_compression_function().init_append.is_none()
+        {
+            let total_rows = current.row_start() + last_segment.count();
+            drop(lock);
+            self.append_transient_segment(total_rows);
+            lock = self.data.lock();
+            current = self
+                .data
+                .get_last_segment(&mut lock)
+                .expect("column segment tree should have a transient tail segment");
+        }
+
+        let append_segment = current.arc();
+        state.current_segment_index = Some(current.index());
+        drop(lock);
+        append_segment.initialize_append(state);
     }
 
     /// Append `append_count` values from `vdata` into the active segment chain.
@@ -780,7 +786,8 @@ impl ColumnDataBase {
     ///
     /// C++: `ColumnData::IsPersistent`.
     pub fn is_persistent(&self) -> bool {
-        let lock = self.data.lock();
+        let mut lock = self.data.lock();
+        let _ = self.data.get_last_segment(&mut lock);
         lock.0
             .iter()
             .all(|n| n.node().segment_type == ColumnSegmentType::Persistent)
@@ -790,7 +797,8 @@ impl ColumnDataBase {
     ///
     /// C++: `ColumnData::GetDataPointers`.
     pub fn get_data_pointers(&self) -> Vec<DataPointer> {
-        let lock = self.data.lock();
+        let mut lock = self.data.lock();
+        let _ = self.data.get_last_segment(&mut lock);
         let mut row_start = 0u64;
         lock.0
             .iter()
@@ -1127,7 +1135,10 @@ impl ColumnData {
             state.set_partial_block_manager(Arc::clone(&partial_block_manager));
         }
 
-        let has_own_segments = !self.base.data.lock().0.is_empty();
+        let has_own_segments = {
+            let mut lock = self.base.data.lock();
+            !self.base.data.is_empty(&mut lock)
+        };
         let has_children = self.has_checkpointable_children();
 
         if !has_own_segments && !has_children {

@@ -151,11 +151,7 @@ impl LocalTableStorage {
             .enumerate()
             .map(|(i, t)| ColumnDefinition::new(format!("col_{}", i), t.clone()))
             .collect();
-        let virtual_table =
-            DataTable::new(info.db_id, info.table_io_manager_id, "", "", col_defs, None);
-        if let Some(runtime) = info.persistent_storage() {
-            virtual_table.info.set_persistent_storage(runtime);
-        }
+        let virtual_table = DataTable::new(info.db_id, info.table_id(), info.get_io_manager(), "", "", col_defs, None);
 
         // C++: optimistic_writer(context, table)
         let mut optimistic_writer = OptimisticDataWriter::new(context, Arc::clone(&virtual_table));
@@ -243,15 +239,13 @@ impl LocalTableStorage {
             .collect();
         let new_virtual_table = DataTable::new(
             new_info.db_id,
-            new_info.table_io_manager_id,
+            new_info.table_id(),
+            new_info.get_io_manager(),
             "",
             "",
             col_defs,
             None,
         );
-        if let Some(runtime) = new_info.persistent_storage() {
-            new_virtual_table.info.set_persistent_storage(runtime);
-        }
 
         let optimistic_writer = OptimisticDataWriter::new_with_parent(
             Arc::clone(&new_virtual_table),
@@ -315,15 +309,13 @@ impl LocalTableStorage {
             .collect();
         let new_virtual_table = DataTable::new(
             new_info.db_id,
-            new_info.table_io_manager_id,
+            new_info.table_id(),
+            new_info.get_io_manager(),
             "",
             "",
             col_defs,
             None,
         );
-        if let Some(runtime) = new_info.persistent_storage() {
-            new_virtual_table.info.set_persistent_storage(runtime);
-        }
 
         let optimistic_writer = OptimisticDataWriter::new_with_parent(
             Arc::clone(&new_virtual_table),
@@ -379,15 +371,13 @@ impl LocalTableStorage {
             .collect();
         let new_virtual_table = DataTable::new(
             new_info.db_id,
-            new_info.table_io_manager_id,
+            new_info.table_id(),
+            new_info.get_io_manager(),
             "",
             "",
             col_defs,
             None,
         );
-        if let Some(runtime) = new_info.persistent_storage() {
-            new_virtual_table.info.set_persistent_storage(runtime);
-        }
 
         let optimistic_writer = OptimisticDataWriter::new_with_parent(
             Arc::clone(&new_virtual_table),

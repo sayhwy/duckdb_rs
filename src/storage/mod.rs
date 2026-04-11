@@ -19,6 +19,7 @@ pub mod storage_info;
 pub mod storage_lock;
 pub mod storage_manager;
 pub mod storage_options;
+pub mod table_io_manager;
 pub mod table;
 pub mod wal_replay;
 pub mod write_ahead_log;

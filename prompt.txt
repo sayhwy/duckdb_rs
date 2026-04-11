@@ -10,6 +10,4 @@
 
 
 任务：
-请先梳理duckdb中catalog的定义，ddl的事务流程，包括序列化元数据等，然后按照duckdb重构目前的catalog。
-最后完善engine/coon下的create_schema&create_table&drop_schema&drop_table的门面方法，内部还是走duckdb的那一套。请不要自建方法和文件，保持跟duckdb一致。
-事务已经有事务管理器了，不要再去定义这部分
+ 请修复/Users/liang/Documents/code/duckdb_rs/src/bin/test_million_student_nested.rs运行报错！

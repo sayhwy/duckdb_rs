@@ -49,6 +49,7 @@ use crate::storage::table::row_group_collection::RowGroupCollection;
 use crate::storage::table::scan_state::{ColumnFetchState, ParallelTableScanState, TableScanState};
 use crate::storage::table::segment_base::SegmentBase;
 use crate::storage::table::types::{Idx, RowId, TransactionData};
+use crate::storage::table_io_manager::TableIOManager;
 use crate::storage::write_ahead_log::WriteAheadLog;
 use crate::transaction::duck_transaction::DuckTransaction;
 use parking_lot::Mutex;
@@ -191,7 +192,8 @@ impl DataTable {
     /// 若 `data` 为 `None` 或 `row_group_count == 0`，则初始化为空表。
     pub fn new(
         db_id: u64,
-        table_io_manager_id: u64,
+        table_id: u64,
+        table_io_manager: Arc<dyn TableIOManager>,
         schema: impl Into<String>,
         table: impl Into<String>,
         column_definitions: Vec<ColumnDefinition>,
@@ -201,7 +203,8 @@ impl DataTable {
         let table = table.into();
         let info = Arc::new(DataTableInfo::new(
             db_id,
-            table_io_manager_id,
+            table_id,
+            table_io_manager,
             schema,
             table,
         ));
@@ -219,9 +222,6 @@ impl DataTable {
             version: AtomicU8::new(DataTableVersion::MainTable as u8),
         });
         if let Some(data) = data {
-            if let Some(runtime) = data.runtime.clone() {
-                table.info.set_persistent_storage(runtime);
-            }
             if data.row_group_count > 0 {
                 table.row_groups.initialize_from_table_data(&data);
                 if table.info.indexes.is_empty() {

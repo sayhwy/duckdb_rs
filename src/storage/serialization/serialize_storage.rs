@@ -39,7 +39,13 @@ pub fn write_row_group_pointer(serializer: &mut BinarySerializer<'_>, pointer: &
         serializer.list_write_object(|s| write_meta_block_pointer(s, column_pointer));
     }
     serializer.end_list();
-    serializer.begin_list(103, 0);
+    serializer.begin_list(103, pointer.deletes_pointers.len());
+    for delete_pointer in &pointer.deletes_pointers {
+        serializer.list_write_object(|s| write_meta_block_pointer(s, delete_pointer));
+    }
+    serializer.end_list();
+    serializer.write_bool(104, false);
+    serializer.begin_list(105, 0);
     serializer.end_list();
 }
 

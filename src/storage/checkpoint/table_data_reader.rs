@@ -1,10 +1,9 @@
 use crate::catalog::{BoundCreateTableInfo, CreateTableInfo, LogicalType as CatalogLogicalType, LogicalTypeId};
 use crate::common::serializer::{BinaryMetadataDeserializer, MESSAGE_TERMINATOR_FIELD_ID};
 use crate::storage::metadata::{BlockReaderType, MetaBlockPointer, MetadataReader, ReadStream};
-use crate::storage::table::persistent_table_data::{PersistentStorageRuntime, PersistentTableData};
+use crate::storage::table::persistent_table_data::PersistentTableData;
 use crate::storage::table::row_group::RowGroupPointer;
 use crate::storage::table::table_statistics::TableStatistics;
-use std::sync::Arc;
 
 pub struct TableDataReader<'a, 'mgr> {
     pub reader: &'a mut MetadataReader<'mgr>,
@@ -16,11 +15,9 @@ impl<'a, 'mgr> TableDataReader<'a, 'mgr> {
         reader: &'a mut MetadataReader<'mgr>,
         info: &'a mut BoundCreateTableInfo,
         table_pointer: MetaBlockPointer,
-        runtime: Option<Arc<PersistentStorageRuntime>>,
     ) -> Self {
         let mut data = PersistentTableData::new(info.base.columns.columns.len());
         data.base_table_pointer = table_pointer;
-        data.runtime = runtime;
         info.data = Some(Box::new(data));
         Self { reader, info }
     }
@@ -32,11 +29,6 @@ impl<'a, 'mgr> TableDataReader<'a, 'mgr> {
     }
 
     fn read_table_data_inner(&mut self) -> std::io::Result<()> {
-        let runtime = self
-            .info
-            .data
-            .as_ref()
-            .and_then(|persistent| persistent.runtime.as_ref().cloned());
         let data = self.info.data.as_mut().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -72,27 +64,17 @@ impl<'a, 'mgr> TableDataReader<'a, 'mgr> {
         data.row_group_count = u64::from_le_bytes(bytes);
         data.block_pointer = self.reader.get_meta_block_pointer();
         data.row_group_pointers.clear();
-
-        // 当前 Rust 实现还没有完整接入 DuckDB 的 RowGroupSegmentTree 懒加载器，
-        // 这里保持与 DuckDB 一致的 block_pointer 语义，同时在单独的 reader 上预读取
-        // row group pointers，避免破坏当前 scan 路径。
-        if data.row_group_count > 0 {
-            if let Some(ref runtime) = runtime {
-                data.row_group_pointers =
-                    read_row_group_pointers(&runtime, data.block_pointer, data.row_group_count)?;
-            }
-        }
         Ok(())
     }
 }
 
-fn read_row_group_pointers(
-    runtime: &Arc<PersistentStorageRuntime>,
+pub fn read_row_group_pointers(
+    metadata_manager: &crate::storage::metadata::MetadataManager,
     block_pointer: MetaBlockPointer,
     row_group_count: u64,
 ) -> std::io::Result<Vec<RowGroupPointer>> {
     let mut reader = MetadataReader::new(
-        &runtime.metadata_manager,
+        metadata_manager,
         block_pointer,
         None,
         BlockReaderType::RegisterBlocks,

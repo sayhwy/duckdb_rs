@@ -35,7 +35,10 @@ use crate::storage::storage_info::{
     MainHeader, StorageError, StorageManagerOptions,
 };
 use crate::storage::storage_manager::{SingleFileStorageManager, StorageManager, StorageOptions};
-use crate::storage::table::persistent_table_data::{PersistentStorageRuntime, PersistentTableData};
+use crate::storage::table::persistent_table_data::PersistentTableData;
+use crate::storage::table_io_manager::{
+    InMemoryTableIOManager, SingleFileTableIOManager, TableIOManager,
+};
 use crate::storage::wal_replay::{
     CatalogOps, DB_IDENTIFIER_LEN, ReplayIndexInfo, WalError, WalReplayer,
 };
@@ -62,7 +65,7 @@ impl DatabaseInstance {
 
         let transaction_manager = Arc::new(DuckTransactionManager::new());
 
-        let (catalog_entries, runtime) = if path == SingleFileStorageManager::IN_MEMORY_PATH {
+        let (catalog_entries, io_manager) = if path == SingleFileStorageManager::IN_MEMORY_PATH {
             (Vec::new(), None)
         } else {
             read_catalog_from_db(&path)?
@@ -71,7 +74,7 @@ impl DatabaseInstance {
         // 构建表映射：key = (schema, table)，均小写
         let mut tables = HashMap::new();
         for (idx, entry) in catalog_entries.iter().enumerate() {
-            let handle = build_table_handle(entry, idx as u64 + 1, runtime.clone());
+            let handle = build_table_handle(entry, idx as u64 + 1, io_manager.clone());
             tables.insert(
                 (normalize_name(&entry.schema), normalize_name(&entry.name)),
                 TableHandle {
@@ -209,18 +212,21 @@ impl DatabaseInstance {
         let table_id = tables.len() as u64 + 1;
         drop(tables);
 
-        let storage = DataTable::new(1, table_id, schema, table, storage_columns, None);
-        if self.path != SingleFileStorageManager::IN_MEMORY_PATH {
-            let block_manager = self.storage_manager.block_manager_arc();
-            let metadata_manager = Arc::new(MetadataManager::new(
-                block_manager.clone(),
-                block_manager.buffer_manager(),
-            ));
-            storage.info.set_persistent_storage(Arc::new(PersistentStorageRuntime {
-                block_manager,
-                metadata_manager,
-            }));
-        }
+        let table_io_manager: Arc<dyn TableIOManager> =
+            if self.path == SingleFileStorageManager::IN_MEMORY_PATH {
+                InMemoryTableIOManager::new()
+            } else {
+                new_table_io_manager(self.storage_manager.block_manager_arc())
+            };
+        let storage = DataTable::new(
+            1,
+            table_id,
+            table_io_manager,
+            schema,
+            table,
+            storage_columns,
+            None,
+        );
 
         let mut bound_info = BoundCreateTableInfo::new(create_info);
         bound_info.storage = Some(storage.clone());
@@ -1602,7 +1608,7 @@ fn read_main_and_active_headers(path: &str) -> StorageResult<(MainHeader, Databa
 fn build_table_handle(
     entry: &crate::storage::checkpoint::catalog_deserializer::CatalogEntry,
     table_id: u64,
-    runtime: Option<Arc<PersistentStorageRuntime>>,
+    table_io_manager: Option<Arc<dyn TableIOManager>>,
 ) -> TableHandle {
     let mut create_info = CreateTableInfo::new(entry.schema.clone(), entry.name.clone());
     let mut catalog_columns = ColumnList::new();
@@ -1623,16 +1629,18 @@ fn build_table_handle(
     let persistent_data = entry
         .table_pointer
         .and_then(|table_pointer| {
-            runtime
+            table_io_manager
                 .as_ref()
-                .map(|runtime| read_table_data(entry, table_pointer, runtime))
+                .map(|table_io_manager| read_table_data(entry, table_pointer, table_io_manager))
         })
         .transpose()
         .unwrap_or(None)
         .and_then(|data| data.map(Box::new));
+    let table_io_manager = table_io_manager.unwrap_or_else(|| InMemoryTableIOManager::new());
     let storage = DataTable::new(
         1,
         table_id,
+        table_io_manager,
         entry.schema.clone(),
         entry.name.clone(),
         storage_columns,
@@ -1787,7 +1795,7 @@ fn read_catalog_from_db(
     path: &str,
 ) -> StorageResult<(
     Vec<crate::storage::checkpoint::catalog_deserializer::CatalogEntry>,
-    Option<Arc<PersistentStorageRuntime>>,
+    Option<Arc<dyn TableIOManager>>,
 )> {
     let fs = Arc::new(LocalFileSystem);
     let header = read_active_header(&*fs, path)?;
@@ -1833,17 +1841,15 @@ fn read_catalog_from_db(
     );
     let entries = crate::storage::checkpoint::catalog_deserializer::read_catalog(&mut reader)
         .map_err(crate::storage::storage_info::StorageError::Io)?;
-    let runtime = Arc::new(PersistentStorageRuntime {
-        block_manager: block_manager as Arc<dyn BlockManager>,
-        metadata_manager,
-    });
-    Ok((entries, Some(runtime)))
+    let table_io_manager =
+        SingleFileTableIOManager::new(block_manager as Arc<dyn BlockManager>, metadata_manager);
+    Ok((entries, Some(table_io_manager)))
 }
 
 fn read_table_data(
     entry: &crate::storage::checkpoint::catalog_deserializer::CatalogEntry,
     table_pointer: crate::storage::metadata::MetaBlockPointer,
-    runtime: &Arc<PersistentStorageRuntime>,
+    table_io_manager: &Arc<dyn TableIOManager>,
 ) -> StorageResult<Option<PersistentTableData>> {
     // Check if table_pointer is valid before reading
     if !table_pointer.is_valid() {
@@ -1865,18 +1871,14 @@ fn read_table_data(
     }
     create_info.columns = cols;
     let mut bound = BoundCreateTableInfo::new(create_info);
+    let metadata_manager = table_io_manager.get_metadata_manager();
     let mut reader = MetadataReader::new(
-        &runtime.metadata_manager,
+        &metadata_manager,
         table_pointer,
         None,
         BlockReaderType::RegisterBlocks,
     );
-    let mut table_reader = TableDataReader::new(
-        &mut reader,
-        &mut bound,
-        table_pointer,
-        Some(runtime.clone()),
-    );
+    let mut table_reader = TableDataReader::new(&mut reader, &mut bound, table_pointer);
     table_reader.read_table_data();
     let mut data = match bound.data {
         Some(data) => *data,
@@ -1884,6 +1886,14 @@ fn read_table_data(
     };
     data.total_rows = entry.total_rows;
     Ok(Some(data))
+}
+
+fn new_table_io_manager(block_manager: Arc<dyn BlockManager>) -> Arc<dyn TableIOManager> {
+    let metadata_manager = Arc::new(MetadataManager::new(
+        block_manager.clone(),
+        block_manager.buffer_manager(),
+    ));
+    SingleFileTableIOManager::new(block_manager, metadata_manager)
 }
 
 fn read_active_header(fs: &dyn FileSystem, path: &str) -> StorageResult<DatabaseHeader> {

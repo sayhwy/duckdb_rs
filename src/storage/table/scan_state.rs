@@ -423,8 +423,8 @@ impl CollectionScanState {
             };
 
             let (rg_row_start, rg_count): (Idx, Idx) = {
-                let lock = tree.lock();
-                match lock.0.get(current.index) {
+                let mut lock = tree.lock();
+                match tree.get_segment_by_index(&mut lock, current.index as i64) {
                     None => return false,
                     Some(node) => (node.row_start(), node.node().count()),
                 }
@@ -443,17 +443,9 @@ impl CollectionScanState {
             let mut curr_idx = current.index;
             loop {
                 let next = {
-                    let lock = tree.lock();
-                    let next_idx = curr_idx + 1;
-                    if next_idx < lock.0.len() {
-                        Some((
-                            lock.0[next_idx].index(),
-                            lock.0[next_idx].row_start(),
-                            lock.0[next_idx].arc(),
-                        ))
-                    } else {
-                        None
-                    }
+                    let mut lock = tree.lock();
+                    tree.get_segment_by_index(&mut lock, (curr_idx + 1) as i64)
+                        .map(|node| (node.index(), node.row_start(), node.arc()))
                 };
 
                 match next {
