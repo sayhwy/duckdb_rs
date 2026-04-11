@@ -10,4 +10,3 @@
 
 
 任务：
- 请修复/Users/liang/Documents/code/duckdb_rs/src/bin/test_million_student_nested.rs运行报错！
