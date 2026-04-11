@@ -317,21 +317,23 @@ impl<T: Send + Sync> SegmentTree<T> {
         if nodes.is_empty() {
             return None;
         }
-        let (lo, mut hi) = (0usize, nodes.len() - 1);
+        let (mut lo, mut hi) = (0usize, nodes.len() - 1);
+        let mut result = None;
         while lo <= hi {
             let mid = (lo + hi) / 2;
             let n = &nodes[mid];
             if row_number < n.row_start {
                 if mid == 0 {
-                    return None;
+                    break;
                 }
                 hi = mid - 1;
             } else {
-                // TODO: compare with row_end once SegmentBase::count is available
-                // For now, return this index (conservative)
-                return Some(mid);
+                // SegmentTree 查找需要返回 `row_start <= row_number` 的最右节点，
+                // 这样跨 segment 边界时才会命中正确的后继 segment。
+                result = Some(mid);
+                lo = mid + 1;
             }
         }
-        None
+        result
     }
 }

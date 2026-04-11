@@ -118,15 +118,14 @@ fn logical_type_from_id(type_id: u32) -> LogicalType {
         29 => LogicalType::new(LogicalTypeId::USmallInt),
         30 => LogicalType::new(LogicalTypeId::UInteger),
         31 => LogicalType::new(LogicalTypeId::UBigInt),
-        34 => LogicalType::new(LogicalTypeId::Json),
-        36 => LogicalType::list(LogicalType::new(LogicalTypeId::Invalid)),
-        37 => LogicalType::struct_type(Vec::new()),
-        38 => LogicalType::new(LogicalTypeId::Map),
-        41 => LogicalType::new(LogicalTypeId::HugeInt),
-        43 => LogicalType::new(LogicalTypeId::Validity),
-        44 => LogicalType::new(LogicalTypeId::Uuid),
-        45 => LogicalType::new(LogicalTypeId::UHugeInt),
-        46 => LogicalType::array(LogicalType::new(LogicalTypeId::Invalid), 0),
+        49 => LogicalType::new(LogicalTypeId::UHugeInt),
+        50 => LogicalType::new(LogicalTypeId::HugeInt),
+        53 => LogicalType::new(LogicalTypeId::Validity),
+        54 => LogicalType::new(LogicalTypeId::Uuid),
+        100 => LogicalType::struct_type(Vec::new()),
+        101 => LogicalType::list(LogicalType::new(LogicalTypeId::Invalid)),
+        102 => LogicalType::new(LogicalTypeId::Map),
+        108 => LogicalType::array(LogicalType::new(LogicalTypeId::Invalid), 0),
         _ => LogicalType::new(LogicalTypeId::Invalid),
     }
 }
@@ -143,8 +142,8 @@ fn read_child_type_list(r: &mut BinaryDeserializer<'_>) -> io::Result<Vec<(Strin
                 break;
             }
             match fid {
-                100 => name = r.read_string()?,
-                101 => logical_type = read_logical_type(r)?,
+                0 => name = r.read_string()?,
+                1 => logical_type = read_logical_type(r)?,
                 _ => {
                     let _ = r.read_varint()?;
                 }

@@ -115,7 +115,10 @@ impl CheckpointManager {
         while let Some(row_group) = table.row_groups.get_row_group(idx) {
             if row_group.count() > 0 {
                 let write_info = RowGroupWriteInfo {
-                    compression_types: vec![CompressionType::Auto; row_group.get_column_count()],
+                    compression_types: vec![
+                        CompressionType::Uncompressed;
+                        row_group.get_column_count()
+                    ],
                     partial_block_manager: Arc::clone(&partial_block_manager),
                 };
                 let write_data = row_group.write_to_disk(&write_info);
@@ -124,7 +127,6 @@ impl CheckpointManager {
             }
             idx += 1;
         }
-
         // Step 2: Get table_pointer AFTER writing column data
         let table_pointer = writer.get_meta_block_pointer();
 
@@ -296,9 +298,9 @@ mod logical_type_tag {
     pub const DOUBLE: u8 = 23;
     pub const VARCHAR: u8 = 25;
     pub const BLOB: u8 = 26;
-    pub const LIST: u8 = 36;
-    pub const STRUCT: u8 = 37;
-    pub const ARRAY: u8 = 46;
+    pub const STRUCT: u8 = 100;
+    pub const LIST: u8 = 101;
+    pub const ARRAY: u8 = 108;
 }
 
 mod extra_type_info_tag {
@@ -387,7 +389,6 @@ fn write_table(
 ) {
     serializer.begin_nullable_object(100);
     write_create_table_info(serializer, entry);
-    serializer.end_object();
     serializer.end_nullable_object();
 
     if let Some(pointer) = table_pointer {
@@ -418,11 +419,13 @@ fn write_create_table_info(serializer: &mut BinarySerializer<'_>, entry: &TableC
 }
 
 fn write_column_list(serializer: &mut BinarySerializer<'_>, columns: &crate::catalog::ColumnList) {
+    serializer.begin_root_object();
     serializer.begin_list(100, columns.columns.len());
     for column in &columns.columns {
         serializer.list_write_object(|s| write_column_definition(s, column));
     }
     serializer.end_list();
+    serializer.end_object();
 }
 
 fn write_column_definition(serializer: &mut BinarySerializer<'_>, column: &ColumnDefinition) {
@@ -470,8 +473,8 @@ fn write_logical_type(serializer: &mut BinarySerializer<'_>, logical_type: &Logi
             serializer.begin_list(200, logical_type.children.len());
             for (name, child_type) in &logical_type.children {
                 serializer.list_write_object(|s| {
-                    s.write_string(100, name);
-                    s.write_field_id(101);
+                    s.write_string(0, name);
+                    s.write_field_id(1);
                     write_logical_type(s, child_type);
                 });
             }

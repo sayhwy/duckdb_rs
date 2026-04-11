@@ -32,7 +32,7 @@
 
 use crate::catalog::{PhysicalIndex, TableCatalogEntry};
 use crate::common::errors::StorageResult;
-use crate::common::types::{DataChunk, LogicalType, Vector};
+use crate::common::types::{DataChunk, LogicalType, LogicalTypeId, Vector};
 use crate::db::conn::ClientContext;
 use crate::planner::TableFilterSet;
 use crate::storage::local_storage::LocalStorage;
@@ -852,15 +852,7 @@ impl DataTable {
             if write_result.is_err() {
                 return;
             }
-            let types = self.get_types();
-            let mut flat_chunk = DataChunk::new();
-            flat_chunk.initialize(&types, chunk.size().max(1));
-            // Keep the scan output's vector semantics first, then flatten.
-            // `copy_to` only preserves raw flat bytes and can corrupt WAL payloads
-            // for dictionary/constant vectors produced by the scan path.
-            flat_chunk.reference(chunk);
-            flat_chunk.flatten();
-            let payload = serialize_insert_chunk_payload(&flat_chunk);
+            let payload = serialize_insert_chunk_payload(chunk);
             write_result = log.write_insert(&payload).map_err(StorageError::Io);
         });
         write_result?;
@@ -1440,11 +1432,143 @@ pub(crate) fn serialize_insert_chunk_payload(chunk: &DataChunk) -> Vec<u8> {
     out.extend_from_slice(&column_count.to_le_bytes());
 
     for column in &chunk.data {
-        let byte_len = (column.logical_type.physical_size() * chunk.size()) as u32;
-        out.extend_from_slice(&byte_len.to_le_bytes());
-        out.extend_from_slice(&column.raw_data()[..byte_len as usize]);
+        serialize_wal_vector(column, chunk.size(), &mut out);
     }
     out
+}
+
+fn serialize_wal_vector(vector: &Vector, count: usize, out: &mut Vec<u8>) {
+    serialize_wal_validity(vector, count, out);
+
+    match vector.logical_type.id {
+        LogicalTypeId::Varchar => {
+            for row_idx in 0..count {
+                let is_valid = vector.row_is_valid(row_idx);
+                let bytes = if is_valid {
+                    vector.read_varchar_bytes(row_idx)
+                } else {
+                    Vec::new()
+                };
+                out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                out.extend_from_slice(&bytes);
+            }
+        }
+        LogicalTypeId::Struct | LogicalTypeId::Variant => {
+            for child in vector.get_children() {
+                serialize_wal_vector(child, count, out);
+            }
+        }
+        LogicalTypeId::List => {
+            for row_idx in 0..count {
+                if !vector.row_is_valid(row_idx) {
+                    out.extend_from_slice(&0u32.to_le_bytes());
+                    out.extend_from_slice(&0u32.to_le_bytes());
+                    continue;
+                }
+                let source_row = vector.resolved_row_index(row_idx);
+                let base = source_row * 8;
+                out.extend_from_slice(&vector.raw_data()[base..base + 8]);
+            }
+            let child = vector
+                .get_child()
+                .expect("serialize_insert_chunk_payload: LIST child vector missing");
+            let list_size = compute_list_child_count(vector, count);
+            out.extend_from_slice(&(list_size as u64).to_le_bytes());
+            serialize_wal_vector(child, list_size, out);
+        }
+        LogicalTypeId::Array => {
+            let child = vector
+                .get_child()
+                .expect("serialize_insert_chunk_payload: ARRAY child vector missing");
+            let array_size = vector.logical_type.get_array_size();
+            serialize_wal_vector(child, count * array_size, out);
+        }
+        _ => {
+            serialize_wal_fixed_size(vector, count, out);
+        }
+    }
+}
+
+fn serialize_wal_fixed_size(vector: &Vector, count: usize, out: &mut Vec<u8>) {
+    let type_size = vector.logical_type.physical_size();
+    for row_idx in 0..count {
+        serialize_wal_fixed_size_row(vector, row_idx, type_size, out);
+    }
+}
+
+fn serialize_wal_fixed_size_row(vector: &Vector, row_idx: usize, type_size: usize, out: &mut Vec<u8>) {
+    match vector.get_vector_type() {
+        crate::common::types::VectorType::Sequence => {
+            let value = vector
+                .get_sequence()
+                .map(|(start, increment)| start + (row_idx as i64) * increment)
+                .expect("sequence vector missing parameters");
+            match type_size {
+                8 => out.extend_from_slice(&value.to_le_bytes()),
+                4 => out.extend_from_slice(&(value as i32).to_le_bytes()),
+                2 => out.extend_from_slice(&(value as i16).to_le_bytes()),
+                1 => out.push(value as u8),
+                _ => panic!(
+                    "serialize_insert_chunk_payload: unsupported sequence type size {}",
+                    type_size
+                ),
+            }
+        }
+        crate::common::types::VectorType::Dictionary => {
+            let child = vector
+                .get_child()
+                .expect("serialize_insert_chunk_payload: dictionary child vector missing");
+            let source_row = vector.resolved_row_index(row_idx);
+            serialize_wal_fixed_size_row(child, source_row, type_size, out);
+        }
+        _ => {
+            let source_row = vector.resolved_row_index(row_idx);
+            let source_offset = source_row * type_size;
+            let bytes = &vector.raw_data()[source_offset..source_offset + type_size];
+            out.extend_from_slice(bytes);
+        }
+    }
+}
+
+fn serialize_wal_validity(vector: &Vector, count: usize, out: &mut Vec<u8>) {
+    let has_validity = (0..count).any(|row_idx| !vector.row_is_valid(row_idx));
+    out.push(has_validity as u8);
+    if !has_validity {
+        return;
+    }
+
+    let byte_len = count.div_ceil(8);
+    out.extend_from_slice(&(byte_len as u32).to_le_bytes());
+    for byte_idx in 0..byte_len {
+        let mut byte = 0u8;
+        for bit in 0..8 {
+            let row_idx = byte_idx * 8 + bit;
+            if row_idx < count && vector.row_is_valid(row_idx) {
+                byte |= 1 << bit;
+            }
+        }
+        out.push(byte);
+    }
+}
+
+fn compute_list_child_count(vector: &Vector, count: usize) -> usize {
+    let mut max_end = 0usize;
+    for row_idx in 0..count {
+        if !vector.validity.row_is_valid(row_idx) {
+            continue;
+        }
+        let base = row_idx * 8;
+        let offset =
+            u32::from_le_bytes(vector.raw_data()[base..base + 4].try_into().expect("invalid list offset"))
+                as usize;
+        let len = u32::from_le_bytes(
+            vector.raw_data()[base + 4..base + 8]
+                .try_into()
+                .expect("invalid list length"),
+        ) as usize;
+        max_end = max_end.max(offset + len);
+    }
+    max_end
 }
 
 fn extract_row_ids(row_ids: &Vector, count: usize) -> StorageResult<Vec<RowId>> {

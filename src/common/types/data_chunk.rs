@@ -1082,6 +1082,17 @@ impl Vector {
         self.row_is_valid(row)
     }
 
+    fn read_list_entry_at(&self, row: usize) -> Option<(usize, usize)> {
+        let offset = row.checked_mul(8)?;
+        if offset + 8 > self.data.len() {
+            return None;
+        }
+        let child_offset =
+            u32::from_le_bytes(self.data[offset..offset + 4].try_into().ok()?) as usize;
+        let len = u32::from_le_bytes(self.data[offset + 4..offset + 8].try_into().ok()?) as usize;
+        Some((child_offset, len))
+    }
+
     fn format_value_at(&self, row: usize) -> String {
         if !self.row_is_valid_for_display(row) {
             return "NULL".to_string();
@@ -1150,6 +1161,44 @@ impl Vector {
                 format_date_days_display(days)
             }
             LogicalTypeId::Blob => format!("<blob:{} bytes>", self.read_varchar_bytes(row).len()),
+            LogicalTypeId::List => {
+                let Some(child) = self.get_child() else {
+                    return "<INVALID LIST>".to_string();
+                };
+                let Some((child_offset, len)) = self.read_list_entry_at(row) else {
+                    return "<INVALID LIST ENTRY>".to_string();
+                };
+                let values = (0..len)
+                    .map(|idx| child.format_value_at(child_offset + idx))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("[{}]", values)
+            }
+            LogicalTypeId::Array => {
+                let Some(child) = self.get_child() else {
+                    return "<INVALID ARRAY>".to_string();
+                };
+                let array_size = self.logical_type.get_array_size();
+                let child_offset = row * array_size;
+                let values = (0..array_size)
+                    .map(|idx| child.format_value_at(child_offset + idx))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("[{}]", values)
+            }
+            LogicalTypeId::Struct | LogicalTypeId::Variant => {
+                let fields = self.logical_type.get_struct_fields();
+                if fields.len() != self.struct_children.len() {
+                    return "<INVALID STRUCT>".to_string();
+                }
+                let values = fields
+                    .iter()
+                    .zip(self.struct_children.iter())
+                    .map(|((name, _), child)| format!("{}: {}", name, child.format_value_at(row)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{{}}}", values)
+            }
             _ => format!("<{}>", self.logical_type.name()),
         }
     }

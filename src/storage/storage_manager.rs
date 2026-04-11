@@ -1316,7 +1316,6 @@ impl StorageManager for SingleFileStorageManager {
             eprintln!("[WAL] initialize failed: {e}");
             return None;
         }
-
         let initial_wal_size = self.wal_size_atomic.load(Ordering::Relaxed);
         let initial_written = wal.total_written();
         Some(Box::new(SingleFileStorageCommitState::new(

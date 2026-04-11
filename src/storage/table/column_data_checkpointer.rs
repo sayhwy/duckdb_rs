@@ -303,7 +303,7 @@ impl ColumnDataCheckpointer {
     fn write_to_disk(&mut self) {
         let analyze_result = self.detect_best_compression_method();
         let compression_info = CompressionInfo::new(
-            DEFAULT_BLOCK_ALLOC_SIZE as Idx,
+            (DEFAULT_BLOCK_ALLOC_SIZE - DEFAULT_BLOCK_HEADER_SIZE) as Idx,
             DEFAULT_BLOCK_HEADER_SIZE as Idx,
         );
         let mut compression_states = Vec::with_capacity(analyze_result.len());
@@ -349,7 +349,7 @@ impl ColumnDataCheckpointer {
 
     fn init_analyze(&mut self) {
         let compression_info = CompressionInfo::new(
-            DEFAULT_BLOCK_ALLOC_SIZE as Idx,
+            (DEFAULT_BLOCK_ALLOC_SIZE - DEFAULT_BLOCK_HEADER_SIZE) as Idx,
             DEFAULT_BLOCK_HEADER_SIZE as Idx,
         );
         self.analyze_states.clear();

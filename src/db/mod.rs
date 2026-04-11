@@ -21,7 +21,7 @@ use crate::catalog::{
     LogicalType as CatalogLogicalType, TableCatalogEntry,
 };
 use crate::common::errors::{StorageResult, WalResult};
-use crate::common::types::{DataChunk, LogicalType, STANDARD_VECTOR_SIZE};
+use crate::common::types::{DataChunk, LogicalType, LogicalTypeId, Vector, STANDARD_VECTOR_SIZE};
 use crate::db::conn::{Connection, DatabaseInstance, TableHandle};
 use crate::storage::buffer::{BlockAllocator, BlockManager, BufferPool};
 use crate::storage::checkpoint::table_data_reader::{BoundCreateTableInfo, TableDataReader};
@@ -1043,28 +1043,8 @@ fn decode_insert_chunk_payload(payload: &[u8], types: &[LogicalType]) -> WalResu
     let mut chunk = DataChunk::new();
     chunk.initialize(types, row_count.max(1));
     let mut pos = 8usize;
-    for (column, ty) in chunk.data.iter_mut().zip(types.iter()) {
-        if pos + 4 > payload.len() {
-            return Err(WalError::Corrupt(
-                "insert payload missing column size".into(),
-            ));
-        }
-        let byte_len = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
-        let expected = ty.physical_size() * row_count;
-        if byte_len != expected {
-            return Err(WalError::Corrupt(format!(
-                "insert payload byte length {} does not match expected {} for {:?}",
-                byte_len, expected, ty.id
-            )));
-        }
-        if pos + byte_len > payload.len() {
-            return Err(WalError::Corrupt(
-                "insert payload column bytes truncated".into(),
-            ));
-        }
-        column.raw_data_mut()[..byte_len].copy_from_slice(&payload[pos..pos + byte_len]);
-        pos += byte_len;
+    for column in &mut chunk.data {
+        decode_wal_vector(payload, &mut pos, row_count, column)?;
     }
     if pos != payload.len() {
         return Err(WalError::Corrupt(
@@ -1073,6 +1053,121 @@ fn decode_insert_chunk_payload(payload: &[u8], types: &[LogicalType]) -> WalResu
     }
     chunk.set_cardinality(row_count);
     Ok(chunk)
+}
+
+fn decode_wal_vector(
+    payload: &[u8],
+    pos: &mut usize,
+    count: usize,
+    vector: &mut Vector,
+) -> WalResult<()> {
+    decode_wal_validity(payload, pos, count, vector)?;
+
+    match vector.logical_type.id {
+        LogicalTypeId::Varchar => {
+            for row_idx in 0..count {
+                if *pos + 4 > payload.len() {
+                    return Err(WalError::Corrupt("insert payload varchar length truncated".into()));
+                }
+                let len = u32::from_le_bytes(payload[*pos..*pos + 4].try_into().unwrap()) as usize;
+                *pos += 4;
+                if *pos + len > payload.len() {
+                    return Err(WalError::Corrupt("insert payload varchar bytes truncated".into()));
+                }
+                if vector.validity.row_is_valid(row_idx) {
+                    vector.write_varchar_bytes(row_idx, &payload[*pos..*pos + len]);
+                }
+                *pos += len;
+            }
+        }
+        LogicalTypeId::Struct | LogicalTypeId::Variant => {
+            for child in vector.get_children_mut() {
+                decode_wal_vector(payload, pos, count, child)?;
+            }
+        }
+        LogicalTypeId::List => {
+            let raw_len = count * vector.logical_type.physical_size();
+            if *pos + raw_len > payload.len() {
+                return Err(WalError::Corrupt("insert payload list entries truncated".into()));
+            }
+            vector.raw_data_mut()[..raw_len].copy_from_slice(&payload[*pos..*pos + raw_len]);
+            *pos += raw_len;
+
+            if *pos + 8 > payload.len() {
+                return Err(WalError::Corrupt("insert payload list child count truncated".into()));
+            }
+            let list_size =
+                u64::from_le_bytes(payload[*pos..*pos + 8].try_into().unwrap()) as usize;
+            *pos += 8;
+
+            let child_type = vector
+                .logical_type
+                .get_child_type()
+                .expect("LIST logical type missing child type")
+                .clone();
+            let mut child = Vector::with_capacity(child_type, list_size.max(1));
+            decode_wal_vector(payload, pos, list_size, &mut child)?;
+            vector.set_child(child);
+        }
+        LogicalTypeId::Array => {
+            let array_size = vector.logical_type.get_array_size();
+            let child_count = count * array_size;
+            let child_type = vector
+                .logical_type
+                .get_child_type()
+                .expect("ARRAY logical type missing child type")
+                .clone();
+            let mut child = Vector::with_capacity(child_type, child_count.max(1));
+            decode_wal_vector(payload, pos, child_count, &mut child)?;
+            vector.set_child(child);
+        }
+        _ => {
+            let raw_len = count * vector.logical_type.physical_size();
+            if *pos + raw_len > payload.len() {
+                return Err(WalError::Corrupt("insert payload fixed-size data truncated".into()));
+            }
+            vector.raw_data_mut()[..raw_len].copy_from_slice(&payload[*pos..*pos + raw_len]);
+            *pos += raw_len;
+        }
+    }
+    Ok(())
+}
+
+fn decode_wal_validity(
+    payload: &[u8],
+    pos: &mut usize,
+    count: usize,
+    vector: &mut Vector,
+) -> WalResult<()> {
+    if *pos >= payload.len() {
+        return Err(WalError::Corrupt("insert payload missing validity marker".into()));
+    }
+    let has_validity = payload[*pos] != 0;
+    *pos += 1;
+
+    vector.validity.reset(count.max(1));
+    if !has_validity {
+        return Ok(());
+    }
+
+    if *pos + 4 > payload.len() {
+        return Err(WalError::Corrupt("insert payload validity length truncated".into()));
+    }
+    let byte_len = u32::from_le_bytes(payload[*pos..*pos + 4].try_into().unwrap()) as usize;
+    *pos += 4;
+    if *pos + byte_len > payload.len() {
+        return Err(WalError::Corrupt("insert payload validity bytes truncated".into()));
+    }
+
+    for row_idx in 0..count {
+        let byte = payload[*pos + row_idx / 8];
+        let bit = (byte >> (row_idx % 8)) & 1;
+        if bit == 0 {
+            vector.validity.set_invalid(row_idx);
+        }
+    }
+    *pos += byte_len;
+    Ok(())
 }
 
 fn decode_delete_row_ids(payload: &[u8]) -> WalResult<Vec<i64>> {

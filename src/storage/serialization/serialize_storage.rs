@@ -2,6 +2,7 @@ use crate::common::serializer::BinarySerializer;
 use crate::common::types::LogicalTypeId;
 use crate::storage::data_table::ColumnDefinition;
 use crate::storage::metadata::{MetaBlockPointer, MetadataWriter, WriteStream};
+use crate::storage::statistics::BaseStatistics;
 use crate::storage::table::row_group::RowGroupPointer;
 use crate::storage::table::types::{CompressionType, DataPointer, Idx};
 
@@ -14,51 +15,19 @@ pub fn write_minimal_table_statistics(
     serializer.begin_list(100, columns.len());
     for column in columns {
         serializer.list_write_nullable_object(true, |s| {
-            s.write_field_id(100);
-            write_minimal_base_statistics(s, &column.logical_type, total_rows);
+            let mut stats = BaseStatistics::create_empty(column.logical_type.clone());
+            if total_rows > 0 {
+                stats.set_has_no_null();
+            }
+            stats.set_distinct_count(0);
+            s.begin_object(100);
+            stats.serialize_checkpoint(s);
             s.end_object();
+            s.write_nullable_field(101, false);
         });
     }
     serializer.end_list();
     serializer.write_nullable_field(101, false);
-    serializer.end_object();
-}
-
-fn write_minimal_base_statistics(
-    serializer: &mut BinarySerializer<'_>,
-    logical_type: &crate::common::types::LogicalType,
-    total_rows: Idx,
-) {
-    serializer.write_bool(100, false);
-    serializer.write_bool(101, total_rows > 0);
-    serializer.write_varint(102, 0);
-    serializer.begin_object(103);
-    match logical_type.id {
-        LogicalTypeId::Boolean
-        | LogicalTypeId::TinyInt
-        | LogicalTypeId::SmallInt
-        | LogicalTypeId::Integer
-        | LogicalTypeId::BigInt
-        | LogicalTypeId::Decimal
-        | LogicalTypeId::Float
-        | LogicalTypeId::Double
-        | LogicalTypeId::Date => {
-            serializer.begin_object(200);
-            serializer.write_bool(100, false);
-            serializer.end_object();
-            serializer.begin_object(201);
-            serializer.write_bool(100, false);
-            serializer.end_object();
-        }
-        LogicalTypeId::Varchar => {
-            serializer.write_bytes(200, &[0u8; 8]);
-            serializer.write_bytes(201, &[0xFFu8; 8]);
-            serializer.write_bool(202, false);
-            serializer.write_bool(203, true);
-            serializer.write_varint(204, 0);
-        }
-        _ => {}
-    }
     serializer.end_object();
 }
 

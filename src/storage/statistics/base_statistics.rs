@@ -99,6 +99,35 @@ pub struct BaseStatistics {
 }
 
 impl BaseStatistics {
+    fn default_child_stats(logical_type: &LogicalType) -> Vec<Box<BaseStatistics>> {
+        match logical_type.id {
+            LogicalTypeId::List => logical_type
+                .get_child_type()
+                .cloned()
+                .map(|child| Box::new(Self::create_empty(child)))
+                .into_iter()
+                .collect(),
+            LogicalTypeId::Array => logical_type
+                .get_child_type()
+                .cloned()
+                .map(|child| Box::new(Self::create_empty(child)))
+                .into_iter()
+                .collect(),
+            LogicalTypeId::Struct => logical_type
+                .get_struct_fields()
+                .iter()
+                .map(|(_, child)| Box::new(Self::create_empty(child.clone())))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn ensure_child_stats_initialized(&mut self) {
+        if self.child_stats.is_empty() {
+            self.child_stats = Self::default_child_stats(&self.logical_type);
+        }
+    }
+
     fn decimal_uses_smallint(logical_type: &LogicalType) -> bool {
         logical_type.id == LogicalTypeId::Decimal && logical_type.width <= 4
     }
@@ -357,19 +386,26 @@ impl BaseStatistics {
         serializer.write_varint(102, self.distinct_count);
         serializer.begin_object(103);
         match &self.stats_data {
-            StatsData::Numeric(data) => {
+            StatsData::Numeric(_data) => {
+                // DuckDB uses numeric zonemaps for row-group/segment pruning during scans.
+                // The current duckdb_rs checkpoint pipeline can persist incorrect min/max
+                // for compressed segments, which leads DuckDB to prune visible rows.
+                // Until the segment statistics production path matches DuckDB's
+                // ColumnCheckpointState/ColumnDataCheckpointer exactly, serialize the
+                // numeric stats shape with "not present" bounds so correctness wins
+                // over pruning.
                 Self::serialize_numeric_value(
                     serializer,
                     200,
-                    data.has_min,
-                    data.min,
+                    false,
+                    super::NumericValueUnion::default(),
                     &self.logical_type,
                 );
                 Self::serialize_numeric_value(
                     serializer,
                     201,
-                    data.has_max,
-                    data.max,
+                    false,
+                    super::NumericValueUnion::default(),
                     &self.logical_type,
                 );
             }
@@ -385,6 +421,44 @@ impl BaseStatistics {
             }
             StatsData::None => {}
         }
+        match self.get_stats_type() {
+            StatisticsType::ListStats | StatisticsType::ArrayStats => {
+                let child = self
+                    .child_stats
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        Box::new(
+                            self.logical_type
+                                .get_child_type()
+                                .cloned()
+                                .map(Self::create_empty)
+                                .unwrap_or_else(|| Self::create_empty(LogicalType::new_invalid())),
+                        )
+                    });
+                serializer.begin_object(200);
+                child.serialize_checkpoint(serializer);
+                serializer.end_object();
+            }
+            StatisticsType::StructStats => {
+                let default_children = Self::default_child_stats(&self.logical_type);
+                let child_count = self.logical_type.get_struct_child_count();
+                serializer.begin_list(200, child_count);
+                for idx in 0..child_count {
+                    serializer.list_write_object(|s| {
+                        if let Some(child) = self.child_stats.get(idx) {
+                            child.serialize_checkpoint(s);
+                        } else if let Some(child) = default_children.get(idx) {
+                            child.serialize_checkpoint(s);
+                        } else {
+                            Self::create_empty(LogicalType::new_invalid()).serialize_checkpoint(s);
+                        }
+                    });
+                }
+                serializer.end_list();
+            }
+            _ => {}
+        }
         serializer.end_object();
     }
 
@@ -393,12 +467,13 @@ impl BaseStatistics {
         logical_type: LogicalType,
     ) -> io::Result<Self> {
         let mut result = BaseStatistics::new(logical_type.clone());
+        result.ensure_child_stats_initialized();
         loop {
             match de.next_field()? {
                 100 => result.has_null = de.read_u8() != 0,
                 101 => result.has_no_null = de.read_u8() != 0,
                 102 => result.distinct_count = de.read_varint()?,
-                103 => result.stats_data = Self::deserialize_type_stats(de, &logical_type)?,
+                103 => Self::deserialize_type_stats(de, &logical_type, &mut result)?,
                 MESSAGE_TERMINATOR_FIELD_ID => return Ok(result),
                 other => {
                     return Err(io::Error::new(
@@ -475,7 +550,8 @@ impl BaseStatistics {
     fn deserialize_type_stats(
         de: &mut BinaryMetadataDeserializer<'_>,
         logical_type: &LogicalType,
-    ) -> io::Result<StatsData> {
+        result_stats: &mut BaseStatistics,
+    ) -> io::Result<()> {
         let mut result = match Self::get_stats_type_from_logical(logical_type) {
             StatisticsType::NumericStats => StatsData::Numeric(Default::default()),
             StatisticsType::StringStats => StatsData::String(Default::default()),
@@ -533,7 +609,44 @@ impl BaseStatistics {
                         };
                     }
                 }
-                MESSAGE_TERMINATOR_FIELD_ID => return Ok(result),
+                200 if matches!(
+                    Self::get_stats_type_from_logical(logical_type),
+                    StatisticsType::ListStats | StatisticsType::ArrayStats
+                ) => {
+                    let child_type = logical_type
+                        .get_child_type()
+                        .cloned()
+                        .unwrap_or_else(LogicalType::new_invalid);
+                    let child_stats = Self::deserialize_checkpoint(de, child_type)?;
+                    result_stats.ensure_child_stats_initialized();
+                    if let Some(slot) = result_stats.child_stats.get_mut(0) {
+                        **slot = child_stats;
+                    }
+                }
+                200 if matches!(
+                    Self::get_stats_type_from_logical(logical_type),
+                    StatisticsType::StructStats
+                ) => {
+                    let child_types = logical_type.get_struct_fields();
+                    let count = de.read_list_len()?;
+                    result_stats.ensure_child_stats_initialized();
+                    for idx in 0..count {
+                        let child_type = child_types
+                            .get(idx)
+                            .map(|(_, child)| child.clone())
+                            .unwrap_or_else(LogicalType::new_invalid);
+                        let child_stats = Self::deserialize_checkpoint(de, child_type)?;
+                        if let Some(slot) = result_stats.child_stats.get_mut(idx) {
+                            **slot = child_stats;
+                        } else {
+                            result_stats.child_stats.push(Box::new(child_stats));
+                        }
+                    }
+                }
+                MESSAGE_TERMINATOR_FIELD_ID => {
+                    result_stats.stats_data = result;
+                    return Ok(());
+                }
                 other => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
