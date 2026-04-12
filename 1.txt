@@ -1,5 +1,0 @@
-核心改动有三处。第一，启动恢复现在会在 replay WAL 后立即做一次 checkpoint，并清理旧的 wal/checkpoint.wal，避免数据库重启后继续依赖旧 WAL，见 src/db/mod.rs:1008。
-第
-  二，事务提交时不再从已提交表/本地集合反扫 append 来写 WAL，而是在 append 当下缓存原始 chunk 的 WAL payload，提交时直接按原顺序写入 WAL，避免之前只把最后一个 chunk
-  写进去的问题，见 src/storage/local_storage.rs:111、src/storage/local_storage.rs:984、src/storage/local_storage.rs:1201、src/transaction/duck_transaction.rs:695。第
-  三，WAL replay 期间会禁止再次生成 commit WAL，避免恢复过程把同一批数据重新写回 WAL，见 src/storage/storage_manager.rs:1281。
